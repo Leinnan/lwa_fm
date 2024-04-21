@@ -1,7 +1,7 @@
-use crate::consts::{HOMEPAGE, VERSION, VERTICAL_SPACING};
+use crate::consts::*;
 use egui::Layout;
 use egui_extras::{Column, TableBuilder};
-use std::{fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
@@ -56,23 +56,15 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("top_panel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
-                // The top panel is often a good place for a menu bar:
-
-                egui::menu::bar(ui, |ui| {
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Quit").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.add_space(16.0);
-                });
+                ui.add_space(TOP_SIDE_MARGIN);
+                ui.heading(format!(" {}", &self.cur_path.display()));
+                ui.add_space(TOP_SIDE_MARGIN);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
             let ss = fs::read_dir(&self.cur_path);
-            ui.heading(format!("Listing: {}", &self.cur_path.display()));
             if let Some(parent) = self.cur_path.parent() {
                 if ui.button("Go Up").clicked() {
                     self.cur_path = parent.into();
@@ -86,8 +78,6 @@ impl eframe::App for App {
                     .striped(true)
                     .vscroll(false)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::auto())
-                    .column(Column::auto())
                     .column(Column::remainder().at_least(260.0))
                     .resizable(false);
                 table.body(|body| {
@@ -97,22 +87,17 @@ impl eframe::App for App {
                         if let Ok(val) = val {
                             let meta = val.metadata().unwrap();
                             row.col(|ui| {
-                                if meta.is_dir() && ui.button("GOTO").clicked() {
-                                    self.cur_path = val.path();
-                                    return;
-                                }
-                            });
-                            row.col(|ui| {
-                                if meta.is_file() && ui.button("Open").clicked() {
-                                    let _ = Command::new("explorer.exe")
-                                        .args([format!("{}", val.path().display())])
-                                        .output();
-                                    return;
-                                }
-                            });
-                            row.col(|ui| {
                                 ui.add_space(VERTICAL_SPACING);
-                                ui.label(format!("{}", val.path().display()));
+                                if ui
+                                    .button(val.file_name().to_str().unwrap().to_string())
+                                    .clicked()
+                                {
+                                    if meta.is_file() {
+                                        let _ = open::that_detached(val.path());
+                                    } else {
+                                        self.cur_path = val.path();
+                                    }
+                                }
                             });
                         }
                     });

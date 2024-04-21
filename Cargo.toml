@@ -20,6 +20,7 @@ eframe = { version = "0.27.0", default-features = false, features = [
 ] }
 egui = "0.27"
 egui_extras = "0.27"
+open = "5.1.2"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
