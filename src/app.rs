@@ -69,24 +69,24 @@ impl eframe::App for App {
             // The central panel the region left after adding TopPanel's and SidePanel's
             ui.heading("eframe template");
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
-            let cur_dir = "C:/";
+            let cur_dir = std::env::current_dir().unwrap();
             let ss = fs::read_dir(cur_dir);
             if let Ok(readed_dir) = ss {
-                let dir_entries : Vec<Result<fs::DirEntry, std::io::Error>> = readed_dir.into_iter().collect();
+                let dir_entries: Vec<Result<fs::DirEntry, std::io::Error>> =
+                    readed_dir.into_iter().collect();
                 let table = TableBuilder::new(ui)
                     .striped(true)
                     .vscroll(false)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                     .column(Column::remainder().at_least(260.0))
                     .resizable(false);
-                table.body(|body|{
-                    body.rows(text_height, dir_entries.len(), |mut row|{
+                table.body(|body| {
+                    body.rows(text_height, dir_entries.len(), |mut row| {
                         let val = (&dir_entries)[row.index()].as_ref();
                         if let Ok(val) = val {
-                            row.col(|ui|{
+                            row.col(|ui| {
                                 ui.add_space(VERTICAL_SPACING);
-                                ui.label(format!("{}",val.path().display()));
-                                
+                                ui.label(format!("{}", val.path().display()));
                             });
                         }
                     });
