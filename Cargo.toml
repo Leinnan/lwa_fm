@@ -1,0 +1,25 @@
+[package]
+name = "lwa_fm"
+edition = "2021"
+homepage = "https://github.com/Leinnan/lwa_fm"
+
+[profile.release]
+opt-level = 2 # fast and small wasm
+
+# Optimize all dependencies even in debug builds:
+[profile.dev.package."*"]
+opt-level = 2
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+eframe = { version = "0.27.0", default-features = false, features = [
+    "accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
+    "default_fonts", # Embed the default egui fonts.
+    "glow",          # Use the glow rendering backend. Alternative: "wgpu".
+    "persistence",   # Enable restoring app state when restarting the app.
+] }
+egui = "0.27"
+egui_extras = "0.27"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
