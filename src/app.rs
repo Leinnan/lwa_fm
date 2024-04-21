@@ -1,7 +1,7 @@
 use crate::consts::{HOMEPAGE, VERSION, VERTICAL_SPACING};
 use egui::Layout;
 use egui_extras::{Column, TableBuilder};
-use std::fs;
+use std::{fs, path::PathBuf, process::Command};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
@@ -11,6 +11,8 @@ pub struct App {
 
     #[serde(skip)] // This how you opt-out of serialization of a field
     value: f32,
+    #[serde(skip)]
+    cur_path: PathBuf,
 }
 
 impl Default for App {
@@ -19,6 +21,7 @@ impl Default for App {
             // Example stuff:
             label: "Hello World!".to_owned(),
             value: 2.7,
+            cur_path: get_starting_path(),
         }
     }
 }
@@ -67,10 +70,15 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
-            ui.heading("eframe template");
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
-            let cur_dir = std::env::current_dir().unwrap();
-            let ss = fs::read_dir(cur_dir);
+            let ss = fs::read_dir(&self.cur_path);
+            ui.heading(format!("Listing: {}", &self.cur_path.display()));
+            if let Some(parent) = self.cur_path.parent() {
+                if ui.button("Go Up").clicked() {
+                    self.cur_path = parent.into();
+                    return;
+                }
+            }
             if let Ok(readed_dir) = ss {
                 let dir_entries: Vec<Result<fs::DirEntry, std::io::Error>> =
                     readed_dir.into_iter().collect();
@@ -78,12 +86,30 @@ impl eframe::App for App {
                     .striped(true)
                     .vscroll(false)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .column(Column::auto())
+                    .column(Column::auto())
                     .column(Column::remainder().at_least(260.0))
                     .resizable(false);
                 table.body(|body| {
                     body.rows(text_height, dir_entries.len(), |mut row| {
                         let val = (&dir_entries)[row.index()].as_ref();
+
                         if let Ok(val) = val {
+                            let meta = val.metadata().unwrap();
+                            row.col(|ui| {
+                                if meta.is_dir() && ui.button("GOTO").clicked() {
+                                    self.cur_path = val.path();
+                                    return;
+                                }
+                            });
+                            row.col(|ui| {
+                                if meta.is_file() && ui.button("Open").clicked() {
+                                    let _ = Command::new("explorer.exe")
+                                        .args([format!("{}", val.path().display())])
+                                        .output();
+                                    return;
+                                }
+                            });
                             row.col(|ui| {
                                 ui.add_space(VERTICAL_SPACING);
                                 ui.label(format!("{}", val.path().display()));
@@ -146,4 +172,12 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 
     // Tell egui to use these fonts:
     ctx.set_fonts(fonts);
+}
+
+fn get_starting_path() -> PathBuf {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        return PathBuf::from(args[1].clone());
+    }
+    std::env::current_dir().unwrap()
 }
