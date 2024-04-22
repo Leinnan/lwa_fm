@@ -8,6 +8,7 @@ mod consts;
 mod win_utils;
 
 fn main() -> eframe::Result<()> {
+    #[cfg(target_os = "windows")]
     win_utils::print_recent();
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

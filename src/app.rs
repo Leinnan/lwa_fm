@@ -1,14 +1,17 @@
 use crate::consts::*;
 use egui::{Layout, RichText};
 use egui_extras::{Column, TableBuilder};
-use std::{fs, path::PathBuf};
+use std::{
+    fs::{self},
+    path::PathBuf,
+};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
     // Example stuff:
     label: String,
-
+    show_hidden: bool,
     #[serde(skip)] // This how you opt-out of serialization of a field
     value: f32,
     #[serde(skip)]
@@ -24,6 +27,7 @@ impl Default for App {
         Self {
             // Example stuff:
             label: "Hello World!".to_owned(),
+            show_hidden: false,
             value: 2.7,
             cur_path: get_starting_path(),
             drives,
@@ -44,6 +48,38 @@ impl App {
         }
 
         Default::default()
+    }
+}
+
+impl App {
+    fn get_current_list(&self, readed_dir: std::fs::ReadDir) -> Vec<std::fs::DirEntry> {
+        let mut dir_entries: Vec<fs::DirEntry> = readed_dir
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                if self.show_hidden {
+                    return true;
+                }
+                let Ok(file_name) = e.file_name().into_string() else {
+                    return false;
+                };
+
+                !(file_name.starts_with('.') || file_name.starts_with('$'))
+            })
+            .collect();
+        dir_entries.sort_by(|a, b| {
+            a.file_type()
+                .unwrap()
+                .is_file()
+                .cmp(&b.file_type().unwrap().is_file())
+                .then(
+                    a.file_name()
+                        .to_ascii_lowercase()
+                        .cmp(&b.file_name().to_ascii_lowercase()),
+                )
+        });
+
+        dir_entries
     }
 }
 
@@ -100,6 +136,9 @@ impl eframe::App for App {
                         HOMEPAGE,
                     );
                     egui::warn_if_debug_build(ui);
+                    if ui.button("Toggle hidden files").clicked() {
+                        self.show_hidden = !self.show_hidden;
+                    }
                 });
             });
 
@@ -119,19 +158,7 @@ impl eframe::App for App {
             }
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if let Ok(readed_dir) = ss {
-                    let mut dir_entries: Vec<fs::DirEntry> =
-                        readed_dir.into_iter().filter_map(|e| e.ok()).collect();
-                    dir_entries.sort_by(|a, b| {
-                        a.file_type()
-                            .unwrap()
-                            .is_file()
-                            .cmp(&b.file_type().unwrap().is_file())
-                            .then(
-                                a.file_name()
-                                    .to_ascii_lowercase()
-                                    .cmp(&b.file_name().to_ascii_lowercase()),
-                            )
-                    });
+                    let dir_entries = self.get_current_list(readed_dir);
                     let table = TableBuilder::new(ui)
                         .striped(true)
                         .vscroll(false)
