@@ -1,5 +1,5 @@
 use crate::consts::*;
-use egui::Layout;
+use egui::{Layout, RichText};
 use egui_extras::{Column, TableBuilder};
 use std::{fs, path::PathBuf};
 
@@ -13,15 +13,20 @@ pub struct App {
     value: f32,
     #[serde(skip)]
     cur_path: PathBuf,
+    #[serde(skip)]
+    drives: sysinfo::Disks,
 }
 
 impl Default for App {
     fn default() -> Self {
+        let mut drives = sysinfo::Disks::new_with_refreshed_list();
+        drives.sort_by(|a, b| a.mount_point().cmp(b.mount_point()));
         Self {
             // Example stuff:
             label: "Hello World!".to_owned(),
             value: 2.7,
             cur_path: get_starting_path(),
+            drives,
         }
     }
 }
@@ -61,50 +66,29 @@ impl eframe::App for App {
                 ui.add_space(TOP_SIDE_MARGIN);
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
-            let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
-            let ss = fs::read_dir(&self.cur_path);
-            if let Some(parent) = self.cur_path.parent() {
-                if ui.button("Go Up").clicked() {
-                    self.cur_path = parent.into();
-                    return;
-                }
-            }
-            if let Ok(readed_dir) = ss {
-                let dir_entries: Vec<Result<fs::DirEntry, std::io::Error>> =
-                    readed_dir.into_iter().collect();
-                let table = TableBuilder::new(ui)
-                    .striped(true)
-                    .vscroll(false)
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::remainder().at_least(260.0))
-                    .resizable(false);
-                table.body(|body| {
-                    body.rows(text_height, dir_entries.len(), |mut row| {
-                        let val = (&dir_entries)[row.index()].as_ref();
-
-                        if let Ok(val) = val {
-                            let meta = val.metadata().unwrap();
-                            row.col(|ui| {
-                                ui.add_space(VERTICAL_SPACING);
+        egui::SidePanel::left("leftPanel")
+            .frame(egui::Frame::canvas(&ctx.style()))
+            .show(ctx, |ui| {
+                ui.with_layout(Layout::top_down(eframe::emath::Align::Min), |ui| {
+                    egui::CollapsingHeader::new("Drives")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for p in self.drives.iter() {
                                 if ui
-                                    .button(val.file_name().to_str().unwrap().to_string())
+                                    .button(format!(
+                                        "{} ({})",
+                                        p.name().to_str().unwrap(),
+                                        p.mount_point().display()
+                                    ))
                                     .clicked()
                                 {
-                                    if meta.is_file() {
-                                        let _ = open::that_detached(val.path());
-                                    } else {
-                                        self.cur_path = val.path();
-                                    }
+                                    self.cur_path = p.mount_point().to_path_buf();
+                                    return;
                                 }
-                            });
-                        }
-                    });
+                            }
+                        });
                 });
-            }
-            ui.separator();
-        });
+            });
 
         egui::TopBottomPanel::bottom("bottomPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
@@ -118,6 +102,67 @@ impl eframe::App for App {
                     egui::warn_if_debug_build(ui);
                 });
             });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
+            let ss = fs::read_dir(&self.cur_path);
+            if let Some(parent) = self.cur_path.parent() {
+                if ui
+                    .button("⬆")
+                    .on_hover_text("Go to parent directory")
+                    .clicked()
+                {
+                    self.cur_path = parent.into();
+                    return;
+                }
+                ui.separator();
+            }
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if let Ok(readed_dir) = ss {
+                    let mut dir_entries: Vec<fs::DirEntry> =
+                        readed_dir.into_iter().filter_map(|e| e.ok()).collect();
+                    dir_entries.sort_by(|a, b| {
+                        a.file_type()
+                            .unwrap()
+                            .is_file()
+                            .cmp(&b.file_type().unwrap().is_file())
+                            .then(
+                                a.file_name()
+                                    .to_ascii_lowercase()
+                                    .cmp(&b.file_name().to_ascii_lowercase()),
+                            )
+                    });
+                    let table = TableBuilder::new(ui)
+                        .striped(true)
+                        .vscroll(false)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(Column::remainder().at_least(260.0))
+                        .resizable(false);
+                    table.body(|body| {
+                        body.rows(text_height, dir_entries.len(), |mut row| {
+                            let val = &dir_entries[row.index()];
+                            let meta = val.metadata().unwrap();
+                            row.col(|ui| {
+                                ui.add_space(VERTICAL_SPACING);
+                                let text = val.file_name().to_str().unwrap().to_string();
+                                let text = if meta.is_dir() {
+                                    RichText::new(text)
+                                } else {
+                                    RichText::strong(text.into())
+                                };
+                                if ui.button(text).clicked() {
+                                    if meta.is_file() {
+                                        let _ = open::that_detached(val.path());
+                                    } else {
+                                        self.cur_path = val.path();
+                                    }
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+        });
     }
 }
 

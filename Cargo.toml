@@ -4,7 +4,9 @@ edition = "2021"
 homepage = "https://github.com/Leinnan/lwa_fm"
 
 [profile.release]
-opt-level = 2 # fast and small wasm
+opt-level = 'z'
+panic = 'abort'
+lto = true
 
 # Optimize all dependencies even in debug builds:
 [profile.dev.package."*"]
@@ -21,6 +23,11 @@ eframe = { version = "0.27.0", default-features = false, features = [
 egui = "0.27"
 egui_extras = "0.27"
 open = "5.1.2"
+walkdir = "2"
+sysinfo = "0.30"
+
+[target.'cfg(windows)'.dependencies]
+winsafe = { version = "0.0.20", features = [ "shell" ] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
