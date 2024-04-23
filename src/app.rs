@@ -1,10 +1,7 @@
 use crate::consts::*;
 use egui::{Layout, RichText};
 use egui_extras::{Column, TableBuilder};
-use std::{
-    fs::{self},
-    path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
@@ -123,6 +120,12 @@ impl eframe::App for App {
                                 }
                             }
                         });
+                    if let Ok(Some(user)) = homedir::get_my_home() {
+                        if ui.button(format!("{}", "User Dir")).clicked() {
+                            self.cur_path = user;
+                            return;
+                        }
+                    }
                 });
             });
 
@@ -171,8 +174,17 @@ impl eframe::App for App {
                             let meta = val.metadata().unwrap();
                             row.col(|ui| {
                                 ui.add_space(VERTICAL_SPACING);
+                                let file_type = meta.file_type();
+                                #[cfg(target_os = "windows")]
+                                let is_dir = {
+                                    use std::os::windows::fs::FileTypeExt;
+                                    file_type.is_dir() || file_type.is_symlink_dir()
+                                };
+                                #[cfg(not(target_os = "windows"))]
+                                let is_dir = file_type.is_dir();
                                 let text = val.file_name().to_str().unwrap().to_string();
-                                let text = if meta.is_dir() {
+
+                                let text = if is_dir {
                                     RichText::new(text)
                                 } else {
                                     RichText::strong(text.into())
@@ -181,7 +193,10 @@ impl eframe::App for App {
                                     if meta.is_file() {
                                         let _ = open::that_detached(val.path());
                                     } else {
-                                        self.cur_path = val.path();
+                                        let Ok(path) = std::fs::canonicalize(val.path()) else {
+                                            return;
+                                        };
+                                        self.cur_path = path;
                                     }
                                 }
                             });
