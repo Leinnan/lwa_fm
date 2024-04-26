@@ -1,33 +1,33 @@
-use crate::consts::*;
-use egui::{Layout, RichText};
+use crate::{consts::*, locations::Locations};
+use egui::{
+    ahash::{HashMap, HashMapExt},
+    Layout, RichText,
+};
 use egui_extras::{Column, TableBuilder};
 use std::{fs, path::PathBuf};
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
-    // Example stuff:
-    label: String,
     show_hidden: bool,
     #[serde(skip)] // This how you opt-out of serialization of a field
     value: f32,
     #[serde(skip)]
     cur_path: PathBuf,
     #[serde(skip)]
-    drives: sysinfo::Disks,
+    locations: HashMap<String, Locations>,
 }
 
 impl Default for App {
     fn default() -> Self {
-        let mut drives = sysinfo::Disks::new_with_refreshed_list();
-        drives.sort_by(|a, b| a.mount_point().cmp(b.mount_point()));
+        let mut locations = HashMap::new();
+        locations.insert("User".into(), Locations::get_user_dirs());
+        locations.insert("Drives".into(), Locations::get_drives());
         Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
             show_hidden: false,
             value: 2.7,
             cur_path: get_starting_path(),
-            drives,
+            locations,
         }
     }
 }
@@ -103,28 +103,17 @@ impl eframe::App for App {
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
                 ui.with_layout(Layout::top_down(eframe::emath::Align::Min), |ui| {
-                    egui::CollapsingHeader::new("Drives")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            for p in self.drives.iter() {
-                                if ui
-                                    .button(format!(
-                                        "{} ({})",
-                                        p.name().to_str().unwrap(),
-                                        p.mount_point().display()
-                                    ))
-                                    .clicked()
-                                {
-                                    self.cur_path = p.mount_point().to_path_buf();
-                                    return;
+                    for (id, collection) in &self.locations {
+                        egui::CollapsingHeader::new(id)
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for location in collection.0.iter() {
+                                    if ui.button(&location.name).clicked() {
+                                        self.cur_path = location.path.clone();
+                                        return;
+                                    }
                                 }
-                            }
-                        });
-                    if let Ok(Some(user)) = homedir::get_my_home() {
-                        if ui.button(format!("{}", "User Dir")).clicked() {
-                            self.cur_path = user;
-                            return;
-                        }
+                            });
                     }
                 });
             });

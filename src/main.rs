@@ -4,6 +4,7 @@ use eframe::egui;
 
 mod app;
 mod consts;
+mod locations;
 #[cfg(target_os = "windows")]
 mod win_utils;
 
