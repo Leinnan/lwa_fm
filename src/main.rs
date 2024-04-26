@@ -5,12 +5,8 @@ use eframe::egui;
 mod app;
 mod consts;
 mod locations;
-#[cfg(target_os = "windows")]
-mod win_utils;
 
 fn main() -> eframe::Result<()> {
-    #[cfg(target_os = "windows")]
-    win_utils::print_recent();
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])

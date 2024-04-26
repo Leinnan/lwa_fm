@@ -27,8 +27,5 @@ walkdir = "2"
 sysinfo = "0.30"
 directories = "5.0"
 
-[target.'cfg(windows)'.dependencies]
-winsafe = { version = "0.0.20", features = [ "shell" ] }
-
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

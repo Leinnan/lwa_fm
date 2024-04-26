@@ -73,13 +73,3 @@ pub struct Location {
     pub name: String,
     pub path: PathBuf,
 }
-
-impl Location {
-    pub fn from_path(path: &PathBuf) -> Self {
-        let name = path.file_name().unwrap();
-        Self {
-            path: path.clone(),
-            name: name.to_str().unwrap().into(),
-        }
-    }
-}

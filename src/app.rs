@@ -4,18 +4,23 @@ use egui::{
     Layout, RichText,
 };
 use egui_extras::{Column, TableBuilder};
-use std::{fs, path::PathBuf};
+use std::{path::PathBuf};
+use walkdir::WalkDir;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
+    show_search_bar: bool,
     show_hidden: bool,
     #[serde(skip)]
     cur_path: PathBuf,
     #[serde(skip)]
     locations: HashMap<String, Locations>,
     #[serde(skip)]
-    list: Vec<std::fs::DirEntry>,
+    list: Vec<walkdir::DirEntry>,
+    #[serde(skip)]
+    search: String,
+    search_depth: usize,
 }
 
 impl Default for App {
@@ -23,16 +28,17 @@ impl Default for App {
         let mut locations = HashMap::new();
         locations.insert("User".into(), Locations::get_user_dirs());
         locations.insert("Drives".into(), Locations::get_drives());
-        let cur_path = get_starting_path();
-        let Ok(readed_dir) = fs::read_dir(&cur_path) else {
-            panic!("ERROR");
-        };
-        Self {
+        let mut p = Self {
+            show_search_bar: false,
             show_hidden: false,
             cur_path: get_starting_path(),
             locations,
-            list: get_current_list(false, readed_dir),
-        }
+            list: vec![],
+            search: String::new(),
+            search_depth: 3,
+        };
+        p.refresh_list();
+        p
     }
 }
 impl App {
@@ -58,40 +64,35 @@ impl App {
         self.refresh_list();
     }
     fn refresh_list(&mut self) {
-        let Ok(readed_dir) = fs::read_dir(&self.cur_path) else {
-            return;
-        };
-        self.list = get_current_list(self.show_hidden, readed_dir);
+        self.list = self.read_dir();
     }
-}
-fn get_current_list(show_hidden: bool, readed_dir: std::fs::ReadDir) -> Vec<std::fs::DirEntry> {
-    let mut dir_entries: Vec<fs::DirEntry> = readed_dir
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            if show_hidden {
-                return true;
-            }
-            let Ok(file_name) = e.file_name().into_string() else {
-                return false;
-            };
 
-            !(file_name.starts_with('.') || file_name.starts_with('$'))
-        })
-        .collect();
-    dir_entries.sort_by(|a, b| {
-        a.file_type()
-            .unwrap()
-            .is_file()
-            .cmp(&b.file_type().unwrap().is_file())
-            .then(
+    fn read_dir(&self) -> Vec<walkdir::DirEntry> {
+        let use_search = !self.search.is_empty();
+        let depth = if use_search { self.search_depth } else { 1 };
+        let mut dir_entries: Vec<walkdir::DirEntry> = WalkDir::new(&self.cur_path)
+            .max_depth(depth)
+            .into_iter()
+            .flatten()
+            .skip(1)
+            .filter(|e| {
+                let s = e.file_name().to_string_lossy();
+                if !self.show_hidden && (s.starts_with('.') || s.starts_with('$')) {
+                    return false;
+                }
+                s.contains(&self.search)
+            })
+            .collect();
+
+        dir_entries.sort_by(|a, b| {
+            a.file_type().is_file().cmp(&b.file_type().is_file()).then(
                 a.file_name()
                     .to_ascii_lowercase()
                     .cmp(&b.file_name().to_ascii_lowercase()),
             )
-    });
-
-    dir_entries
+        });
+        dir_entries
+    }
 }
 
 impl eframe::App for App {
@@ -105,11 +106,26 @@ impl eframe::App for App {
         // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
         // For inspiration and more examples, go to https://emilk.github.io/egui
         let mut new_path = None;
+        let mut search_changed = false;
         egui::TopBottomPanel::top("top_panel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
                 ui.add_space(TOP_SIDE_MARGIN);
-                ui.heading(format!(" {}", &self.cur_path.display()));
+                ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
+                    ui.add_space(TOP_SIDE_MARGIN);
+                    if let Some(parent) = self.cur_path.parent() {
+                        if ui
+                            .button("⬆")
+                            .on_hover_text("Go to parent directory")
+                            .clicked()
+                        {
+                            new_path = Some(parent.into());
+                            return;
+                        }
+                    }
+                    ui.add_space(TOP_SIDE_MARGIN);
+                    ui.heading(format!("{}", &self.cur_path.display()));
+                });
                 ui.add_space(TOP_SIDE_MARGIN);
             });
 
@@ -135,33 +151,32 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("bottomPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
-                ui.with_layout(Layout::right_to_left(eframe::emath::Align::Center), |ui| {
+                ui.add_space(TOP_SIDE_MARGIN);
+                ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
                     egui::widgets::global_dark_light_mode_switch(ui);
                     ui.hyperlink_to(
                         format!("{} v {}", egui::special_emojis::GITHUB, VERSION),
                         HOMEPAGE,
                     );
                     egui::warn_if_debug_build(ui);
-                    if ui.button("Toggle hidden files").clicked() {
-                        self.show_hidden = !self.show_hidden;
+                    if ui.toggle_value(&mut self.show_hidden, "Hidden").changed() {
                         self.refresh_list();
                     }
+                    ui.toggle_value(&mut self.show_search_bar, "Search");
                 });
+                ui.add_space(TOP_SIDE_MARGIN);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
-
-            if let Some(parent) = self.cur_path.parent() {
-                if ui
-                    .button("⬆")
-                    .on_hover_text("Go to parent directory")
-                    .clicked()
-                {
-                    new_path = Some(parent.into());
-                    return;
-                }
-                ui.separator();
+            if self.show_search_bar {
+                ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
+                    search_changed = ui
+                        .add(egui::Slider::new(&mut self.search_depth, 1..=5).text("Search depth"))
+                        .changed();
+                    search_changed |= ui.text_edit_singleline(&mut self.search).changed();
+                });
+                ui.add_space(TOP_SIDE_MARGIN);
             }
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let table = TableBuilder::new(ui)
@@ -206,6 +221,10 @@ impl eframe::App for App {
                 });
             });
         });
+        if search_changed {
+            self.refresh_list();
+        }
+
         if let Some(new) = new_path {
             self.change_current_dir(new);
         }
