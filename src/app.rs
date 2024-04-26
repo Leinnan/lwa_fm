@@ -10,12 +10,12 @@ use std::{fs, path::PathBuf};
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
     show_hidden: bool,
-    #[serde(skip)] // This how you opt-out of serialization of a field
-    value: f32,
     #[serde(skip)]
     cur_path: PathBuf,
     #[serde(skip)]
     locations: HashMap<String, Locations>,
+    #[serde(skip)]
+    list: Vec<std::fs::DirEntry>,
 }
 
 impl Default for App {
@@ -23,11 +23,15 @@ impl Default for App {
         let mut locations = HashMap::new();
         locations.insert("User".into(), Locations::get_user_dirs());
         locations.insert("Drives".into(), Locations::get_drives());
+        let cur_path = get_starting_path();
+        let Ok(readed_dir) = fs::read_dir(&cur_path) else {
+            panic!("ERROR");
+        };
         Self {
             show_hidden: false,
-            value: 2.7,
             cur_path: get_starting_path(),
             locations,
+            list: get_current_list(false, readed_dir),
         }
     }
 }
@@ -49,35 +53,45 @@ impl App {
 }
 
 impl App {
-    fn get_current_list(&self, readed_dir: std::fs::ReadDir) -> Vec<std::fs::DirEntry> {
-        let mut dir_entries: Vec<fs::DirEntry> = readed_dir
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                if self.show_hidden {
-                    return true;
-                }
-                let Ok(file_name) = e.file_name().into_string() else {
-                    return false;
-                };
-
-                !(file_name.starts_with('.') || file_name.starts_with('$'))
-            })
-            .collect();
-        dir_entries.sort_by(|a, b| {
-            a.file_type()
-                .unwrap()
-                .is_file()
-                .cmp(&b.file_type().unwrap().is_file())
-                .then(
-                    a.file_name()
-                        .to_ascii_lowercase()
-                        .cmp(&b.file_name().to_ascii_lowercase()),
-                )
-        });
-
-        dir_entries
+    fn change_current_dir(&mut self, new_path: PathBuf) {
+        self.cur_path = new_path;
+        self.refresh_list();
     }
+    fn refresh_list(&mut self) {
+        let Ok(readed_dir) = fs::read_dir(&self.cur_path) else {
+            return;
+        };
+        self.list = get_current_list(self.show_hidden, readed_dir);
+    }
+}
+fn get_current_list(show_hidden: bool, readed_dir: std::fs::ReadDir) -> Vec<std::fs::DirEntry> {
+    let mut dir_entries: Vec<fs::DirEntry> = readed_dir
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            if show_hidden {
+                return true;
+            }
+            let Ok(file_name) = e.file_name().into_string() else {
+                return false;
+            };
+
+            !(file_name.starts_with('.') || file_name.starts_with('$'))
+        })
+        .collect();
+    dir_entries.sort_by(|a, b| {
+        a.file_type()
+            .unwrap()
+            .is_file()
+            .cmp(&b.file_type().unwrap().is_file())
+            .then(
+                a.file_name()
+                    .to_ascii_lowercase()
+                    .cmp(&b.file_name().to_ascii_lowercase()),
+            )
+    });
+
+    dir_entries
 }
 
 impl eframe::App for App {
@@ -90,7 +104,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
         // For inspiration and more examples, go to https://emilk.github.io/egui
-
+        let mut new_path = None;
         egui::TopBottomPanel::top("top_panel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
@@ -109,7 +123,7 @@ impl eframe::App for App {
                             .show(ui, |ui| {
                                 for location in collection.0.iter() {
                                     if ui.button(&location.name).clicked() {
-                                        self.cur_path = location.path.clone();
+                                        new_path = Some(location.path.clone());
                                         return;
                                     }
                                 }
@@ -130,70 +144,71 @@ impl eframe::App for App {
                     egui::warn_if_debug_build(ui);
                     if ui.button("Toggle hidden files").clicked() {
                         self.show_hidden = !self.show_hidden;
+                        self.refresh_list();
                     }
                 });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
-            let ss = fs::read_dir(&self.cur_path);
+
             if let Some(parent) = self.cur_path.parent() {
                 if ui
                     .button("⬆")
                     .on_hover_text("Go to parent directory")
                     .clicked()
                 {
-                    self.cur_path = parent.into();
+                    new_path = Some(parent.into());
                     return;
                 }
                 ui.separator();
             }
             egui::ScrollArea::vertical().show(ui, |ui| {
-                if let Ok(readed_dir) = ss {
-                    let dir_entries = self.get_current_list(readed_dir);
-                    let table = TableBuilder::new(ui)
-                        .striped(true)
-                        .vscroll(false)
-                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                        .column(Column::remainder().at_least(260.0))
-                        .resizable(false);
-                    table.body(|body| {
-                        body.rows(text_height, dir_entries.len(), |mut row| {
-                            let val = &dir_entries[row.index()];
-                            let meta = val.metadata().unwrap();
-                            row.col(|ui| {
-                                ui.add_space(VERTICAL_SPACING);
-                                let file_type = meta.file_type();
-                                #[cfg(target_os = "windows")]
-                                let is_dir = {
-                                    use std::os::windows::fs::FileTypeExt;
-                                    file_type.is_dir() || file_type.is_symlink_dir()
-                                };
-                                #[cfg(not(target_os = "windows"))]
-                                let is_dir = file_type.is_dir();
-                                let text = val.file_name().to_str().unwrap().to_string();
+                let table = TableBuilder::new(ui)
+                    .striped(true)
+                    .vscroll(false)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .column(Column::remainder().at_least(260.0))
+                    .resizable(false);
+                table.body(|body| {
+                    body.rows(text_height, self.list.len(), |mut row| {
+                        let val = &self.list[row.index()];
+                        let meta = val.metadata().unwrap();
+                        row.col(|ui| {
+                            ui.add_space(VERTICAL_SPACING);
+                            let file_type = meta.file_type();
+                            #[cfg(target_os = "windows")]
+                            let is_dir = {
+                                use std::os::windows::fs::FileTypeExt;
+                                file_type.is_dir() || file_type.is_symlink_dir()
+                            };
+                            #[cfg(not(target_os = "windows"))]
+                            let is_dir = file_type.is_dir();
+                            let text = val.file_name().to_str().unwrap().to_string();
 
-                                let text = if is_dir {
-                                    RichText::new(text)
+                            let text = if is_dir {
+                                RichText::new(text)
+                            } else {
+                                RichText::strong(text.into())
+                            };
+                            if ui.button(text).clicked() {
+                                if meta.is_file() {
+                                    let _ = open::that_detached(val.path());
                                 } else {
-                                    RichText::strong(text.into())
-                                };
-                                if ui.button(text).clicked() {
-                                    if meta.is_file() {
-                                        let _ = open::that_detached(val.path());
-                                    } else {
-                                        let Ok(path) = std::fs::canonicalize(val.path()) else {
-                                            return;
-                                        };
-                                        self.cur_path = path;
-                                    }
+                                    let Ok(path) = std::fs::canonicalize(val.path()) else {
+                                        return;
+                                    };
+                                    new_path = Some(path);
                                 }
-                            });
+                            }
                         });
                     });
-                }
+                });
             });
         });
+        if let Some(new) = new_path {
+            self.change_current_dir(new);
+        }
     }
 }
 
