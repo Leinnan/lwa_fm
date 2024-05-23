@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 #[derive(serde::Deserialize, serde::Serialize, Default)]
 #[serde(default)]
-pub struct Locations(pub Vec<Location>);
+pub struct Locations(pub Vec<Location>, pub bool);
 
 impl Locations {
     pub fn get_drives() -> Self {
@@ -20,7 +20,7 @@ impl Locations {
             })
             .collect();
 
-        Self(locations)
+        Self(locations, false)
     }
     pub fn get_user_dirs() -> Self {
         let list: Vec<Location> = if let Some(user_dirs) = directories::UserDirs::new() {
@@ -63,7 +63,7 @@ impl Locations {
             vec![]
         };
 
-        Self(list)
+        Self(list, false)
     }
 }
 

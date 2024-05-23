@@ -1,4 +1,7 @@
-use crate::{consts::*, locations::Locations};
+use crate::{
+    consts::*,
+    locations::{Location, Locations},
+};
 use egui::{
     ahash::{HashMap, HashMapExt},
     Layout, RichText,
@@ -14,7 +17,6 @@ pub struct App {
     show_hidden: bool,
     #[serde(skip)]
     cur_path: PathBuf,
-    #[serde(skip)]
     locations: HashMap<String, Locations>,
     #[serde(skip)]
     list: Vec<walkdir::DirEntry>,
@@ -29,6 +31,7 @@ impl Default for App {
         let mut locations = HashMap::new();
         locations.insert("User".into(), Locations::get_user_dirs());
         locations.insert("Drives".into(), Locations::get_drives());
+        locations.insert("Favorites".into(), Locations(vec![], true));
         let mut p = Self {
             show_search_bar: false,
             show_hidden: false,
@@ -53,7 +56,19 @@ impl App {
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+            let mut value: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+            if !value.locations.contains_key("Favorites") {
+                value
+                    .locations
+                    .insert("Favorites".into(), Locations(vec![], true));
+            }
+            if let Some(user) = value.locations.get_mut("User") {
+                *user = Locations::get_user_dirs();
+            }
+            if let Some(drive) = value.locations.get_mut("Drives") {
+                *drive = Locations::get_drives();
+            }
+            return value;
         }
 
         Default::default()
@@ -132,7 +147,41 @@ impl eframe::App for App {
                         }
                     }
                     ui.add_space(TOP_SIDE_MARGIN);
-                    ui.heading(format!("{}", &self.cur_path.display()));
+                    let mut path: String = "".into();
+
+                    #[allow(unused_variables)]
+                    for (i, e) in self.cur_path.iter().enumerate() {
+                        #[cfg(windows)]
+                        {
+                            let text = match &i {
+                                0 => {
+                                    let last_two_chars: String =
+                                        e.to_str().unwrap().chars().rev().take(2).collect();
+                                    path += &last_two_chars.chars().rev().collect::<String>();
+                                    path.push(std::path::MAIN_SEPARATOR);
+                                    continue;
+                                }
+                                1 => &path,
+                                _ => {
+                                    path += e.to_str().unwrap();
+                                    path.push(std::path::MAIN_SEPARATOR);
+                                    e.to_str().unwrap()
+                                }
+                            };
+                            if ui.button(text).clicked() {
+                                new_path = Some(path.into());
+                                return;
+                            }
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            path += e.to_str().unwrap();
+                            if ui.button(e.to_str().unwrap()).clicked() {
+                                new_path = Some(path.into());
+                                return;
+                            }
+                        }
+                    }
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             });
@@ -142,6 +191,9 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 ui.with_layout(Layout::top_down(eframe::emath::Align::Min), |ui| {
                     for (id, collection) in &self.locations {
+                        if collection.0.is_empty() {
+                            continue;
+                        }
                         egui::CollapsingHeader::new(id)
                             .default_open(true)
                             .show(ui, |ui| {
@@ -228,9 +280,51 @@ impl eframe::App for App {
                                     new_path = Some(path);
                                 }
                             }
-                            if button.secondary_clicked() {
-                                // TODO
-                            }
+                            button.context_menu(|ui| {
+                                if ui.button("Open in explorer").clicked() {
+                                    let _ = open::that_detached(val.path());
+                                    ui.close_menu();
+                                    return;
+                                }
+                                if is_dir {
+                                    let Ok(path) = std::fs::canonicalize(val.path()) else {
+                                        return;
+                                    };
+                                    let existing_path = self
+                                        .locations
+                                        .get("Favorites")
+                                        .unwrap()
+                                        .0
+                                        .iter()
+                                        .enumerate()
+                                        .find(|loc| loc.1.path.eq(&path))
+                                        .map(|(i, _)| i);
+                                    if existing_path.is_none()
+                                        && ui.button("Add to favorites").clicked()
+                                    {
+                                        let name = path
+                                            .iter()
+                                            .last()
+                                            .unwrap()
+                                            .to_str()
+                                            .unwrap()
+                                            .to_owned();
+                                        if let Some(fav) = self.locations.get_mut("Favorites") {
+                                            fav.0.push(Location { name, path });
+                                        }
+                                        ui.close_menu();
+                                        return;
+                                    }
+                                    if existing_path.is_some()
+                                        && ui.button("Remove from favorites").clicked()
+                                    {
+                                        if let Some(fav) = self.locations.get_mut("Favorites") {
+                                            fav.0.remove(existing_path.unwrap());
+                                        }
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
                         });
                     });
                 });
