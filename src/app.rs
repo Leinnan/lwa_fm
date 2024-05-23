@@ -4,7 +4,7 @@ use egui::{
     Layout, RichText,
 };
 use egui_extras::{Column, TableBuilder};
-use std::{path::PathBuf};
+use std::path::PathBuf;
 use walkdir::WalkDir;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -21,6 +21,7 @@ pub struct App {
     #[serde(skip)]
     search: String,
     search_depth: usize,
+    case_sensitive_search: bool,
 }
 
 impl Default for App {
@@ -36,6 +37,7 @@ impl Default for App {
             list: vec![],
             search: String::new(),
             search_depth: 3,
+            case_sensitive_search: false,
         };
         p.refresh_list();
         p
@@ -71,6 +73,7 @@ impl App {
         let use_search = !self.search.is_empty();
         let depth = if use_search { self.search_depth } else { 1 };
         let mut dir_entries: Vec<walkdir::DirEntry> = WalkDir::new(&self.cur_path)
+            .follow_links(true)
             .max_depth(depth)
             .into_iter()
             .flatten()
@@ -80,7 +83,12 @@ impl App {
                 if !self.show_hidden && (s.starts_with('.') || s.starts_with('$')) {
                     return false;
                 }
-                s.contains(&self.search)
+                if self.case_sensitive_search {
+                    s.contains(&self.search)
+                } else {
+                    s.to_ascii_lowercase()
+                        .contains(&self.search.to_ascii_lowercase())
+                }
             })
             .collect();
 
@@ -174,6 +182,9 @@ impl eframe::App for App {
                     search_changed = ui
                         .add(egui::Slider::new(&mut self.search_depth, 1..=5).text("Search depth"))
                         .changed();
+                    search_changed |= ui
+                        .checkbox(&mut self.case_sensitive_search, "Case sensitive")
+                        .changed();
                     search_changed |= ui.text_edit_singleline(&mut self.search).changed();
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
@@ -206,7 +217,8 @@ impl eframe::App for App {
                             } else {
                                 RichText::strong(text.into())
                             };
-                            if ui.button(text).clicked() {
+                            let button = ui.button(text);
+                            if button.clicked() {
                                 if meta.is_file() {
                                     let _ = open::that_detached(val.path());
                                 } else {
@@ -215,6 +227,9 @@ impl eframe::App for App {
                                     };
                                     new_path = Some(path);
                                 }
+                            }
+                            if button.secondary_clicked() {
+                                // TODO
                             }
                         });
                     });
