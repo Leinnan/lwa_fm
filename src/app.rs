@@ -20,10 +20,17 @@ pub struct App {
     locations: HashMap<String, Locations>,
     #[serde(skip)]
     list: Vec<walkdir::DirEntry>,
-    #[serde(skip)]
-    search: String,
+    search: Search,
     search_depth: usize,
     case_sensitive_search: bool,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+pub enum Search {
+    #[default]
+    None,
+    Favorites(String),
+    Location(String),
 }
 
 impl Default for App {
@@ -38,7 +45,7 @@ impl Default for App {
             cur_path: get_starting_path(),
             locations,
             list: vec![],
-            search: String::new(),
+            search: Search::None,
             search_depth: 3,
             case_sensitive_search: false,
         };
@@ -85,25 +92,45 @@ impl App {
     }
 
     fn read_dir(&self) -> Vec<walkdir::DirEntry> {
-        let use_search = !self.search.is_empty();
+        let binding = String::new();
+        let (directiories, search): (Vec<&PathBuf>, &String) = match &self.search {
+            Search::None => ([&self.cur_path].to_vec(), &binding),
+            Search::Favorites(s) => (
+                self.locations
+                    .get("Favorites")
+                    .unwrap()
+                    .0
+                    .iter()
+                    .map(|location| &location.path)
+                    .collect(),
+                s,
+            ),
+            Search::Location(s) => ([&self.cur_path].to_vec(), s),
+        };
+        let use_search = !search.is_empty();
         let depth = if use_search { self.search_depth } else { 1 };
-        let mut dir_entries: Vec<walkdir::DirEntry> = WalkDir::new(&self.cur_path)
-            .follow_links(true)
-            .max_depth(depth)
-            .into_iter()
-            .flatten()
-            .skip(1)
-            .filter(|e| {
-                let s = e.file_name().to_string_lossy();
-                if !self.show_hidden && (s.starts_with('.') || s.starts_with('$')) {
-                    return false;
-                }
-                if self.case_sensitive_search {
-                    s.contains(&self.search)
-                } else {
-                    s.to_ascii_lowercase()
-                        .contains(&self.search.to_ascii_lowercase())
-                }
+        let mut dir_entries: Vec<walkdir::DirEntry> = directiories
+            .iter()
+            .flat_map(|d| {
+                WalkDir::new(d)
+                    .follow_links(true)
+                    .max_depth(depth)
+                    .into_iter()
+                    .flatten()
+                    .skip(1)
+                    .filter(|e| {
+                        let s = e.file_name().to_string_lossy();
+                        if !self.show_hidden && (s.starts_with('.') || s.starts_with('$')) {
+                            return false;
+                        }
+                        if self.case_sensitive_search {
+                            s.contains(search)
+                        } else {
+                            s.to_ascii_lowercase()
+                                .contains(&search.to_ascii_lowercase())
+                        }
+                    })
+                    .collect::<Vec<walkdir::DirEntry>>()
             })
             .collect();
 
@@ -190,18 +217,35 @@ impl eframe::App for App {
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
                 ui.with_layout(Layout::top_down(eframe::emath::Align::Min), |ui| {
-                    for (id, collection) in &self.locations {
+                    for id in ["Favorites", "User", "Drives"] {
+                        let Some(collection) = self.locations.get_mut(id) else {
+                            continue;
+                        };
                         if collection.0.is_empty() {
                             continue;
                         }
                         egui::CollapsingHeader::new(id)
                             .default_open(true)
                             .show(ui, |ui| {
-                                for location in collection.0.iter() {
-                                    if ui.button(&location.name).clicked() {
+                                let mut id_to_remove = None;
+                                for (i, location) in collection.0.iter().enumerate() {
+                                    let button = ui.button(&location.name);
+                                    if button.clicked() {
                                         new_path = Some(location.path.clone());
                                         return;
                                     }
+                                    if !collection.1 {
+                                        continue;
+                                    }
+                                    button.context_menu(|ui| {
+                                        if ui.button("Remove").clicked() {
+                                            id_to_remove = Some(i);
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                                if let Some(id) = id_to_remove {
+                                    collection.0.remove(id);
                                 }
                             });
                     }
@@ -237,7 +281,55 @@ impl eframe::App for App {
                     search_changed |= ui
                         .checkbox(&mut self.case_sensitive_search, "Case sensitive")
                         .changed();
-                    search_changed |= ui.text_edit_singleline(&mut self.search).changed();
+                    let mut search_favorites;
+                    let new_search = match &self.search {
+                        Search::None => {
+                            search_favorites = false;
+                            let mut s = String::new();
+                            if ui.text_edit_singleline(&mut s).changed() {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        }
+                        Search::Favorites(s) => {
+                            search_favorites = true;
+                            let mut s = s.clone();
+                            if ui
+                                .checkbox(&mut search_favorites, "Search Favorites")
+                                .changed()
+                                || ui.text_edit_singleline(&mut s).changed()
+                            {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        }
+                        Search::Location(s) => {
+                            search_favorites = false;
+                            let mut s = s.clone();
+                            if ui
+                                .checkbox(&mut search_favorites, "Search Favorites")
+                                .changed()
+                                || ui.text_edit_singleline(&mut s).changed()
+                            {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        }
+                    };
+                    if let Some(s) = new_search {
+                        search_changed = true;
+
+                        self.search = if s.is_empty() {
+                            Search::None
+                        } else if search_favorites {
+                            Search::Favorites(s)
+                        } else {
+                            Search::Location(s)
+                        };
+                    }
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             }
@@ -297,7 +389,8 @@ impl eframe::App for App {
                                         .0
                                         .iter()
                                         .enumerate()
-                                        .find(|loc| loc.1.path.eq(&path))
+                                        // THIS MAYBE WOULD NEED TO BE CHANGED ON PLATFORMS DIFFERENT THAN WINDOWS
+                                        .find(|loc| path.ends_with(&loc.1.path))
                                         .map(|(i, _)| i);
                                     if existing_path.is_none()
                                         && ui.button("Add to favorites").clicked()
