@@ -20,6 +20,7 @@ pub struct App {
     locations: HashMap<String, Locations>,
     #[serde(skip)]
     list: Vec<walkdir::DirEntry>,
+    #[serde(skip)]
     search: Search,
     search_depth: usize,
     case_sensitive_search: bool,
