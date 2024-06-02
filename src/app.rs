@@ -17,21 +17,29 @@ pub struct App {
     show_hidden: bool,
     #[serde(skip)]
     cur_path: PathBuf,
+    sorting: Sort,
+    invert_sort: bool,
     locations: HashMap<String, Locations>,
     #[serde(skip)]
     list: Vec<walkdir::DirEntry>,
     #[serde(skip)]
     search: Search,
-    search_depth: usize,
-    case_sensitive_search: bool,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Debug, Clone, Copy)]
+pub enum Sort {
+    #[default]
+    Name,
+    Modified,
+    Created,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default)]
-pub enum Search {
-    #[default]
-    None,
-    Favorites(String),
-    Location(String),
+pub struct Search {
+    pub favorites: bool,
+    pub value: String,
+    pub depth: usize,
+    pub case_sensitive: bool,
 }
 
 impl Default for App {
@@ -45,10 +53,15 @@ impl Default for App {
             show_hidden: false,
             cur_path: get_starting_path(),
             locations,
+            sorting: Sort::Created,
             list: vec![],
-            search: Search::None,
-            search_depth: 3,
-            case_sensitive_search: false,
+            search: Search {
+                case_sensitive: false,
+                depth: 3,
+                favorites: false,
+                value: String::new(),
+            },
+            invert_sort: false
         };
         p.refresh_list();
         p
@@ -93,24 +106,22 @@ impl App {
     }
 
     fn read_dir(&self) -> Vec<walkdir::DirEntry> {
-        let binding = String::new();
-        let (directiories, search): (Vec<&PathBuf>, &String) = match &self.search {
-            Search::None => ([&self.cur_path].to_vec(), &binding),
-            Search::Favorites(s) => (
-                self.locations
-                    .get("Favorites")
-                    .unwrap()
-                    .0
-                    .iter()
-                    .map(|location| &location.path)
-                    .collect(),
-                s,
-            ),
-            Search::Location(s) => ([&self.cur_path].to_vec(), s),
+        let search = &self.search.value;
+        let use_search = !self.search.value.is_empty();
+        let directories = if use_search && self.search.favorites {
+            self.locations
+                .get("Favorites")
+                .unwrap()
+                .0
+                .iter()
+                .map(|location| &location.path)
+                .collect()
+        } else {
+            [&self.cur_path].to_vec()
         };
-        let use_search = !search.is_empty();
-        let depth = if use_search { self.search_depth } else { 1 };
-        let mut dir_entries: Vec<walkdir::DirEntry> = directiories
+
+        let depth = if use_search { self.search.depth } else { 1 };
+        let mut dir_entries: Vec<walkdir::DirEntry> = directories
             .iter()
             .flat_map(|d| {
                 WalkDir::new(d)
@@ -124,7 +135,7 @@ impl App {
                         if !self.show_hidden && (s.starts_with('.') || s.starts_with('$')) {
                             return false;
                         }
-                        if self.case_sensitive_search {
+                        if self.search.case_sensitive {
                             s.contains(search)
                         } else {
                             s.to_ascii_lowercase()
@@ -136,12 +147,31 @@ impl App {
             .collect();
 
         dir_entries.sort_by(|a, b| {
-            a.file_type().is_file().cmp(&b.file_type().is_file()).then(
-                a.file_name()
-                    .to_ascii_lowercase()
-                    .cmp(&b.file_name().to_ascii_lowercase()),
-            )
+            a.file_type()
+                .is_file()
+                .cmp(&b.file_type().is_file())
+                .then(match &self.sorting {
+                    Sort::Name => a
+                        .file_name()
+                        .to_ascii_lowercase()
+                        .cmp(&b.file_name().to_ascii_lowercase()),
+                    Sort::Modified => a
+                        .metadata()
+                        .unwrap()
+                        .modified()
+                        .unwrap()
+                        .cmp(&b.metadata().unwrap().modified().unwrap()),
+                    Sort::Created => a
+                        .metadata()
+                        .unwrap()
+                        .created()
+                        .unwrap()
+                        .cmp(&b.metadata().unwrap().created().unwrap()),
+                })
         });
+        if self.invert_sort {
+            dir_entries.reverse();
+        }
         dir_entries
     }
 }
@@ -268,6 +298,17 @@ impl eframe::App for App {
                         self.refresh_list();
                     }
                     ui.toggle_value(&mut self.show_search_bar, "Search");
+                    let old_value = self.sorting.clone();
+
+                    search_changed |= ui.toggle_value(&mut self.invert_sort, "Inverted sort").changed();
+                    egui::ComboBox::from_label("Sort by:")
+                        .selected_text(format!("{:?}", self.sorting))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.sorting, Sort::Name, "Name");
+                            ui.selectable_value(&mut self.sorting, Sort::Created, "Created");
+                            ui.selectable_value(&mut self.sorting, Sort::Modified, "Modified");
+                        });
+                    search_changed |= old_value != self.sorting;
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             });
@@ -276,61 +317,16 @@ impl eframe::App for App {
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
             if self.show_search_bar {
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
-                    search_changed = ui
-                        .add(egui::Slider::new(&mut self.search_depth, 1..=5).text("Search depth"))
+                    search_changed |= ui
+                        .add(egui::Slider::new(&mut self.search.depth, 1..=5).text("Search depth"))
                         .changed();
                     search_changed |= ui
-                        .checkbox(&mut self.case_sensitive_search, "Case sensitive")
+                        .checkbox(&mut self.search.case_sensitive, "Case sensitive")
                         .changed();
-                    let mut search_favorites;
-                    let new_search = match &self.search {
-                        Search::None => {
-                            search_favorites = false;
-                            let mut s = String::new();
-                            if ui.text_edit_singleline(&mut s).changed() {
-                                Some(s)
-                            } else {
-                                None
-                            }
-                        }
-                        Search::Favorites(s) => {
-                            search_favorites = true;
-                            let mut s = s.clone();
-                            if ui
-                                .checkbox(&mut search_favorites, "Search Favorites")
-                                .changed()
-                                || ui.text_edit_singleline(&mut s).changed()
-                            {
-                                Some(s)
-                            } else {
-                                None
-                            }
-                        }
-                        Search::Location(s) => {
-                            search_favorites = false;
-                            let mut s = s.clone();
-                            if ui
-                                .checkbox(&mut search_favorites, "Search Favorites")
-                                .changed()
-                                || ui.text_edit_singleline(&mut s).changed()
-                            {
-                                Some(s)
-                            } else {
-                                None
-                            }
-                        }
-                    };
-                    if let Some(s) = new_search {
-                        search_changed = true;
-
-                        self.search = if s.is_empty() {
-                            Search::None
-                        } else if search_favorites {
-                            Search::Favorites(s)
-                        } else {
-                            Search::Location(s)
-                        };
-                    }
+                    search_changed |= ui
+                        .checkbox(&mut self.search.favorites, "Search Favorites")
+                        .changed();
+                    search_changed |= ui.text_edit_singleline(&mut self.search.value).changed();
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             }
