@@ -1,7 +1,10 @@
 use std::{ffi::OsStr, iter::once, os::windows::ffi::OsStrExt};
 use windows::{
     core::PCWSTR,
-    Win32::{Foundation::{HINSTANCE, HWND}, UI::Shell::{ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW}},
+    Win32::{
+        Foundation::{HINSTANCE, HWND},
+        UI::Shell::{ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW},
+    },
 };
 
 pub fn open_in_explorer(path: impl AsRef<OsStr>, is_dir: bool) {
