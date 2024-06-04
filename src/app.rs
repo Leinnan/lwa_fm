@@ -420,9 +420,13 @@ impl eframe::App for App {
                                     #[cfg(windows)]
                                     if ui.button("Show in explorer").clicked() {
                                         crate::windows_tools::open_in_explorer(val.path(), false);
-
                                         ui.close_menu();
                                     }
+                                }
+                                #[cfg(windows)]
+                                if ui.button("Properties").clicked() {
+                                    crate::windows_tools::open_properties(val.path());
+                                    ui.close_menu();
                                 }
                             });
                             button.on_hover_text(format!(
