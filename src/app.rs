@@ -7,7 +7,7 @@ use egui::{
     Layout, RichText,
 };
 use egui_extras::{Column, TableBuilder};
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 use walkdir::WalkDir;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -61,7 +61,7 @@ impl Default for App {
                 favorites: false,
                 value: String::new(),
             },
-            invert_sort: false
+            invert_sort: false,
         };
         p.refresh_list();
         p
@@ -298,9 +298,11 @@ impl eframe::App for App {
                         self.refresh_list();
                     }
                     ui.toggle_value(&mut self.show_search_bar, "Search");
-                    let old_value = self.sorting.clone();
+                    let old_value = self.sorting;
 
-                    search_changed |= ui.toggle_value(&mut self.invert_sort, "Inverted sort").changed();
+                    search_changed |= ui
+                        .toggle_value(&mut self.invert_sort, "Inverted sort")
+                        .changed();
                     egui::ComboBox::from_label("Sort by:")
                         .selected_text(format!("{:?}", self.sorting))
                         .show_ui(ui, |ui| {
@@ -370,12 +372,12 @@ impl eframe::App for App {
                                 }
                             }
                             button.context_menu(|ui| {
-                                if ui.button("Open in explorer").clicked() {
-                                    let _ = open::that_detached(val.path());
-                                    ui.close_menu();
-                                    return;
-                                }
                                 if is_dir {
+                                    if ui.button("Open in explorer").clicked() {
+                                        let _ = open::that_detached(val.path());
+                                        ui.close_menu();
+                                        return;
+                                    }
                                     let Ok(path) = std::fs::canonicalize(val.path()) else {
                                         return;
                                     };
@@ -413,8 +415,19 @@ impl eframe::App for App {
                                         }
                                         ui.close_menu();
                                     }
+                                } else if ui.button("Show in explorer").clicked() {
+                                    std::process::Command::new("explorer.exe")
+                                        .arg("/select,")
+                                        .arg(&val.path().display().to_string())
+                                        .spawn()
+                                        .unwrap();
+                                    ui.close_menu();
                                 }
                             });
+                            button.on_hover_text(format!(
+                                "{:?}",
+                                std::fs::canonicalize(val.path()).unwrap()
+                            ));
                         });
                     });
                 });
@@ -436,14 +449,22 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 
     // Install my own font (maybe supporting non-latin characters).
     // .ttf and .otf files supported.
-    fonts.font_data.insert(
-        "regular".to_owned(),
-        egui::FontData::from_static(include_bytes!("../static/Inter-Regular.ttf")),
-    );
-    fonts.font_data.insert(
-        "semibold".to_owned(),
-        egui::FontData::from_static(include_bytes!("../static/Inter-SemiBold.ttf")),
-    );
+    let Ok(regular) =
+        fs::read("C:/Users/rybop/AppData/Local/Microsoft/Windows/Fonts/Inter-Regular.ttf")
+    else {
+        return;
+    };
+    let Ok(semibold) =
+        fs::read("C:/Users/rybop/AppData/Local/Microsoft/Windows/Fonts/Inter-SemiBold.ttf")
+    else {
+        return;
+    };
+    fonts
+        .font_data
+        .insert("regular".to_owned(), egui::FontData::from_owned(regular));
+    fonts
+        .font_data
+        .insert("semibold".to_owned(), egui::FontData::from_owned(semibold));
 
     // Put my font first (highest priority) for proportional text:
     fonts
