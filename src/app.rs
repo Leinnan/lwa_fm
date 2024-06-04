@@ -373,8 +373,9 @@ impl eframe::App for App {
                             }
                             button.context_menu(|ui| {
                                 if is_dir {
+                                    #[cfg(windows)]
                                     if ui.button("Open in explorer").clicked() {
-                                        let _ = open::that_detached(val.path());
+                                        crate::windows_tools::open_in_explorer(val.path(), true);
                                         ui.close_menu();
                                         return;
                                     }
@@ -415,13 +416,13 @@ impl eframe::App for App {
                                         }
                                         ui.close_menu();
                                     }
-                                } else if ui.button("Show in explorer").clicked() {
-                                    std::process::Command::new("explorer.exe")
-                                        .arg("/select,")
-                                        .arg(&val.path().display().to_string())
-                                        .spawn()
-                                        .unwrap();
-                                    ui.close_menu();
+                                } else {
+                                    #[cfg(windows)]
+                                    if ui.button("Show in explorer").clicked() {
+                                        crate::windows_tools::open_in_explorer(val.path(), false);
+
+                                        ui.close_menu();
+                                    }
                                 }
                             });
                             button.on_hover_text(format!(

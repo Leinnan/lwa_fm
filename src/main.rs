@@ -5,6 +5,8 @@ use eframe::egui;
 mod app;
 mod consts;
 mod locations;
+#[cfg(windows)]
+mod windows_tools;
 
 fn main() -> eframe::Result<()> {
     const ICON: &[u8] = include_bytes!("../static/icon.png");

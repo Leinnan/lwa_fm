@@ -30,6 +30,7 @@ image = "0.25"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
+windows = "0.56.0"
 
 [build-dependencies]
 embed-resource = "2.4.2"
