@@ -431,7 +431,9 @@ impl eframe::App for App {
                             });
                             button.on_hover_text(format!(
                                 "{:?}",
-                                std::fs::canonicalize(val.path()).unwrap()
+                                // consider caching here
+                                std::fs::canonicalize(val.path())
+                                    .unwrap_or(val.path().to_path_buf())
                             ));
                         });
                     });

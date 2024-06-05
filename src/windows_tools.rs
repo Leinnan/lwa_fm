@@ -19,15 +19,21 @@ pub fn open_in_explorer(path: impl AsRef<OsStr>, is_dir: bool) {
     }
 }
 
+/// Opens the explorer properties for a given path
 pub fn open_properties(path: impl AsRef<OsStr>) {
     // Convert the path to a wide string
     let wide_path: Vec<u16> = OsStr::new(&path).encode_wide().chain(once(0)).collect();
+    // Convert the verb "properties" to a wide string
+    let wide_verb: Vec<u16> = OsStr::new("properties")
+        .encode_wide()
+        .chain(once(0))
+        .collect();
     // Set up the SHELLEXECUTEINFOW structure
     let mut sei = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_INVOKEIDLIST,
         hwnd: HWND(0),
-        lpVerb: PCWSTR::from_raw("properties\0".as_ptr() as *const u16),
+        lpVerb: PCWSTR::from_raw(wide_verb.as_ptr()),
         lpFile: PCWSTR::from_raw(wide_path.as_ptr()),
         lpParameters: PCWSTR::null(),
         lpDirectory: PCWSTR::null(),
@@ -38,10 +44,9 @@ pub fn open_properties(path: impl AsRef<OsStr>) {
 
     // Open the properties window
     unsafe {
-        if ShellExecuteExW(&mut sei).is_ok() {
-            println!("Properties window opened successfully.");
-        } else {
-            eprintln!("Failed to open properties window.");
+        match ShellExecuteExW(&mut sei) {
+            Ok(_) => {}
+            Err(e) => eprintln!("Failed to open properties window: {:?}", e),
         }
     }
 }
