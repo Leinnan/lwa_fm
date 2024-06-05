@@ -244,6 +244,38 @@ impl eframe::App for App {
                 ui.add_space(TOP_SIDE_MARGIN);
             });
 
+        egui::TopBottomPanel::bottom("bottomPanel")
+            .frame(egui::Frame::canvas(&ctx.style()))
+            .show(ctx, |ui| {
+                ui.add_space(TOP_SIDE_MARGIN);
+                ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
+                    egui::widgets::global_dark_light_mode_switch(ui);
+                    ui.hyperlink_to(
+                        format!("{} v {}", egui::special_emojis::GITHUB, VERSION),
+                        HOMEPAGE,
+                    );
+                    egui::warn_if_debug_build(ui);
+                    if ui.toggle_value(&mut self.show_hidden, "Hidden").changed() {
+                        self.refresh_list();
+                    }
+                    ui.toggle_value(&mut self.show_search_bar, "Search");
+                    let old_value = self.sorting;
+
+                    search_changed |= ui
+                        .toggle_value(&mut self.invert_sort, "Inverted sort")
+                        .changed();
+                    egui::ComboBox::from_label("Sort by:")
+                        .selected_text(format!("{:?}", self.sorting))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.sorting, Sort::Name, "Name");
+                            ui.selectable_value(&mut self.sorting, Sort::Created, "Created");
+                            ui.selectable_value(&mut self.sorting, Sort::Modified, "Modified");
+                        });
+                    search_changed |= old_value != self.sorting;
+                });
+                ui.add_space(TOP_SIDE_MARGIN);
+            });
+
         egui::SidePanel::left("leftPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
@@ -281,38 +313,6 @@ impl eframe::App for App {
                             });
                     }
                 });
-            });
-
-        egui::TopBottomPanel::bottom("bottomPanel")
-            .frame(egui::Frame::canvas(&ctx.style()))
-            .show(ctx, |ui| {
-                ui.add_space(TOP_SIDE_MARGIN);
-                ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
-                    egui::widgets::global_dark_light_mode_switch(ui);
-                    ui.hyperlink_to(
-                        format!("{} v {}", egui::special_emojis::GITHUB, VERSION),
-                        HOMEPAGE,
-                    );
-                    egui::warn_if_debug_build(ui);
-                    if ui.toggle_value(&mut self.show_hidden, "Hidden").changed() {
-                        self.refresh_list();
-                    }
-                    ui.toggle_value(&mut self.show_search_bar, "Search");
-                    let old_value = self.sorting;
-
-                    search_changed |= ui
-                        .toggle_value(&mut self.invert_sort, "Inverted sort")
-                        .changed();
-                    egui::ComboBox::from_label("Sort by:")
-                        .selected_text(format!("{:?}", self.sorting))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.sorting, Sort::Name, "Name");
-                            ui.selectable_value(&mut self.sorting, Sort::Created, "Created");
-                            ui.selectable_value(&mut self.sorting, Sort::Modified, "Modified");
-                        });
-                    search_changed |= old_value != self.sorting;
-                });
-                ui.add_space(TOP_SIDE_MARGIN);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -497,6 +497,11 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 
     // Tell egui to use these fonts:
     ctx.set_fonts(fonts);
+    ctx.style_mut(|style| {
+        for (_text_style, font_id) in style.text_styles.iter_mut() {
+            font_id.size *= 1.2;
+        }
+    });
 }
 
 fn get_starting_path() -> PathBuf {
