@@ -345,6 +345,7 @@ impl eframe::App for App {
                         let meta = val.metadata().unwrap();
                         row.col(|ui| {
                             ui.add_space(VERTICAL_SPACING);
+                            // ui.allocate_space(egui::vec2(available_width, 20.0));
                             let file_type = meta.file_type();
                             #[cfg(target_os = "windows")]
                             let is_dir = {
@@ -360,8 +361,9 @@ impl eframe::App for App {
                             } else {
                                 RichText::strong(text.into())
                             };
-                            let button = ui.button(text);
-                            if button.clicked() {
+                            let added_button = ui.button(text);
+
+                            if added_button.clicked() {
                                 if meta.is_file() {
                                     let _ = open::that_detached(val.path());
                                 } else {
@@ -371,7 +373,7 @@ impl eframe::App for App {
                                     new_path = Some(path);
                                 }
                             }
-                            button.context_menu(|ui| {
+                            added_button.context_menu(|ui| {
                                 if is_dir {
                                     #[cfg(windows)]
                                     if ui.button("Open in explorer").clicked() {
@@ -429,7 +431,7 @@ impl eframe::App for App {
                                     ui.close_menu();
                                 }
                             });
-                            button.on_hover_text(format!(
+                            added_button.on_hover_text(format!(
                                 "{:?}",
                                 // consider caching here
                                 std::fs::canonicalize(val.path())
@@ -454,15 +456,16 @@ fn setup_custom_fonts(ctx: &egui::Context) {
     // Start with the default fonts (we will be adding to them rather than replacing them).
     let mut fonts = egui::FontDefinitions::default();
 
-    // Install my own font (maybe supporting non-latin characters).
-    // .ttf and .otf files supported.
-    let Ok(regular) =
-        fs::read("C:/Users/rybop/AppData/Local/Microsoft/Windows/Fonts/Inter-Regular.ttf")
-    else {
+    let Ok(app_data) = std::env::var("APPDATA") else {
+        return;
+    };
+    let font_path = std::path::Path::new(&app_data);
+
+    let Ok(regular) = fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos.ttf")) else {
         return;
     };
     let Ok(semibold) =
-        fs::read("C:/Users/rybop/AppData/Local/Microsoft/Windows/Fonts/Inter-SemiBold.ttf")
+        fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos-semibold.ttf"))
     else {
         return;
     };
