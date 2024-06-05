@@ -7,7 +7,7 @@ use egui::{
     Layout, RichText,
 };
 use egui_extras::{Column, TableBuilder};
-use std::{fs, path::PathBuf};
+use std::{fs, os::windows::fs::MetadataExt, path::PathBuf};
 use walkdir::WalkDir;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -32,6 +32,7 @@ pub enum Sort {
     Name,
     Modified,
     Created,
+    Size,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default)]
@@ -177,6 +178,11 @@ impl App {
                         .created()
                         .unwrap()
                         .cmp(&b.metadata().unwrap().created().unwrap()),
+                    Sort::Size => a
+                        .metadata()
+                        .unwrap()
+                        .file_size()
+                        .cmp(&b.metadata().unwrap().file_size()),
                 })
         });
         if self.invert_sort {
@@ -280,15 +286,17 @@ impl eframe::App for App {
                             ui.selectable_value(&mut self.sorting, Sort::Name, "Name");
                             ui.selectable_value(&mut self.sorting, Sort::Created, "Created");
                             ui.selectable_value(&mut self.sorting, Sort::Modified, "Modified");
+                            ui.selectable_value(&mut self.sorting, Sort::Size, "Size");
                         });
                     search_changed |= old_value != self.sorting;
                 });
+                ui.add_space(TOP_SIDE_MARGIN);
             });
 
         egui::SidePanel::left("leftPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
-                ui.add_space(TOP_SIDE_MARGIN);
+                ui.allocate_space([160.0,TOP_SIDE_MARGIN].into());
                 ui.with_layout(Layout::top_down(eframe::emath::Align::Min), |ui| {
                     for id in ["Favorites", "User", "Drives"] {
                         let Some(collection) = self.locations.get_mut(id) else {
@@ -305,7 +313,10 @@ impl eframe::App for App {
                                     ui.with_layout(
                                         Layout::left_to_right(eframe::emath::Align::Min),
                                         |ui| {
-                                            let button = ui.button(&location.name);
+                                            let button = ui.add(
+                                                egui::Button::new(RichText::new(&location.name).strong()).frame(false)
+                                                    .fill(egui::Color32::from_white_alpha(0)),
+                                            );
                                             if button.clicked() {
                                                 new_path = Some(location.path.clone());
                                                 return;
@@ -327,6 +338,7 @@ impl eframe::App for App {
                                     collection.locations.remove(id);
                                 }
                             });
+                            ui.add_space(15.0);
                     }
                 });
             });
@@ -358,7 +370,9 @@ impl eframe::App for App {
                 table.body(|body| {
                     body.rows(text_height, self.list.len(), |mut row| {
                         let val = &self.list[row.index()];
-                        let meta = val.metadata().unwrap();
+                        let Ok(meta) = val.metadata() else {
+                            return;
+                        };
                         row.col(|ui| {
                             ui.add_space(VERTICAL_SPACING);
                             // ui.allocate_space(egui::vec2(available_width, 20.0));
@@ -377,7 +391,9 @@ impl eframe::App for App {
                             } else {
                                 RichText::strong(text.into())
                             };
-                            let added_button = ui.button(text);
+                            let added_button = ui.add(
+                                egui::Button::new(text).fill(egui::Color32::from_white_alpha(0)),
+                            );
 
                             if added_button.clicked() {
                                 if meta.is_file() {
