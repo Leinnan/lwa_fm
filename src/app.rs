@@ -455,53 +455,59 @@ impl eframe::App for App {
 fn setup_custom_fonts(ctx: &egui::Context) {
     // Start with the default fonts (we will be adding to them rather than replacing them).
     let mut fonts = egui::FontDefinitions::default();
+    if let Some((regular, semibold)) = get_fonts() {
+        fonts
+            .font_data
+            .insert("regular".to_owned(), egui::FontData::from_owned(regular));
+        fonts
+            .font_data
+            .insert("semibold".to_owned(), egui::FontData::from_owned(semibold));
 
-    let Ok(app_data) = std::env::var("APPDATA") else {
-        return;
-    };
-    let font_path = std::path::Path::new(&app_data);
+        // Put my font first (highest priority) for proportional text:
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "regular".to_owned());
+        fonts
+            .families
+            .entry(egui::FontFamily::Name("semibold".into()))
+            .or_default()
+            .insert(0, "semibold".to_owned());
 
-    let Ok(regular) = fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos.ttf")) else {
-        return;
-    };
-    let Ok(semibold) =
-        fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos-semibold.ttf"))
-    else {
-        return;
-    };
-    fonts
-        .font_data
-        .insert("regular".to_owned(), egui::FontData::from_owned(regular));
-    fonts
-        .font_data
-        .insert("semibold".to_owned(), egui::FontData::from_owned(semibold));
+        // Put my font as last fallback for monospace:
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push("regular".to_owned());
 
-    // Put my font first (highest priority) for proportional text:
-    fonts
-        .families
-        .entry(egui::FontFamily::Proportional)
-        .or_default()
-        .insert(0, "regular".to_owned());
-    fonts
-        .families
-        .entry(egui::FontFamily::Name("semibold".into()))
-        .or_default()
-        .insert(0, "semibold".to_owned());
-
-    // Put my font as last fallback for monospace:
-    fonts
-        .families
-        .entry(egui::FontFamily::Monospace)
-        .or_default()
-        .push("regular".to_owned());
-
-    // Tell egui to use these fonts:
-    ctx.set_fonts(fonts);
+        // Tell egui to use these fonts:
+        ctx.set_fonts(fonts);
+    }
     ctx.style_mut(|style| {
         for (_text_style, font_id) in style.text_styles.iter_mut() {
             font_id.size *= 1.2;
         }
     });
+}
+
+fn get_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
+    let Ok(app_data) = std::env::var("APPDATA") else {
+        return None;
+    };
+    let font_path = std::path::Path::new(&app_data);
+
+    let Ok(regular) = fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos.ttf")) else {
+        return None;
+    };
+    let Ok(semibold) =
+        fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos-semibold.ttf"))
+    else {
+        return None;
+    };
+
+    Some((regular, semibold))
 }
 
 fn get_starting_path() -> PathBuf {
