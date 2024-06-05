@@ -47,7 +47,13 @@ impl Default for App {
         let mut locations = HashMap::new();
         locations.insert("User".into(), Locations::get_user_dirs());
         locations.insert("Drives".into(), Locations::get_drives());
-        locations.insert("Favorites".into(), Locations(vec![], true));
+        locations.insert(
+            "Favorites".into(),
+            Locations {
+                editable: true,
+                ..Default::default()
+            },
+        );
         let mut p = Self {
             show_search_bar: false,
             show_hidden: false,
@@ -79,9 +85,13 @@ impl App {
         if let Some(storage) = cc.storage {
             let mut value: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
             if !value.locations.contains_key("Favorites") {
-                value
-                    .locations
-                    .insert("Favorites".into(), Locations(vec![], true));
+                value.locations.insert(
+                    "Favorites".into(),
+                    Locations {
+                        editable: true,
+                        ..Default::default()
+                    },
+                );
             }
             if let Some(user) = value.locations.get_mut("User") {
                 *user = Locations::get_user_dirs();
@@ -112,7 +122,7 @@ impl App {
             self.locations
                 .get("Favorites")
                 .unwrap()
-                .0
+                .locations
                 .iter()
                 .map(|location| &location.path)
                 .collect()
@@ -278,36 +288,43 @@ impl eframe::App for App {
         egui::SidePanel::left("leftPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
+                ui.add_space(TOP_SIDE_MARGIN);
                 ui.with_layout(Layout::top_down(eframe::emath::Align::Min), |ui| {
                     for id in ["Favorites", "User", "Drives"] {
                         let Some(collection) = self.locations.get_mut(id) else {
                             continue;
                         };
-                        if collection.0.is_empty() {
+                        if collection.locations.is_empty() {
                             continue;
                         }
                         egui::CollapsingHeader::new(id)
                             .default_open(true)
                             .show(ui, |ui| {
                                 let mut id_to_remove = None;
-                                for (i, location) in collection.0.iter().enumerate() {
-                                    let button = ui.button(&location.name);
-                                    if button.clicked() {
-                                        new_path = Some(location.path.clone());
-                                        return;
-                                    }
-                                    if !collection.1 {
-                                        continue;
-                                    }
-                                    button.context_menu(|ui| {
-                                        if ui.button("Remove").clicked() {
-                                            id_to_remove = Some(i);
-                                            ui.close_menu();
-                                        }
-                                    });
+                                for (i, location) in collection.locations.iter().enumerate() {
+                                    ui.with_layout(
+                                        Layout::left_to_right(eframe::emath::Align::Min),
+                                        |ui| {
+                                            let button = ui.button(&location.name);
+                                            if button.clicked() {
+                                                new_path = Some(location.path.clone());
+                                                return;
+                                            }
+                                            ui.add_space(10.0);
+                                            if !collection.editable {
+                                                return;
+                                            }
+                                            button.context_menu(|ui| {
+                                                if ui.button("Remove").clicked() {
+                                                    id_to_remove = Some(i);
+                                                    ui.close_menu();
+                                                }
+                                            });
+                                        },
+                                    );
                                 }
                                 if let Some(id) = id_to_remove {
-                                    collection.0.remove(id);
+                                    collection.locations.remove(id);
                                 }
                             });
                     }
@@ -387,7 +404,7 @@ impl eframe::App for App {
                                         .locations
                                         .get("Favorites")
                                         .unwrap()
-                                        .0
+                                        .locations
                                         .iter()
                                         .enumerate()
                                         // THIS MAYBE WOULD NEED TO BE CHANGED ON PLATFORMS DIFFERENT THAN WINDOWS
@@ -404,7 +421,7 @@ impl eframe::App for App {
                                             .unwrap()
                                             .to_owned();
                                         if let Some(fav) = self.locations.get_mut("Favorites") {
-                                            fav.0.push(Location { name, path });
+                                            fav.locations.push(Location { name, path });
                                         }
                                         ui.close_menu();
                                         return;
@@ -413,7 +430,7 @@ impl eframe::App for App {
                                         && ui.button("Remove from favorites").clicked()
                                     {
                                         if let Some(fav) = self.locations.get_mut("Favorites") {
-                                            fav.0.remove(existing_path.unwrap());
+                                            fav.locations.remove(existing_path.unwrap());
                                         }
                                         ui.close_menu();
                                     }
@@ -486,7 +503,7 @@ fn setup_custom_fonts(ctx: &egui::Context) {
     }
     ctx.style_mut(|style| {
         for (_text_style, font_id) in style.text_styles.iter_mut() {
-            font_id.size *= 1.2;
+            font_id.size *= 1.4;
         }
     });
 }
