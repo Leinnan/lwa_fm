@@ -14,8 +14,9 @@ jobs:
     check-and-build:
       strategy:
         matrix:
-          os: [ubuntu-latest, windows-latest]
+          os: [ubuntu-latest, windows-2022]
       runs-on: ${{ matrix.os }}
+      name: Build-${{ matrix.os }}
       concurrency:
         group: ${{ matrix.os }}-build-${{ github.head_ref }}
         cancel-in-progress: true
