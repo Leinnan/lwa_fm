@@ -273,7 +273,6 @@ impl eframe::App for App {
                         });
                     search_changed |= old_value != self.sorting;
                 });
-                ui.add_space(TOP_SIDE_MARGIN);
             });
 
         egui::SidePanel::left("leftPanel")
