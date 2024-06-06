@@ -7,7 +7,7 @@ use egui::{
     Layout, RichText,
 };
 use egui_extras::{Column, TableBuilder};
-use std::{fs, os::windows::fs::MetadataExt, path::PathBuf};
+use std::{fs, path::PathBuf};
 use walkdir::WalkDir;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -178,11 +178,17 @@ impl App {
                         .created()
                         .unwrap()
                         .cmp(&b.metadata().unwrap().created().unwrap()),
-                    Sort::Size => a
-                        .metadata()
-                        .unwrap()
-                        .file_size()
-                        .cmp(&b.metadata().unwrap().file_size()),
+                    #[cfg(windows)]
+                    Sort::Size => {
+                        std::os::windows::fs::MetadataExt::file_size(&a.metadata().unwrap()).cmp(
+                            &std::os::windows::fs::MetadataExt::file_size(&b.metadata().unwrap()),
+                        )
+                    }
+                    #[cfg(target_os = "linux")]
+                    Sort::Size => std::os::linux::fs::MetadataExt::st_size(&a.metadata().unwrap())
+                        .cmp(&std::os::linux::fs::MetadataExt::st_size(
+                            &b.metadata().unwrap(),
+                        )),
                 })
         });
         if self.invert_sort {
