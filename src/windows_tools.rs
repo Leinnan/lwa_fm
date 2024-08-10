@@ -2,8 +2,11 @@ use std::{ffi::OsStr, iter::once, os::windows::ffi::OsStrExt};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{HINSTANCE, HWND},
-        UI::Shell::{ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW},
+        Foundation::{HANDLE, HINSTANCE, HWND},
+        UI::{
+            Shell::{ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW},
+            WindowsAndMessaging::HMENU,
+        },
     },
 };
 
@@ -48,5 +51,46 @@ pub fn open_properties(path: impl AsRef<OsStr>) {
             Ok(_) => {}
             Err(e) => eprintln!("Failed to open properties window: {:?}", e),
         }
+    }
+}
+
+pub fn open_context_menu(path: impl AsRef<OsStr>) {
+    unsafe {
+        use windows::{
+            core::PCWSTR,
+            Win32::Foundation::HWND,
+            Win32::System::Com::{CoCreateInstance, CoInitializeEx, COINIT_MULTITHREADED},
+            Win32::UI::Shell::{
+                IContextMenu, SHCreateItemFromParsingName, CMF_NORMAL, CMINVOKECOMMANDINFO,
+            },
+            Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        };
+        // let bind_context = CreateBindCtx(0).unwrap();
+        // Convert path to wide string (PCWSTR)
+        let wide_path: Vec<u16> = OsStr::new(&path).encode_wide().chain(once(0)).collect();
+        let wide_path = PCWSTR(wide_path.as_ptr());
+
+        // Create shell item
+        let context_menu: IContextMenu = SHCreateItemFromParsingName(wide_path, None).unwrap();
+
+        // Query the context menu
+        let hwnd: HMENU = HMENU(0); // Replace with a valid window handle if available
+        let menu = context_menu
+            .QueryContextMenu(hwnd, 0, 1, 0x7FFF, CMF_NORMAL)
+            .unwrap();
+
+        // Invoke a command (example: first item in the context menu)
+        let invoke_command_info = CMINVOKECOMMANDINFO {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+            fMask: 0,
+            hwnd: HWND(hwnd.0),
+            lpVerb: windows::core::PCSTR::null(),
+            lpParameters: windows::core::PCSTR::null(),
+            lpDirectory: windows::core::PCSTR::null(),
+            nShow: SW_SHOWNORMAL.0 as i32,
+            dwHotKey: 0,
+            hIcon: HANDLE::default(),
+        };
+        context_menu.InvokeCommand(&invoke_command_info).unwrap();
     }
 }

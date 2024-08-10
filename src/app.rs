@@ -2,6 +2,7 @@ use crate::{
     consts::*,
     locations::{Location, Locations},
 };
+use core::panic;
 use egui::{
     ahash::{HashMap, HashMapExt},
     Layout, RichText,
@@ -13,7 +14,6 @@ use walkdir::WalkDir;
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
-    show_search_bar: bool,
     show_hidden: bool,
     #[serde(skip)]
     cur_path: PathBuf,
@@ -33,10 +33,12 @@ pub enum Sort {
     Modified,
     Created,
     Size,
+    Random,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default)]
 pub struct Search {
+    pub visible: bool,
     pub favorites: bool,
     pub value: String,
     pub depth: usize,
@@ -56,13 +58,13 @@ impl Default for App {
             },
         );
         let mut p = Self {
-            show_search_bar: false,
             show_hidden: false,
             cur_path: get_starting_path(),
             locations,
             sorting: Sort::Created,
             list: vec![],
             search: Search {
+                visible: false,
                 case_sensitive: false,
                 depth: 3,
                 favorites: false,
@@ -110,6 +112,9 @@ impl App {
 impl App {
     fn change_current_dir(&mut self, new_path: PathBuf) {
         self.cur_path = new_path;
+        if !self.search.value.is_empty() {
+            self.search.value = "".into();
+        }
         self.refresh_list();
     }
     fn refresh_list(&mut self) {
@@ -156,12 +161,20 @@ impl App {
                     .collect::<Vec<walkdir::DirEntry>>()
             })
             .collect();
+        if &self.sorting == &Sort::Random {
+            use rand::seq::SliceRandom;
+            use rand::thread_rng;
+            let mut rng = thread_rng();
 
+            dir_entries.shuffle(&mut rng);
+            return dir_entries;
+        }
         dir_entries.sort_by(|a, b| {
             a.file_type()
                 .is_file()
                 .cmp(&b.file_type().is_file())
                 .then(match &self.sorting {
+                    Sort::Random => panic!(),
                     Sort::Name => a
                         .file_name()
                         .to_ascii_lowercase()
@@ -280,7 +293,7 @@ impl eframe::App for App {
                     if ui.toggle_value(&mut self.show_hidden, "Hidden").changed() {
                         self.refresh_list();
                     }
-                    ui.toggle_value(&mut self.show_search_bar, "Search");
+                    ui.toggle_value(&mut self.search.visible, "Search");
                     let old_value = self.sorting;
 
                     search_changed |= ui
@@ -293,6 +306,7 @@ impl eframe::App for App {
                             ui.selectable_value(&mut self.sorting, Sort::Created, "Created");
                             ui.selectable_value(&mut self.sorting, Sort::Modified, "Modified");
                             ui.selectable_value(&mut self.sorting, Sort::Size, "Size");
+                            ui.selectable_value(&mut self.sorting, Sort::Random, "Random");
                         });
                     search_changed |= old_value != self.sorting;
                 });
@@ -354,7 +368,7 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
-            if self.show_search_bar {
+            if self.search.visible {
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
                     search_changed |= ui
                         .add(egui::Slider::new(&mut self.search.depth, 1..=5).text("Search depth"))
@@ -465,6 +479,11 @@ impl eframe::App for App {
                                         crate::windows_tools::open_in_explorer(val.path(), false);
                                         ui.close_menu();
                                     }
+                                }
+                                #[cfg(windows)]
+                                if ui.button("Windows context menu").clicked() {
+                                    crate::windows_tools::open_context_menu(val.path());
+                                    ui.close_menu();
                                 }
                                 #[cfg(windows)]
                                 if ui.button("Properties").clicked() {
