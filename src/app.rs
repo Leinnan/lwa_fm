@@ -5,7 +5,7 @@ use crate::{
 use core::panic;
 use egui::{
     ahash::{HashMap, HashMapExt},
-    Layout, RichText,
+    Layout, RichText, Vec2,
 };
 use egui_extras::{Column, TableBuilder};
 use std::{ffi::OsStr, fs, path::PathBuf};
@@ -282,6 +282,12 @@ impl eframe::App for App {
                             }
                         }
                     }
+                    let size_left = ui.available_size();
+                    ui.add_space(size_left.x - size_left.y - size_left.y);
+                    ui.toggle_value(&mut self.search.visible, "🔍");
+                    if ui.toggle_value(&mut self.show_hidden, "👁").changed() {
+                        self.refresh_list();
+                    }
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             });
@@ -297,23 +303,22 @@ impl eframe::App for App {
                         HOMEPAGE,
                     );
                     egui::warn_if_debug_build(ui);
-                    if ui.toggle_value(&mut self.show_hidden, "Hidden").changed() {
-                        self.refresh_list();
-                    }
-                    ui.toggle_value(&mut self.search.visible, "Search");
                     let old_value = self.sorting;
 
-                    search_changed |= ui
-                        .toggle_value(&mut self.invert_sort, "Inverted sort")
-                        .changed();
-                    egui::ComboBox::from_label("Sort by:")
-                        .selected_text(format!("{:?}", self.sorting))
+                    egui::ComboBox::from_label("")
+                        .selected_text(format!("↕ {:?}", self.sorting))
                         .show_ui(ui, |ui| {
+                            ui.label("Sort by");
+                            ui.separator();
                             ui.selectable_value(&mut self.sorting, Sort::Name, "Name");
                             ui.selectable_value(&mut self.sorting, Sort::Created, "Created");
                             ui.selectable_value(&mut self.sorting, Sort::Modified, "Modified");
                             ui.selectable_value(&mut self.sorting, Sort::Size, "Size");
                             ui.selectable_value(&mut self.sorting, Sort::Random, "Random");
+                            ui.separator();
+                            search_changed |= ui
+                                .toggle_value(&mut self.invert_sort, "Inverted Sorting")
+                                .changed();
                         });
                     search_changed |= old_value != self.sorting;
                 });
@@ -378,15 +383,20 @@ impl eframe::App for App {
             if self.search.visible {
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
                     search_changed |= ui
-                        .add(egui::Slider::new(&mut self.search.depth, 1..=5).text("Search depth"))
+                        .add(egui::TextEdit::singleline(&mut self.search.value).hint_text("Search"))
                         .changed();
                     search_changed |= ui
-                        .checkbox(&mut self.search.case_sensitive, "Case sensitive")
+                        .add(egui::Slider::new(&mut self.search.depth, 1..=7))
+                        .on_hover_text("Search depth")
                         .changed();
                     search_changed |= ui
-                        .checkbox(&mut self.search.favorites, "Search Favorites")
+                        .toggle_value(&mut self.search.case_sensitive, "🇨")
+                        .on_hover_text("Case sensitive")
                         .changed();
-                    search_changed |= ui.text_edit_singleline(&mut self.search.value).changed();
+                    search_changed |= ui
+                        .toggle_value(&mut self.search.favorites, "💕")
+                        .on_hover_text("Search favorites")
+                        .changed();
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             }
@@ -493,10 +503,14 @@ impl eframe::App for App {
                                     ui.close_menu();
                                 }
                             });
-                            let ext = val.path().extension();
-                            if ext.eq(&Some(OsStr::new("png")))
-                                || ext.eq(&Some(OsStr::new("jpg")))
-                                || ext.eq(&Some(OsStr::new("jpeg")))
+                            let ext = val
+                                .path()
+                                .extension()
+                                .unwrap_or_default()
+                                .to_ascii_lowercase();
+                            if ext.eq(&OsStr::new("png"))
+                                || ext.eq(&OsStr::new("jpg"))
+                                || ext.eq(&OsStr::new("jpeg"))
                             {
                                 added_button.on_hover_ui(|ui| {
                                     let path = std::fs::canonicalize(val.path())
@@ -504,7 +518,11 @@ impl eframe::App for App {
                                         .to_string_lossy()
                                         .replace("\\\\?\\", "");
                                     let path = format!("file://{}", path);
-                                    ui.image(path);
+                                    ui.add(
+                                        egui::Image::new(path)
+                                            .maintain_aspect_ratio(true)
+                                            .max_size(Vec2::new(300.0, 300.0)),
+                                    );
                                 });
                             } else {
                                 added_button.on_hover_text(format!(
