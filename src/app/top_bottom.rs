@@ -78,7 +78,13 @@ impl App {
                     ui.add_space(amount);
                     #[allow(clippy::collapsible_if)]
                     if self.dir_has_cargo && ui.button(">").on_hover_text("Run project").clicked() {
-                        match Command::new("cargo").arg("run").arg("--release").spawn() {
+                        // todo: add possibility to stop it again
+                        match Command::new("cargo")
+                            .arg("run")
+                            .arg("--release")
+                            .current_dir(self.cur_path.clone())
+                            .spawn()
+                        {
                             Ok(_) => {
                                 toast!(Success, "Running project");
                             }
