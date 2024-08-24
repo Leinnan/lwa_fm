@@ -163,7 +163,7 @@ impl App {
                     .collect::<Vec<walkdir::DirEntry>>()
             })
             .collect();
-        if &self.sorting == &Sort::Random {
+        if self.sorting == Sort::Random {
             use rand::seq::SliceRandom;
             use rand::thread_rng;
             let mut rng = thread_rng();

@@ -14,14 +14,14 @@ opt-level = 2
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-eframe = { version = "0.27", default-features = false, features = [
-    "accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
+eframe = { version = "0.28", default-features = false, features = [
+   #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     "default_fonts", # Embed the default egui fonts.
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
 ] }
-egui = "0.27"
-egui_extras = "0.27"
+egui = "0.28"
+egui_extras = "0.28"
 open = "5.1.2"
 walkdir = "2"
 sysinfo = "0.31"
