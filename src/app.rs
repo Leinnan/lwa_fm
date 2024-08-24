@@ -24,6 +24,8 @@ pub struct App {
     list: Vec<walkdir::DirEntry>,
     #[serde(skip)]
     search: Search,
+    #[serde(skip)]
+    dir_has_cargo: bool,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Debug, Clone, Copy)]
@@ -72,6 +74,7 @@ impl Default for App {
                 value: String::new(),
             },
             invert_sort: false,
+            dir_has_cargo: false,
         };
         p.refresh_list();
         p
@@ -121,6 +124,10 @@ impl App {
     }
     fn refresh_list(&mut self) {
         self.list = self.read_dir();
+        self.dir_has_cargo = self
+            .list
+            .iter()
+            .any(|entry| entry.file_name().eq(OsStr::new("Cargo.toml")));
     }
 
     fn read_dir(&self) -> Vec<walkdir::DirEntry> {
@@ -288,9 +295,29 @@ impl eframe::App for App {
                         }
                     }
                     let size_left = ui.available_size();
-                    ui.add_space(size_left.x - size_left.y - size_left.y);
-                    ui.toggle_value(&mut self.search.visible, "🔍");
-                    if ui.toggle_value(&mut self.show_hidden, "👁").changed() {
+                    let amount = if self.dir_has_cargo {
+                        size_left.y * 3.0
+                    } else {
+                        size_left.y * 2.0
+                    };
+                    let amount = size_left.x - amount;
+                    ui.add_space(amount);
+                    if self.dir_has_cargo {
+                        if ui.button(">").on_hover_text("Run project").clicked() {
+                            std::process::Command::new("cargo")
+                                .arg("run")
+                                .arg("--release")
+                                .spawn()
+                                .unwrap();
+                        }
+                    }
+                    ui.toggle_value(&mut self.search.visible, "🔍")
+                        .on_hover_text("Search");
+                    if ui
+                        .toggle_value(&mut self.show_hidden, "👁")
+                        .on_hover_text("Display hidden files")
+                        .changed()
+                    {
                         self.refresh_list();
                     }
                 });
