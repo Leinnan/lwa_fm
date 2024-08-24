@@ -22,7 +22,7 @@ eframe = { version = "0.28", default-features = false, features = [
 ] }
 egui = "0.28"
 egui_extras = { version = "*", features = ["all_loaders"] }
-open = "5.1.2"
+open = "5.3"
 walkdir = "2"
 sysinfo = "0.31"
 directories = "5"
