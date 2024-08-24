@@ -275,7 +275,12 @@ impl eframe::App for App {
                         }
                         #[cfg(not(windows))]
                         {
-                            path += e.to_str().unwrap();
+                            if let Some(part) = e.to_str() {
+                                if !part.starts_with("/") && !path.ends_with("/") {
+                                    path += "/";
+                                }
+                                path += part;
+                            }
                             if ui.button(e.to_str().unwrap()).clicked() {
                                 new_path = Some(path.into());
                                 return;
