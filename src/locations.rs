@@ -7,6 +7,13 @@ pub struct Locations {
     pub editable: bool,
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+#[serde(default)]
+pub struct Location {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 impl Locations {
     #[cfg(not(target_os = "macos"))]
     pub fn get_drives() -> Self {
@@ -17,7 +24,7 @@ impl Locations {
             .map(|drive| Location {
                 name: format!(
                     "{} ({})",
-                    drive.name().to_str().unwrap(),
+                    drive.name().to_str().unwrap_or(""),
                     drive.mount_point().display()
                 ),
                 path: drive.mount_point().to_path_buf(),
@@ -75,11 +82,4 @@ impl Locations {
             editable: false,
         }
     }
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Default)]
-#[serde(default)]
-pub struct Location {
-    pub name: String,
-    pub path: PathBuf,
 }
