@@ -8,6 +8,7 @@ pub struct Locations {
 }
 
 impl Locations {
+    #[cfg(not(target_os = "macos"))]
     pub fn get_drives() -> Self {
         let mut drives = sysinfo::Disks::new_with_refreshed_list();
         drives.sort_by(|a, b| a.mount_point().cmp(b.mount_point()));

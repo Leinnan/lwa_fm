@@ -49,6 +49,7 @@ impl Default for App {
     fn default() -> Self {
         let mut locations = HashMap::new();
         locations.insert("User".into(), Locations::get_user_dirs());
+        #[cfg(not(target_os = "macos"))]
         locations.insert("Drives".into(), Locations::get_drives());
         locations.insert(
             "Favorites".into(),
@@ -99,6 +100,7 @@ impl App {
             if let Some(user) = value.locations.get_mut("User") {
                 *user = Locations::get_user_dirs();
             }
+            #[cfg(not(target_os = "macos"))]
             if let Some(drive) = value.locations.get_mut("Drives") {
                 *drive = Locations::get_drives();
             }
@@ -200,6 +202,11 @@ impl App {
                     #[cfg(target_os = "linux")]
                     Sort::Size => std::os::linux::fs::MetadataExt::st_size(&a.metadata().unwrap())
                         .cmp(&std::os::linux::fs::MetadataExt::st_size(
+                            &b.metadata().unwrap(),
+                        )),
+                    #[cfg(target_os = "macos")]
+                    Sort::Size => std::os::macos::fs::MetadataExt::st_size(&a.metadata().unwrap())
+                        .cmp(&std::os::macos::fs::MetadataExt::st_size(
                             &b.metadata().unwrap(),
                         )),
                 })
