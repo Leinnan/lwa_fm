@@ -2,11 +2,8 @@ use std::{ffi::OsStr, iter::once, os::windows::ffi::OsStrExt};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, WPARAM},
-        UI::{
-            Shell::{ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW},
-            WindowsAndMessaging::HMENU,
-        },
+        Foundation::{HINSTANCE, HWND},
+        UI::Shell::{ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW},
     },
 };
 
@@ -52,118 +49,4 @@ pub fn open_properties(path: impl AsRef<OsStr>) {
             Err(e) => eprintln!("Failed to open properties window: {:?}", e),
         }
     }
-}
-
-pub fn open_context_menu(path: impl AsRef<OsStr>) {
-    unsafe {
-        use std::ffi::CString;
-        use windows::{
-            core::PCSTR,
-            Win32::{
-                Foundation::{HWND, POINT},
-                UI::{
-                    Shell::{
-                        ShellExecuteExA, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOCLOSEPROCESS,
-                        SHELLEXECUTEINFOA,
-                    },
-                    WindowsAndMessaging::{
-                        GetCursorPos, PostMessageA, TrackPopupMenu, TPM_LEFTALIGN, TPM_RETURNCMD,
-                        WM_COMMAND,
-                    },
-                },
-            },
-        };
-        let mut point: POINT = POINT { x: 0, y: 0 };
-
-        // Get cursor position
-        if GetCursorPos(&mut point).is_err() {
-            return;
-        }
-        println!("LOG {:?}", point);
-
-        // Prepare the SHELLEXECUTEINFO structure
-        let file_path_cstring = CString::new(OsStr::new(&path).as_encoded_bytes()).unwrap();
-        let mut sei = SHELLEXECUTEINFOA {
-            cbSize: std::mem::size_of::<SHELLEXECUTEINFOA>() as u32,
-            fMask: SEE_MASK_INVOKEIDLIST | SEE_MASK_NOCLOSEPROCESS,
-            hwnd: HWND(std::ptr::null_mut()),
-            lpVerb: PCSTR::null(),
-            lpFile: PCSTR(file_path_cstring.as_ptr() as *const u8),
-            lpParameters: PCSTR::null(),
-            lpDirectory: PCSTR::null(),
-            nShow: 1, // SW_SHOWNORMAL
-            ..Default::default()
-        };
-        println!("LOG 2");
-        // Show the context menu
-        if ShellExecuteExA(&mut sei).is_ok() {
-            println!("LOG 3");
-            let hmenu = windows::Win32::UI::Shell::SHGetFileInfoA(
-                PCSTR(file_path_cstring.as_ptr() as *const u8),
-                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
-                None,
-                0,
-                windows::Win32::UI::Shell::SHGFI_EXETYPE,
-            );
-
-            println!("LOG HMENU: {}", hmenu);
-            if hmenu == 0 {
-                println!("LOG 4");
-                let cmd_id = TrackPopupMenu(
-                    HMENU(std::ptr::null_mut()),
-                    TPM_LEFTALIGN | TPM_RETURNCMD,
-                    point.x,
-                    point.y,
-                    0,
-                    HWND(std::ptr::null_mut()),
-                    None,
-                );
-                println!("LOG cmd_id: {}", cmd_id.0);
-
-                println!("LOG 5");
-                let _ = PostMessageA(
-                    HWND(std::ptr::null_mut()),
-                    WM_COMMAND,
-                    WPARAM(cmd_id.0 as usize),
-                    LPARAM(0),
-                );
-            }
-        }
-    }
-    // unsafe {
-    //     use windows::{
-    //         core::PCWSTR,
-    //         Win32::Foundation::HWND,
-    //         // Win32::System::Com::{CoCreateInstance, CoInitializeEx, COINIT_MULTITHREADED},
-    //         Win32::UI::Shell::{
-    //             IContextMenu, SHCreateItemFromParsingName, CMF_NORMAL, CMINVOKECOMMANDINFO,
-    //         },
-    //         Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-    //     };
-    //     // let bind_context = CreateBindCtx(0).unwrap();
-    //     // Convert path to wide string (PCWSTR)
-
-    //     // Create shell item
-    //     let context_menu: IContextMenu = SHCreateItemFromParsingName(wide_path, None).unwrap();
-
-    //     // Query the context menu
-    //     let hwnd: HMENU = HMENU(std::ptr::null_mut()); // Replace with a valid window handle if available
-    //     let _ = context_menu
-    //         .QueryContextMenu(hwnd, 0, 1, 0x7FFF, CMF_NORMAL)
-    //         .unwrap();
-
-    //     // Invoke a command (example: first item in the context menu)
-    //     let invoke_command_info = CMINVOKECOMMANDINFO {
-    //         cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
-    //         fMask: 0,
-    //         hwnd: HWND(hwnd.0),
-    //         lpVerb: windows::core::PCSTR::null(),
-    //         lpParameters: windows::core::PCSTR::null(),
-    //         lpDirectory: windows::core::PCSTR::null(),
-    //         nShow: SW_SHOWNORMAL.0 as i32,
-    //         dwHotKey: 0,
-    //         hIcon: HANDLE::default(),
-    //     };
-    //     context_menu.InvokeCommand(&invoke_command_info).unwrap();
-    // }
 }

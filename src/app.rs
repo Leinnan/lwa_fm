@@ -488,11 +488,6 @@ impl eframe::App for App {
                                     }
                                 }
                                 #[cfg(windows)]
-                                if ui.button("Windows context menu").clicked() {
-                                    crate::windows_tools::open_context_menu(val.path());
-                                    ui.close_menu();
-                                }
-                                #[cfg(windows)]
                                 if ui.button("Properties").clicked() {
                                     crate::windows_tools::open_properties(val.path());
                                     ui.close_menu();
