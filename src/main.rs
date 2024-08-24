@@ -28,6 +28,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         &format!("{} v {}", APP_NAME, VERSION),
         native_options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(|cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(app::App::new(cc)))
+        }),
     )
 }

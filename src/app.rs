@@ -8,7 +8,7 @@ use egui::{
     Layout, RichText,
 };
 use egui_extras::{Column, TableBuilder};
-use std::{fs, path::PathBuf};
+use std::{ffi::OsStr, fs, path::PathBuf};
 use walkdir::WalkDir;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -498,12 +498,27 @@ impl eframe::App for App {
                                     ui.close_menu();
                                 }
                             });
-                            added_button.on_hover_text(format!(
-                                "{:?}",
-                                // consider caching here
-                                std::fs::canonicalize(val.path())
-                                    .unwrap_or(val.path().to_path_buf())
-                            ));
+                            let ext = val.path().extension();
+                            if ext.eq(&Some(OsStr::new("png")))
+                                || ext.eq(&Some(OsStr::new("jpg")))
+                                || ext.eq(&Some(OsStr::new("jpeg")))
+                            {
+                                added_button.on_hover_ui(|ui| {
+                                    let path = std::fs::canonicalize(val.path())
+                                        .unwrap_or(val.path().to_path_buf())
+                                        .to_string_lossy()
+                                        .replace("\\\\?\\", "");
+                                    let path = format!("file://{}", path);
+                                    ui.image(path);
+                                });
+                            } else {
+                                added_button.on_hover_text(format!(
+                                    "{:?}",
+                                    // consider caching here
+                                    std::fs::canonicalize(val.path())
+                                        .unwrap_or(val.path().to_path_buf())
+                                ));
+                            }
                         });
                     });
                 });

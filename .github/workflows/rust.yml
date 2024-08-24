@@ -1,34 +1,46 @@
 name: CI Build
-# Controls when the workflow will be run
+
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+    workflow_call:
+    push:
+      branches:
+        - 'main'
+        - 'master'
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    runs-on: windows-latest
-    steps:     
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - name: Map Azure File Share
-        run: |
-        net use Z: \\<StorageAccountName>.file.core.windows.net\u<AzureFileShareName> /user:<StorageAccountName> ${{ secrets.AZURE_STORAGE_KEY }}
-      - name: Install Visual Studio Build Tools
-        run: choco install visualstudio2022buildtools --package-parameters "--wait --quiet --addProductLang En-us --config Z:\config\v143-14.34-buildtools.vsconfig"
-      - name: Setup MSVC v143 14.34 build tools
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          toolset: 14.34
-          arch: x64
-      - name: Build with Unreal
-        uses: OrchidIsle/UE5-Build-Project@0.2.2
-        with:
-          RUNUAT_PATH: 'Z:/UE_5.3/Engine/Build/BatchFiles/RunUAT.bat'
-          UPROJECT_PATH: ${{ github.workspace }}/<ProjectName>.uproject
-          BUILD_CONFIG: Development
-          PLATFORM: Win64
-          COOK: false
-          STAGE: false
+    check-and-build:
+      strategy:
+        matrix:
+          os: [ubuntu-latest, windows-2022]
+      runs-on: ${{ matrix.os }}
+      name: Build-${{ matrix.os }}
+      concurrency:
+        group: ${{ matrix.os }}-build-${{ github.head_ref }}
+        cancel-in-progress: true
+      timeout-minutes: 60
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/cache@v4
+          continue-on-error: false
+          with:
+            path: |
+              ~/.cargo/bin/
+              ~/.cargo/registry/index/
+              ~/.cargo/registry/cache/
+              ~/.cargo/git/db/
+              target/
+            key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
+            restore-keys: ${{ runner.os }}-build-
+        - uses: dtolnay/rust-toolchain@stable
+          with:
+            toolchain: stable
+            components: clippy,rustfmt
+        - name: check
+          run: |
+            cargo fmt --all -- --check
+            cargo clippy -- -D warnings
+
+
