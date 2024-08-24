@@ -28,6 +28,7 @@ sysinfo = "0.31"
 directories = "5"
 image = { version = "0.25", features = ["jpeg", "png"] }
 rand = "0.8"
+anyhow = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58.0", features = [
@@ -40,3 +41,22 @@ winres = "0.1"
 
 [build-dependencies]
 embed-resource = "2.4"
+anyhow = "1.0"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+nursery = { level = "deny", priority = 0 }
+pedantic = { level = "deny", priority = 1 }
+enum_glob_use = { level = "deny", priority = 2 }
+module_name_repetitions = { level = "allow", priority = 3 }
+cast_precision_loss = { level = "allow", priority = 4 }
+cast_possible_truncation = { level = "allow", priority = 5 }
+cast_sign_loss = { level = "allow", priority = 6 }
+out_of_bounds_indexing = { level = "allow", priority = 7 }
+perf = { level = "warn", priority = 8 }
+style = { level = "warn", priority = 9 }
+# this should be active but for that anyhow should be used everywhere
+#unwrap_used = { level = "deny", priority = 10 }
+#expect_used = { level = "deny", priority = 11 }

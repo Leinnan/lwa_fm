@@ -1,5 +1,5 @@
 use crate::{
-    consts::*,
+    consts::{HOMEPAGE, TOP_SIDE_MARGIN, VERSION, VERTICAL_SPACING},
     locations::{Location, Locations},
 };
 use core::panic;
@@ -28,7 +28,7 @@ pub struct App {
     dir_has_cargo: bool,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Debug, Clone, Copy)]
+#[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
 pub enum Sort {
     #[default]
     Name,
@@ -80,6 +80,7 @@ impl Default for App {
         p
     }
 }
+
 impl App {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -110,7 +111,7 @@ impl App {
             return value;
         }
 
-        Default::default()
+        Self::default()
     }
 }
 
@@ -118,7 +119,7 @@ impl App {
     fn change_current_dir(&mut self, new_path: PathBuf) {
         self.cur_path = new_path;
         if !self.search.value.is_empty() {
-            self.search.value = "".into();
+            self.search.value = String::new();
         }
         self.refresh_list();
     }
@@ -232,6 +233,7 @@ impl eframe::App for App {
     }
 
     /// Called each time the UI needs repainting, which may be many times per second.
+    #[allow(clippy::too_many_lines)] // todo: refactor
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
         // For inspiration and more examples, go to https://emilk.github.io/egui
@@ -254,7 +256,7 @@ impl eframe::App for App {
                         }
                     }
                     ui.add_space(TOP_SIDE_MARGIN);
-                    let mut path: String = "".into();
+                    let mut path: String = String::new();
 
                     #[allow(unused_variables)]
                     for (i, e) in self.cur_path.iter().enumerate() {
@@ -302,14 +304,12 @@ impl eframe::App for App {
                     };
                     let amount = size_left.x - amount;
                     ui.add_space(amount);
-                    if self.dir_has_cargo {
-                        if ui.button(">").on_hover_text("Run project").clicked() {
-                            std::process::Command::new("cargo")
-                                .arg("run")
-                                .arg("--release")
-                                .spawn()
-                                .unwrap();
-                        }
+                    if self.dir_has_cargo && ui.button(">").on_hover_text("Run project").clicked() {
+                        std::process::Command::new("cargo")
+                            .arg("run")
+                            .arg("--release")
+                            .spawn()
+                            .unwrap();
                     }
                     ui.toggle_value(&mut self.search.visible, "🔍")
                         .on_hover_text("Search");
@@ -481,7 +481,11 @@ impl eframe::App for App {
                                 if is_dir {
                                     #[cfg(windows)]
                                     if ui.button("Open in explorer").clicked() {
-                                        crate::windows_tools::open_in_explorer(val.path(), true);
+                                        // todo use result of that function
+                                        let _ = crate::windows_tools::open_in_explorer(
+                                            val.path(),
+                                            true,
+                                        );
                                         ui.close_menu();
                                         return;
                                     }
@@ -525,7 +529,11 @@ impl eframe::App for App {
                                 } else {
                                     #[cfg(windows)]
                                     if ui.button("Show in explorer").clicked() {
-                                        crate::windows_tools::open_in_explorer(val.path(), false);
+                                        // todo use result of that function
+                                        let _ = crate::windows_tools::open_in_explorer(
+                                            val.path(),
+                                            false,
+                                        );
                                         ui.close_menu();
                                     }
                                 }
@@ -546,10 +554,10 @@ impl eframe::App for App {
                             {
                                 added_button.on_hover_ui(|ui| {
                                     let path = std::fs::canonicalize(val.path())
-                                        .unwrap_or(val.path().to_path_buf())
+                                        .unwrap_or_else(|_| val.path().to_path_buf())
                                         .to_string_lossy()
                                         .replace("\\\\?\\", "");
-                                    let path = format!("file://{}", path);
+                                    let path = format!("file://{path}");
                                     ui.add(
                                         egui::Image::new(path)
                                             .maintain_aspect_ratio(true)
@@ -561,7 +569,7 @@ impl eframe::App for App {
                                     "{:?}",
                                     // consider caching here
                                     std::fs::canonicalize(val.path())
-                                        .unwrap_or(val.path().to_path_buf())
+                                        .unwrap_or_else(|_| val.path().to_path_buf())
                                 ));
                             }
                         });
@@ -613,7 +621,7 @@ fn setup_custom_fonts(ctx: &egui::Context) {
         ctx.set_fonts(fonts);
     }
     ctx.style_mut(|style| {
-        for (_text_style, font_id) in style.text_styles.iter_mut() {
+        for font_id in style.text_styles.values_mut() {
             font_id.size *= 1.4;
         }
     });
