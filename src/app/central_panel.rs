@@ -98,9 +98,10 @@ impl App {
                                         ui.close_menu();
                                         return;
                                     }
-                                    #[cfg(target_os="macos")]
+                                    #[cfg(target_os = "macos")]
                                     if ui.button("Open in Finder").clicked() {
-                                        open::that_detached(val.path()).expect("Failed to open dir in Finder");
+                                        open::that_detached(val.path())
+                                            .expect("Failed to open dir in Finder");
                                         ui.close_menu();
                                         return;
                                     }
