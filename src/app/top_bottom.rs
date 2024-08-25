@@ -30,7 +30,7 @@ impl App {
                     ui.add_space(TOP_SIDE_MARGIN);
                     let mut path: String = String::new();
 
-                    #[allow(unused_variables)] // todo fix unwraps here
+                    #[allow(unused_variables)] // not used on linux
                     for (i, e) in self.cur_path.iter().enumerate() {
                         #[cfg(windows)]
                         {
@@ -81,7 +81,6 @@ impl App {
                     };
                     let amount = size_left.x - amount;
                     ui.add_space(amount);
-                    #[allow(clippy::collapsible_if)]
                     if self.dir_has_cargo && ui.button(">").on_hover_text("Run project").clicked() {
                         // todo: add possibility to stop it again
                         match Command::new("cargo")
