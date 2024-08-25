@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     eframe::run_native(
-        &APP_NAME,
+        APP_NAME,
         native_options,
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
