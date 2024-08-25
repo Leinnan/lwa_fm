@@ -50,7 +50,7 @@ impl App {
                                 }
                             };
                             if ui.button(text).clicked() {
-                                new_path = Some(path.into());
+                                *new_path = Some(path.into());
                                 return;
                             }
                         }
