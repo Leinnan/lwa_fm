@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use anyhow::Context;
 // hide console window on Windows in release
-use consts::{APP_NAME, VERSION};
+use consts::APP_NAME;
 use eframe::egui;
 
 mod app;
@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     eframe::run_native(
-        &format!("{APP_NAME} v {VERSION}"),
+        &APP_NAME,
         native_options,
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);

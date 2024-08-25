@@ -3,7 +3,7 @@ use std::{path::PathBuf, process::Command};
 use egui::{Context, Layout};
 
 use crate::{
-    consts::{HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
+    consts::{GIT_HASH, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
     toast,
 };
 
@@ -121,7 +121,8 @@ impl App {
                     ui.hyperlink_to(
                         format!("{} v {}", egui::special_emojis::GITHUB, VERSION),
                         HOMEPAGE,
-                    );
+                    )
+                    .on_hover_text(format!("git revision {GIT_HASH}"));
                     egui::warn_if_debug_build(ui);
                     let old_value = self.sorting;
 
