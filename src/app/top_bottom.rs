@@ -81,7 +81,6 @@ impl App {
                     };
                     let amount = size_left.x - amount;
                     ui.add_space(amount);
-                    #[allow(clippy::collapsible_if)]
                     if self.dir_has_cargo && ui.button(">").on_hover_text("Run project").clicked() {
                         // todo: add possibility to stop it again
                         match Command::new("cargo")

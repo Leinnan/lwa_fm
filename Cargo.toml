@@ -64,4 +64,3 @@ perf = { level = "warn", priority = 8 }
 style = { level = "warn", priority = 9 }
 # this should be active but for that anyhow should be used everywhere
 unwrap_used = { level = "deny", priority = 10 }
-#expect_used = { level = "deny", priority = 11 }

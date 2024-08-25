@@ -1,5 +1,6 @@
 use crate::locations::Locations;
 use egui::ahash::{HashMap, HashMapExt};
+use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
 mod central_panel;
@@ -33,7 +34,7 @@ macro_rules! toast{
         };
     }
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
     show_hidden: bool,
@@ -50,7 +51,7 @@ pub struct App {
     dir_has_cargo: bool,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
 pub enum Sort {
     #[default]
     Name,
@@ -60,7 +61,7 @@ pub enum Sort {
     Random,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Default)]
+#[derive(Deserialize, Serialize, Default)]
 pub struct Search {
     pub visible: bool,
     pub favorites: bool,
