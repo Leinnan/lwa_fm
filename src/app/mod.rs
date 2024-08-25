@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
 mod central_panel;
+mod dock;
 mod dir_handling;
 mod side_panel;
 mod top_bottom;
@@ -49,6 +50,8 @@ pub struct App {
     search: Search,
     #[serde(skip)]
     dir_has_cargo: bool,
+    #[serde(skip)]
+    tabs: crate::app::dock::MyTabs,
 }
 
 #[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
@@ -98,6 +101,7 @@ impl Default for App {
             },
             invert_sort: false,
             dir_has_cargo: false,
+            tabs: crate::app::dock::MyTabs::new(get_starting_path())
         };
         p.refresh_list();
         p
