@@ -1,37 +1,44 @@
 name: CI Build
 
 on:
-  workflow_call:
   push:
     branches:
-      - "main"
-      - "master"
+      - main
   pull_request:
     branches:
-      - "main"
-      - "master"
-
-env:
-  CARGO_TERM_COLOR: always
+      - main
 
 jobs:
-  check-and-build:
+  ci:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-2022]
-    runs-on: ${{ matrix.os }}
-    name: Build-${{ matrix.os }}
-    concurrency:
-      group: ${{ matrix.os }}-build-${{ github.head_ref }}
-      cancel-in-progress: true
-    timeout-minutes: 60
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        continue-on-error: false
         with:
-          toolchain: stable
-          components: clippy,rustfmt
-      - name: check
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-build-
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: lint
+
+      - name: Lint
         run: cargo clippy -- -D warnings
