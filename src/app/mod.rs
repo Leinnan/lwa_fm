@@ -208,6 +208,21 @@ fn setup_custom_fonts(ctx: &egui::Context) {
     });
 }
 
+#[cfg(not(windows))]
+fn get_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
+    let font_path = std::path::Path::new("/System/Library/Fonts");
+
+    let Ok(regular) = fs::read(font_path.join("SFNSRounded.ttf")) else {
+        return None;
+    };
+    let Ok(semibold) = fs::read(font_path.join("SFCompact.ttf")) else {
+        return None;
+    };
+
+    Some((regular, semibold))
+}
+
+#[cfg(windows)]
 fn get_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
     let Ok(app_data) = std::env::var("APPDATA") else {
         return None;
