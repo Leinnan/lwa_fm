@@ -169,7 +169,7 @@ impl eframe::App for App {
 fn setup_custom_fonts(ctx: &egui::Context) {
     // Start with the default fonts (we will be adding to them rather than replacing them).
     let mut fonts = egui::FontDefinitions::default();
-    if let Some((regular, semibold)) = get_fonts() {
+    if let Ok((regular, semibold)) = get_fonts() {
         fonts
             .font_data
             .insert("regular".to_owned(), egui::FontData::from_owned(regular));
@@ -199,6 +199,7 @@ fn setup_custom_fonts(ctx: &egui::Context) {
         // Tell egui to use these fonts:
         ctx.set_fonts(fonts);
     }
+
     ctx.style_mut(|style| {
         for font_id in style.text_styles.values_mut() {
             font_id.size *= 1.4;
@@ -207,36 +208,24 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 }
 
 #[cfg(not(windows))]
-fn get_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
+fn get_fonts() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let font_path = std::path::Path::new("/System/Library/Fonts");
 
-    let Ok(regular) = fs::read(font_path.join("SFNSRounded.ttf")) else {
-        return None;
-    };
-    let Ok(semibold) = fs::read(font_path.join("SFCompact.ttf")) else {
-        return None;
-    };
+    let regular = fs::read(font_path.join("SFNSRounded.ttf"))?;
+    let semibold = fs::read(font_path.join("SFCompact.ttf"))?;
 
-    Some((regular, semibold))
+    Ok((regular, semibold))
 }
 
 #[cfg(windows)]
-fn get_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
-    let Ok(app_data) = std::env::var("APPDATA") else {
-        return None;
-    };
+fn get_fonts() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let app_data = std::env::var("APPDATA")?;
     let font_path = std::path::Path::new(&app_data);
 
-    let Ok(regular) = fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos.ttf")) else {
-        return None;
-    };
-    let Ok(semibold) =
-        fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos-semibold.ttf"))
-    else {
-        return None;
-    };
+    let regular = fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos.ttf"))?;
+    let semibold = fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos-semibold.ttf"))?;
 
-    Some((regular, semibold))
+    Ok((regular, semibold))
 }
 
 fn get_starting_path() -> PathBuf {
