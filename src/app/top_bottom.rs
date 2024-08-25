@@ -30,6 +30,7 @@ impl App {
                     ui.add_space(TOP_SIDE_MARGIN);
                     let mut path: String = String::new();
 
+                    #[allow(unused_variables)] // not used on linux
                     for (i, e) in self.cur_path.iter().enumerate() {
                         #[cfg(windows)]
                         {
