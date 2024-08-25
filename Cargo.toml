@@ -2,7 +2,6 @@
 name = "lwa_fm"
 edition = "2021"
 homepage = "https://github.com/Leinnan/lwa_fm"
-build = "build.rs"
 
 [profile.release]
 opt-level = 'z'
