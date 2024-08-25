@@ -44,9 +44,12 @@ impl App {
                                 }
                                 1 => &path,
                                 _ => {
-                                    path += e.to_str().unwrap();
+                                    let Some(s) = e.to_str() else {
+                                        return;
+                                    };
+                                    path += s;
                                     path.push(std::path::MAIN_SEPARATOR);
-                                    e.to_str().unwrap()
+                                    s
                                 }
                             };
                             if ui.button(text).clicked() {
