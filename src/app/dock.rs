@@ -1,13 +1,12 @@
 use egui::{Ui, WidgetText};
-use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use egui_dock::{DockArea, DockState, Style, TabViewer};
 use std::{ffi::OsStr, path::PathBuf};
 
-use egui::{Context, Layout, RichText, Vec2};
+use egui::{RichText, Vec2};
 use egui_extras::{Column, TableBuilder};
 
 use crate::{
-    consts::{TOP_SIDE_MARGIN, VERTICAL_SPACING},
-    locations::Location,
+    consts::VERTICAL_SPACING,
     toast,
 };
 // First, let's pick a type that we'll use to attach some data to each tab.

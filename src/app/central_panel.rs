@@ -1,13 +1,8 @@
-use std::{ffi::OsStr, path::PathBuf};
+use std::path::PathBuf;
 
-use egui::{Context, Layout, RichText, Vec2};
-use egui_extras::{Column, TableBuilder};
+use egui::{Context, Layout};
 
-use crate::{
-    consts::{TOP_SIDE_MARGIN, VERTICAL_SPACING},
-    locations::Location,
-    toast,
-};
+use crate::consts::TOP_SIDE_MARGIN;
 
 use super::App;
 
