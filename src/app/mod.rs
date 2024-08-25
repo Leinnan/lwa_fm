@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
 mod central_panel;
-mod dock;
 mod dir_handling;
+mod dock;
 mod side_panel;
 mod top_bottom;
 
@@ -101,7 +101,7 @@ impl Default for App {
             },
             invert_sort: false,
             dir_has_cargo: false,
-            tabs: crate::app::dock::MyTabs::new(get_starting_path())
+            tabs: crate::app::dock::MyTabs::new(get_starting_path()),
         };
         p.refresh_list();
         p
