@@ -36,8 +36,10 @@ impl App {
                         {
                             let text = match &i {
                                 0 => {
-                                    let last_two_chars: String =
-                                        e.to_str().unwrap().chars().rev().take(2).collect();
+                                    let Some(s) = e.to_str() else {
+                                        continue;
+                                    };
+                                    let last_two_chars: String = s.chars().rev().take(2).collect();
                                     path += &last_two_chars.chars().rev().collect::<String>();
                                     path.push(std::path::MAIN_SEPARATOR);
                                     continue;
