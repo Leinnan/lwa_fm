@@ -90,11 +90,10 @@ impl App {
                                 if is_dir {
                                     #[cfg(windows)]
                                     if ui.button("Open in explorer").clicked() {
-                                        // todo use result of that function
-                                        let _ = crate::windows_tools::open_in_explorer(
-                                            val.path(),
-                                            true,
-                                        );
+                                        crate::windows_tools::open_in_explorer(val.path(), true)
+                                            .unwrap_or_else(|_| {
+                                                toast!(Error, "Could not open in explorer");
+                                            });
                                         ui.close_menu();
                                         return;
                                     }
@@ -143,11 +142,10 @@ impl App {
                                 } else {
                                     #[cfg(windows)]
                                     if ui.button("Show in explorer").clicked() {
-                                        // todo use result of that function
-                                        let _ = crate::windows_tools::open_in_explorer(
-                                            val.path(),
-                                            false,
-                                        );
+                                        crate::windows_tools::open_in_explorer(val.path(), false)
+                                            .unwrap_or_else(|_| {
+                                                toast!(Error, "Could not open in explorer");
+                                            });
                                         ui.close_menu();
                                     }
                                 }

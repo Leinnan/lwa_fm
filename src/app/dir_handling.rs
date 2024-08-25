@@ -79,9 +79,6 @@ impl App {
         dir_entries
     }
 
-    // todo refactor to not use unwraps
-    //#[allow(clippy::unwrap_used)]
-
     fn sort_entries(&self, dir_entries: &mut [DirEntry]) {
         dir_entries.sort_by(|a, b| {
             // Extract metadata for both entries and handle errors
@@ -102,15 +99,13 @@ impl App {
                     let name_b = b.file_name().to_ascii_lowercase();
                     name_a.cmp(&name_b)
                 }
-                Sort::Modified => {
-                    match (metadata_a, metadata_b) {
-                        (Ok(meta_a), Ok(meta_b)) => match (meta_a.modified(), meta_b.modified()) {
-                            (Ok(time_a), Ok(time_b)) => time_a.cmp(&time_b),
-                            (Err(_), _) | (_, Err(_)) => Ordering::Equal, // Handle cases where time can't be retrieved
-                        },
-                        _ => Ordering::Equal, // Handle cases where metadata can't be retrieved
-                    }
-                }
+                Sort::Modified => match (metadata_a, metadata_b) {
+                    (Ok(meta_a), Ok(meta_b)) => match (meta_a.modified(), meta_b.modified()) {
+                        (Ok(time_a), Ok(time_b)) => time_a.cmp(&time_b),
+                        (Err(_), _) | (_, Err(_)) => Ordering::Equal,
+                    },
+                    _ => Ordering::Equal,
+                },
                 Sort::Created => match (metadata_a, metadata_b) {
                     (Ok(meta_a), Ok(meta_b)) => match (meta_a.created(), meta_b.created()) {
                         (Ok(time_a), Ok(time_b)) => time_a.cmp(&time_b),

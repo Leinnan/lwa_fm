@@ -144,10 +144,7 @@ impl eframe::App for App {
     }
 
     /// Called each time the UI needs repainting, which may be many times per second.
-    #[allow(clippy::too_many_lines)] // todo: refactor
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
         let mut new_path = None;
         let mut search_changed = false;
         self.top_panel(ctx, &mut new_path);
