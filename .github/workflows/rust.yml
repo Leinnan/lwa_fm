@@ -1,46 +1,48 @@
 name: CI Build
 
 on:
-    workflow_call:
-    push:
-      branches:
-        - 'main'
-        - 'master'
+  workflow_call:
+  push:
+    branches:
+      - "main"
+      - "master"
+  pull_request:
+    branches:
+      - "main"
+      - "master"
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-    check-and-build:
-      strategy:
-        matrix:
-          os: [ubuntu-latest, windows-2022]
-      runs-on: ${{ matrix.os }}
-      name: Build-${{ matrix.os }}
-      concurrency:
-        group: ${{ matrix.os }}-build-${{ github.head_ref }}
-        cancel-in-progress: true
-      timeout-minutes: 60
-      steps:
-        - uses: actions/checkout@v4
-        - uses: actions/cache@v4
-          continue-on-error: false
-          with:
-            path: |
-              ~/.cargo/bin/
-              ~/.cargo/registry/index/
-              ~/.cargo/registry/cache/
-              ~/.cargo/git/db/
-              target/
-            key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
-            restore-keys: ${{ runner.os }}-build-
-        - uses: dtolnay/rust-toolchain@stable
-          with:
-            toolchain: stable
-            components: clippy,rustfmt
-        - name: check
-          run: |
-            cargo fmt --all -- --check
-            cargo clippy -- -D warnings
-
-
+  check-and-build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    name: Build-${{ matrix.os }}
+    concurrency:
+      group: ${{ matrix.os }}-build-${{ github.head_ref }}
+      cancel-in-progress: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        continue-on-error: false
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-build-
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+      - name: check
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -- -D warnings

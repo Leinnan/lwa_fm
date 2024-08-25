@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::{ffi::OsStr, iter::once, os::windows::ffi::OsStrExt};
 use windows::{
     core::PCWSTR,
@@ -7,15 +8,16 @@ use windows::{
     },
 };
 
-pub fn open_in_explorer(path: impl AsRef<OsStr>, is_dir: bool) {
+pub fn open_in_explorer(path: impl AsRef<OsStr>, is_dir: bool) -> anyhow::Result<()> {
     if is_dir {
-        let _ = open::that_detached(path);
+        open::that_detached(path).context("Failed to open dir in explorer")
     } else {
         std::process::Command::new("explorer.exe")
             .arg("/select,")
             .arg(&path)
             .spawn()
-            .unwrap();
+            .context("Failed to open explorer")?;
+        Ok(())
     }
 }
 
@@ -43,10 +45,11 @@ pub fn open_properties(path: impl AsRef<OsStr>) {
     };
 
     // Open the properties window
+    #[allow(unsafe_code)]
     unsafe {
         match ShellExecuteExW(&mut sei) {
-            Ok(_) => {}
-            Err(e) => eprintln!("Failed to open properties window: {:?}", e),
+            Ok(()) => {}
+            Err(e) => eprintln!("Failed to open properties window: {e:?}"),
         }
     }
 }

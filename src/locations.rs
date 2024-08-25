@@ -7,6 +7,13 @@ pub struct Locations {
     pub editable: bool,
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+#[serde(default)]
+pub struct Location {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 impl Locations {
     #[cfg(not(target_os = "macos"))]
     pub fn get_drives() -> Self {
@@ -17,7 +24,7 @@ impl Locations {
             .map(|drive| Location {
                 name: format!(
                     "{} ({})",
-                    drive.name().to_str().unwrap(),
+                    drive.name().to_str().unwrap_or(""),
                     drive.mount_point().display()
                 ),
                 path: drive.mount_point().to_path_buf(),
@@ -29,57 +36,50 @@ impl Locations {
             editable: false,
         }
     }
+
     pub fn get_user_dirs() -> Self {
-        let locations: Vec<Location> = if let Some(user_dirs) = directories::UserDirs::new() {
-            let mut list = vec![Location {
-                name: "User".into(),
-                path: user_dirs.home_dir().to_path_buf(),
-            }];
-            if let Some(docs) = user_dirs.document_dir() {
-                list.push(Location {
-                    name: "Documents".into(),
-                    path: docs.to_path_buf(),
-                });
-            }
-            if let Some(dir) = user_dirs.desktop_dir() {
-                list.push(Location {
-                    name: "Desktop".into(),
-                    path: dir.to_path_buf(),
-                });
-            }
-            if let Some(dir) = user_dirs.download_dir() {
-                list.push(Location {
-                    name: "Downloads".into(),
-                    path: dir.to_path_buf(),
-                });
-            }
-            if let Some(dir) = user_dirs.picture_dir() {
-                list.push(Location {
-                    name: "Pictures".into(),
-                    path: dir.to_path_buf(),
-                });
-            }
-            if let Some(dir) = user_dirs.audio_dir() {
-                list.push(Location {
-                    name: "Music".into(),
-                    path: dir.to_path_buf(),
-                });
-            }
-            list
-        } else {
-            vec![]
-        };
+        let locations: Vec<Location> =
+            directories::UserDirs::new().map_or_else(Vec::new, |user_dirs| {
+                let mut list = vec![Location {
+                    name: "User".into(),
+                    path: user_dirs.home_dir().to_path_buf(),
+                }];
+                if let Some(docs) = user_dirs.document_dir() {
+                    list.push(Location {
+                        name: "Documents".into(),
+                        path: docs.to_path_buf(),
+                    });
+                }
+                if let Some(dir) = user_dirs.desktop_dir() {
+                    list.push(Location {
+                        name: "Desktop".into(),
+                        path: dir.to_path_buf(),
+                    });
+                }
+                if let Some(dir) = user_dirs.download_dir() {
+                    list.push(Location {
+                        name: "Downloads".into(),
+                        path: dir.to_path_buf(),
+                    });
+                }
+                if let Some(dir) = user_dirs.picture_dir() {
+                    list.push(Location {
+                        name: "Pictures".into(),
+                        path: dir.to_path_buf(),
+                    });
+                }
+                if let Some(dir) = user_dirs.audio_dir() {
+                    list.push(Location {
+                        name: "Music".into(),
+                        path: dir.to_path_buf(),
+                    });
+                }
+                list
+            });
 
         Self {
             locations,
             editable: false,
         }
     }
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Default)]
-#[serde(default)]
-pub struct Location {
-    pub name: String,
-    pub path: PathBuf,
 }
