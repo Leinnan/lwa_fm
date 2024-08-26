@@ -13,13 +13,13 @@ use crate::{
 };
 
 use super::directory_view_settings::DirectoryViewSettings;
+use super::NewPathRequest;
 
 #[derive(Debug)]
 pub struct TabData {
     pub name: String,
     pub list: Vec<walkdir::DirEntry>,
-    pub new_path: Option<PathBuf>,
-    pub new_tab_request: Option<PathBuf>,
+    pub path_change: Option<NewPathRequest>,
     pub current_path: PathBuf,
     pub settings: DirectoryViewSettings,
     pub locations: Rc<RefCell<HashMap<String, Locations>>>,
@@ -31,12 +31,11 @@ impl TabData {
     pub fn from_path(path: PathBuf, locations: Rc<RefCell<HashMap<String, Locations>>>) -> Self {
         let mut new = Self {
             list: vec![],
-            new_path: None,
-            name: path.clone().as_os_str().to_string_lossy().to_string(),
+            path_change: None,
+            name: Self::get_name_from_path(&path),
             current_path: path,
             settings: DirectoryViewSettings::default(),
             locations,
-            new_tab_request: None,
             dir_has_cargo: false,
             can_close: true,
         };
@@ -71,8 +70,7 @@ impl TabViewer for MyTabViewer {
     /// Defines the contents of a given `tab`.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
-        tab.new_path = None;
-        tab.new_tab_request = None;
+        tab.path_change = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
             let table = TableBuilder::new(ui)
@@ -115,13 +113,19 @@ impl TabViewer for MyTabViewer {
                                 let Ok(path) = std::fs::canonicalize(val.path()) else {
                                     return;
                                 };
-                                tab.new_path = Some(path);
+                                tab.path_change = Some(NewPathRequest {
+                                    new_tab: false,
+                                    path,
+                                });
                             }
                         }
                         added_button.context_menu(|ui| {
                             if is_dir {
                                 if ui.button("Open in new tab").clicked() {
-                                    tab.new_tab_request = Some(val.path().to_path_buf());
+                                    tab.path_change = Some(NewPathRequest {
+                                        new_tab: true,
+                                        path: val.path().to_path_buf(),
+                                    });
                                 }
                                 #[cfg(windows)]
                                 if ui.button("Open in explorer").clicked() {
@@ -305,14 +309,16 @@ impl MyTabs {
         let Some(active_tab) = self.get_current_tab() else {
             return;
         };
-        if let Some(new_path) = &active_tab.new_path {
-            active_tab.set_path(&new_path.clone());
-        }
-        if let Some(new_tab) = &active_tab.new_tab_request {
-            let new_window = TabData::from_path(new_tab.clone(), Rc::clone(&active_tab.locations));
-            self.dock_state
-                .main_surface_mut()
-                .push_to_first_leaf(new_window);
+        if let Some(path_change) = &active_tab.path_change {
+            if path_change.new_tab {
+                let new_window =
+                    TabData::from_path(path_change.path.clone(), Rc::clone(&active_tab.locations));
+                self.dock_state
+                    .main_surface_mut()
+                    .push_to_first_leaf(new_window);
+            } else {
+                active_tab.set_path(&path_change.path.clone());
+            }
         }
     }
 

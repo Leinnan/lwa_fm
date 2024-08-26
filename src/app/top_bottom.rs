@@ -69,7 +69,7 @@ impl App {
                                 path += part;
                             }
                             if ui.button(e.to_string_lossy()).clicked() {
-                                *new_path = Some(path.into());
+                                *new_path = Some(NewPathRequest { new_tab: false, path: path.into() });
                                 return;
                             }
                         }

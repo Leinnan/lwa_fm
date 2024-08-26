@@ -85,6 +85,7 @@ impl Default for App {
     }
 }
 
+#[derive(Debug)]
 pub struct NewPathRequest {
     pub new_tab: bool,
     pub path: PathBuf,

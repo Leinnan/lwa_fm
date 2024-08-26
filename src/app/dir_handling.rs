@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, ffi::OsStr, path::PathBuf};
+use std::{cmp::Ordering, ffi::OsStr, path::{Path, PathBuf}};
 
 use walkdir::DirEntry;
 
@@ -7,30 +7,33 @@ use crate::toast;
 use super::{dock::TabData, Sort};
 
 impl TabData {
-    pub fn set_path(&mut self, path: &PathBuf) {
-        self.current_path.clone_from(path);
+    pub fn get_name_from_path(path: &Path) -> String {
         #[cfg(not(windows))]
         {
-            self.name = path
-                .iter()
+            path.iter()
                 .last()
                 .expect("FAILED")
                 .to_string_lossy()
-                .into_owned();
+                .into_owned()
         }
         #[cfg(windows)]
         {
-            self.name = path
+            let mut result = path
                 .iter()
                 .last()
                 .expect("FAILED")
                 .to_string_lossy()
                 .into_owned();
-            if self.name.len() == 1 {
-                self.name = path.display().to_string();
+            if result.len() == 1 {
+                result = path.display().to_string();
             }
+            result
         }
-        self.new_path = None;
+    }
+    pub fn set_path(&mut self, path: &PathBuf) {
+        self.name = Self::get_name_from_path(path);
+        self.current_path.clone_from(path);
+        self.path_change = None;
         self.refresh_list();
     }
 
