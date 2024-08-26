@@ -3,7 +3,7 @@
 # lwa_fm
 
 
-A File Manager built with egui in Rust.
+A (free) File Manager built with egui in Rust. Just a hobby, won't be big and ~~slow~~ professional like Finder or Windows Explorer.
 
 ![LWA_FM screenshot](image.png)
 

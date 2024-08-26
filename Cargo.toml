@@ -65,6 +65,6 @@ unwrap_used = { level = "deny", priority = 10 }
 
 [package.metadata.bundle]
 name = "LWA File Manager"
-image = "static/icon.png"
+image = ["static/icon.png"]
 identifier = "io.github.Leinnan.lwa_fm"
 osx_url_schemes = ["io.github.Leinnan.lwa_fm"]
