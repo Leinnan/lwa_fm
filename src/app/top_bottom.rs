@@ -1,37 +1,38 @@
-use std::{path::PathBuf, process::Command};
+use std::process::Command;
 
-use egui::{Context, Layout};
+use egui::{Color32, Context, Layout};
 
 use crate::{
     consts::{GIT_HASH, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
     toast,
 };
 
-use super::{App, Sort};
+use super::{App, NewPathRequest, Sort};
 
 impl App {
-    pub(crate) fn top_panel(&mut self, ctx: &Context, new_path: &mut Option<PathBuf>) {
+    pub(crate) fn top_panel(&mut self, ctx: &Context, new_path: &mut Option<NewPathRequest>) {
         egui::TopBottomPanel::top("top_panel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
                 ui.add_space(TOP_SIDE_MARGIN);
                 ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
                     ui.add_space(TOP_SIDE_MARGIN);
-                    if let Some(parent) = self.cur_path.parent() {
+                    let current_path = self.tabs.get_current_path();
+                    let parent = current_path.parent();
+                    ui.add_enabled_ui(parent.is_some(), |ui| {
                         if ui
                             .button("⬆")
                             .on_hover_text("Go to parent directory")
                             .clicked()
                         {
-                            *new_path = Some(parent.into());
-                            return;
+                            *new_path = Some(NewPathRequest { new_tab: false, path: parent.expect("It should not be possible to click this when parent is None").into() });
                         }
-                    }
+                    });
                     ui.add_space(TOP_SIDE_MARGIN);
                     let mut path: String = String::new();
 
                     #[allow(unused_variables)] // not used on linux
-                    for (i, e) in self.cur_path.iter().enumerate() {
+                    for (i, e) in self.tabs.get_current_path().iter().enumerate() {
                         #[cfg(windows)]
                         {
                             let text = match &i {
@@ -55,7 +56,7 @@ impl App {
                                 }
                             };
                             if ui.button(text).clicked() {
-                                *new_path = Some(path.into());
+                                *new_path = Some(NewPathRequest { new_tab: false, path: path.into() });
                                 return;
                             }
                         }
@@ -68,25 +69,30 @@ impl App {
                                 path += part;
                             }
                             if ui.button(e.to_string_lossy()).clicked() {
-                                *new_path = Some(path.into());
+                                *new_path = Some(NewPathRequest { new_tab: false, path: path.into() });
                                 return;
                             }
                         }
                     }
                     let size_left = ui.available_size();
-                    let amount = if self.dir_has_cargo {
+                    let Some(active_tab) = self.tabs.get_current_tab() else {return;};
+                    let amount = if active_tab.dir_has_cargo {
                         size_left.y * 3.0
                     } else {
                         size_left.y * 2.0
                     };
                     let amount = size_left.x - amount;
                     ui.add_space(amount);
-                    if self.dir_has_cargo && ui.button(">").on_hover_text("Run project").clicked() {
+                    let text = egui::RichText::new("▶").color(Color32::from_hex("#E2A735").expect("WRONG COLOR"));
+                    let button = egui::Button::new(text).frame(false)
+                    .fill(egui::Color32::from_white_alpha(0));
+
+                    if active_tab.dir_has_cargo && ui.add(button).on_hover_text("Run project").clicked() {
                         // todo: add possibility to stop it again
                         match Command::new("cargo")
                             .arg("run")
                             .arg("--release")
-                            .current_dir(self.cur_path.clone())
+                            .current_dir(&active_tab.current_path)
                             .spawn()
                         {
                             Ok(_) => {
@@ -97,14 +103,14 @@ impl App {
                             }
                         }
                     }
-                    ui.toggle_value(&mut self.search.visible, "🔍")
+                    ui.toggle_value(&mut active_tab.settings.search.visible, "🔍")
                         .on_hover_text("Search");
                     if ui
-                        .toggle_value(&mut self.show_hidden, "👁")
+                        .toggle_value(&mut active_tab.settings.show_hidden, "👁")
                         .on_hover_text("Display hidden files")
                         .changed()
                     {
-                        self.refresh_list();
+                        // self.refresh_list();
                     }
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
@@ -124,25 +130,51 @@ impl App {
                     )
                     .on_hover_text(format!("git revision {GIT_HASH}"));
                     egui::warn_if_debug_build(ui);
-                    let old_value = self.sorting;
+                    let Some(active_tab) = self.tabs.get_current_tab() else {
+                        return;
+                    };
+                    let old_value = active_tab.settings.sorting;
 
                     egui::ComboBox::from_label("")
-                        .selected_text(format!("↕ {:?}", self.sorting))
+                        .selected_text(format!("↕ {:?}", active_tab.settings.sorting))
                         .show_ui(ui, |ui| {
                             ui.label("Sort by");
                             ui.separator();
-                            ui.selectable_value(&mut self.sorting, Sort::Name, "Name");
-                            ui.selectable_value(&mut self.sorting, Sort::Created, "Created");
-                            ui.selectable_value(&mut self.sorting, Sort::Modified, "Modified");
-                            ui.selectable_value(&mut self.sorting, Sort::Size, "Size");
-                            ui.selectable_value(&mut self.sorting, Sort::Random, "Random");
+                            ui.selectable_value(
+                                &mut active_tab.settings.sorting,
+                                Sort::Name,
+                                "Name",
+                            );
+                            ui.selectable_value(
+                                &mut active_tab.settings.sorting,
+                                Sort::Created,
+                                "Created",
+                            );
+                            ui.selectable_value(
+                                &mut active_tab.settings.sorting,
+                                Sort::Modified,
+                                "Modified",
+                            );
+                            ui.selectable_value(
+                                &mut active_tab.settings.sorting,
+                                Sort::Size,
+                                "Size",
+                            );
+                            ui.selectable_value(
+                                &mut active_tab.settings.sorting,
+                                Sort::Random,
+                                "Random",
+                            );
                             ui.separator();
 
                             *search_changed |= ui
-                                .toggle_value(&mut self.invert_sort, "Inverted Sorting")
+                                .toggle_value(
+                                    &mut active_tab.settings.invert_sort,
+                                    "Inverted Sorting",
+                                )
                                 .changed();
                         });
-                    *search_changed |= old_value != self.sorting;
+                    *search_changed |= old_value != active_tab.settings.sorting;
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             });

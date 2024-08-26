@@ -1,20 +1,47 @@
-use std::{cmp::Ordering, ffi::OsStr, path::PathBuf};
-use walkdir::{DirEntry, WalkDir};
+use std::{
+    cmp::Ordering,
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
+
+use walkdir::DirEntry;
 
 use crate::toast;
 
-use super::{App, Sort};
+use super::{dock::TabData, Sort};
 
-impl App {
-    pub(crate) fn change_current_dir(&mut self, new_path: PathBuf) {
-        self.cur_path = new_path;
-        if !self.search.value.is_empty() {
-            self.search.value = String::new();
+impl TabData {
+    pub fn get_name_from_path(path: &Path) -> String {
+        #[cfg(not(windows))]
+        {
+            path.iter()
+                .last()
+                .expect("FAILED")
+                .to_string_lossy()
+                .into_owned()
         }
+        #[cfg(windows)]
+        {
+            let mut result = path
+                .iter()
+                .last()
+                .expect("FAILED")
+                .to_string_lossy()
+                .into_owned();
+            if result.len() == 1 {
+                result = path.display().to_string();
+            }
+            result
+        }
+    }
+    pub fn set_path(&mut self, path: &PathBuf) {
+        self.name = Self::get_name_from_path(path);
+        self.current_path.clone_from(path);
+        self.path_change = None;
         self.refresh_list();
     }
 
-    pub(crate) fn refresh_list(&mut self) {
+    pub fn refresh_list(&mut self) {
         self.list = self.read_dir();
         self.dir_has_cargo = self
             .list
@@ -23,10 +50,11 @@ impl App {
     }
 
     fn read_dir(&self) -> Vec<walkdir::DirEntry> {
-        let search = &self.search.value;
-        let use_search = !self.search.value.is_empty();
-        let directories = if use_search && self.search.favorites {
-            self.locations
+        let search = &self.settings.search.value;
+        let use_search = self.settings.is_searching();
+        let locations = self.locations.borrow();
+        let directories = if use_search && self.settings.search.favorites {
+            locations
                 .get("Favorites")
                 .map_or_else(Vec::new, |favorites| {
                     favorites
@@ -36,14 +64,18 @@ impl App {
                         .collect()
                 })
         } else {
-            [&self.cur_path].to_vec()
+            [&self.current_path].to_vec()
         };
 
-        let depth = if use_search { self.search.depth } else { 1 };
+        let depth = if use_search {
+            self.settings.search.depth
+        } else {
+            1
+        };
         let mut dir_entries: Vec<walkdir::DirEntry> = directories
             .iter()
             .flat_map(|d| {
-                WalkDir::new(d)
+                walkdir::WalkDir::new(d)
                     .follow_links(true)
                     .max_depth(depth)
                     .into_iter()
@@ -51,10 +83,11 @@ impl App {
                     .skip(1)
                     .filter(|e| {
                         let s = e.file_name().to_string_lossy();
-                        if !self.show_hidden && (s.starts_with('.') || s.starts_with('$')) {
+                        if !self.settings.show_hidden && (s.starts_with('.') || s.starts_with('$'))
+                        {
                             return false;
                         }
-                        if self.search.case_sensitive {
+                        if self.settings.search.case_sensitive {
                             s.contains(search)
                         } else {
                             s.to_ascii_lowercase()
@@ -64,7 +97,7 @@ impl App {
                     .collect::<Vec<walkdir::DirEntry>>()
             })
             .collect();
-        if self.sorting == Sort::Random {
+        if self.settings.sorting == Sort::Random {
             use rand::seq::SliceRandom;
             use rand::thread_rng;
             let mut rng = thread_rng();
@@ -73,7 +106,7 @@ impl App {
             return dir_entries;
         }
         self.sort_entries(&mut dir_entries);
-        if self.invert_sort {
+        if self.settings.invert_sort {
             dir_entries.reverse();
         }
         dir_entries
@@ -87,7 +120,7 @@ impl App {
 
             let file_type_cmp = a.file_type().is_file().cmp(&b.file_type().is_file());
 
-            file_type_cmp.then(match &self.sorting {
+            file_type_cmp.then(match &self.settings.sorting {
                 Sort::Random => {
                     toast!(Info, "Random sort is not supported");
                     let name_a = a.file_name().to_ascii_lowercase();
@@ -142,7 +175,5 @@ impl App {
                 },
             })
         });
-
-        // Ok(())
     }
 }

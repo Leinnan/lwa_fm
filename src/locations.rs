@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
-#[derive(serde::Deserialize, serde::Serialize, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Default, Debug)]
 #[serde(default)]
 pub struct Locations {
     pub locations: Vec<Location>,
     pub editable: bool,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Default, Debug)]
 #[serde(default)]
 pub struct Location {
     pub name: String,

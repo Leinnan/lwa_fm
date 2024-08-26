@@ -1,10 +1,12 @@
 use crate::locations::Locations;
 use egui::ahash::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{cell::RefCell, fs, path::PathBuf, rc::Rc};
 
 mod central_panel;
 mod dir_handling;
+mod directory_view_settings;
+mod dock;
 mod side_panel;
 mod top_bottom;
 
@@ -37,18 +39,9 @@ macro_rules! toast{
 #[derive(Deserialize, Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
-    show_hidden: bool,
+    locations: Rc<RefCell<HashMap<String, Locations>>>,
     #[serde(skip)]
-    cur_path: PathBuf,
-    sorting: Sort,
-    invert_sort: bool,
-    locations: HashMap<String, Locations>,
-    #[serde(skip)]
-    list: Vec<walkdir::DirEntry>,
-    #[serde(skip)]
-    search: Search,
-    #[serde(skip)]
-    dir_has_cargo: bool,
+    tabs: crate::app::dock::MyTabs,
 }
 
 #[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
@@ -61,7 +54,7 @@ pub enum Sort {
     Random,
 }
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default, Debug)]
 pub struct Search {
     pub visible: bool,
     pub favorites: bool,
@@ -83,25 +76,19 @@ impl Default for App {
                 ..Default::default()
             },
         );
-        let mut p = Self {
-            show_hidden: false,
-            cur_path: get_starting_path(),
+        let locations = Rc::new(RefCell::new(locations));
+        let clone = Rc::clone(&locations);
+        Self {
             locations,
-            sorting: Sort::Created,
-            list: vec![],
-            search: Search {
-                visible: false,
-                case_sensitive: false,
-                depth: 3,
-                favorites: false,
-                value: String::new(),
-            },
-            invert_sort: false,
-            dir_has_cargo: false,
-        };
-        p.refresh_list();
-        p
+            tabs: crate::app::dock::MyTabs::new(&get_starting_path(), clone),
+        }
     }
+}
+
+#[derive(Debug)]
+pub struct NewPathRequest {
+    pub new_tab: bool,
+    pub path: PathBuf,
 }
 
 impl App {
@@ -115,22 +102,27 @@ impl App {
         // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {
             let mut value: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
-            if !value.locations.contains_key("Favorites") {
-                value.locations.insert(
-                    "Favorites".into(),
-                    Locations {
-                        editable: true,
-                        ..Default::default()
-                    },
-                );
+            {
+                let mut locations = value.locations.borrow_mut();
+                if !locations.contains_key("Favorites") {
+                    locations.insert(
+                        "Favorites".into(),
+                        Locations {
+                            editable: true,
+                            ..Default::default()
+                        },
+                    );
+                }
+                if let Some(user) = locations.get_mut("User") {
+                    *user = Locations::get_user_dirs();
+                }
+                #[cfg(not(target_os = "macos"))]
+                if let Some(drive) = locations.get_mut("Drives") {
+                    *drive = Locations::get_drives();
+                }
             }
-            if let Some(user) = value.locations.get_mut("User") {
-                *user = Locations::get_user_dirs();
-            }
-            #[cfg(not(target_os = "macos"))]
-            if let Some(drive) = value.locations.get_mut("Drives") {
-                *drive = Locations::get_drives();
-            }
+            value.tabs =
+                crate::app::dock::MyTabs::new(&get_starting_path(), Rc::clone(&value.locations));
             return value;
         }
 
@@ -153,13 +145,17 @@ impl eframe::App for App {
 
         self.left_side_panel(ctx, &mut new_path);
 
-        self.central_panel(ctx, &mut search_changed, &mut new_path);
+        self.central_panel(ctx, &mut search_changed);
         if search_changed {
-            self.refresh_list();
+            self.tabs.refresh_list();
         }
 
-        if let Some(new) = new_path {
-            self.change_current_dir(new);
+        if let Some(new) = &new_path {
+            if new.new_tab {
+                self.tabs.open_in_new_tab(&new.path);
+            } else {
+                self.tabs.update_active_tab(&new.path);
+            }
         }
 
         TOASTS.write().show(ctx);
