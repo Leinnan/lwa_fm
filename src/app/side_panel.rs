@@ -48,6 +48,7 @@ impl App {
                                                         new_tab: true,
                                                         path: location.path.clone(),
                                                     });
+                                                    ui.close_menu();
                                                     return;
                                                 }
                                                 if !collection.editable {

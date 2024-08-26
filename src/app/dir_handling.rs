@@ -1,4 +1,8 @@
-use std::{cmp::Ordering, ffi::OsStr, path::{Path, PathBuf}};
+use std::{
+    cmp::Ordering,
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 use walkdir::DirEntry;
 

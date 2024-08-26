@@ -1,6 +1,6 @@
 use egui::ahash::HashMap;
 use egui::{Ui, WidgetText};
-use egui_dock::{DockArea, DockState, Style, TabViewer};
+use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
 use std::{cell::RefCell, ffi::OsStr, path::PathBuf, rc::Rc};
 
 use egui::{RichText, Vec2};
@@ -28,18 +28,18 @@ pub struct TabData {
 }
 
 impl TabData {
-    pub fn from_path(path: PathBuf, locations: Rc<RefCell<HashMap<String, Locations>>>) -> Self {
+    pub fn from_path(path: &PathBuf, locations: Rc<RefCell<HashMap<String, Locations>>>) -> Self {
         let mut new = Self {
             list: vec![],
             path_change: None,
-            name: Self::get_name_from_path(&path),
-            current_path: path,
+            name: String::new(),
+            current_path: PathBuf::new(),
             settings: DirectoryViewSettings::default(),
             locations,
             dir_has_cargo: false,
             can_close: true,
         };
-        new.refresh_list();
+        new.set_path(path);
         new
     }
 }
@@ -126,6 +126,8 @@ impl TabViewer for MyTabViewer {
                                         new_tab: true,
                                         path: val.path().to_path_buf(),
                                     });
+                                    ui.close_menu();
+                                    return;
                                 }
                                 #[cfg(windows)]
                                 if ui.button("Open in explorer").clicked() {
@@ -267,7 +269,7 @@ impl MyTabs {
         };
         active_tab.current_path.clone()
     }
-    pub fn new(path: PathBuf, locations: Rc<RefCell<HashMap<String, Locations>>>) -> Self {
+    pub fn new(path: &PathBuf, locations: Rc<RefCell<HashMap<String, Locations>>>) -> Self {
         // Create a `DockState` with an initial tab "tab1" in the main `Surface`'s root node.
         let tabs = vec![TabData::from_path(path, locations)];
         let dock_state = DockState::new(tabs);
@@ -297,13 +299,23 @@ impl MyTabs {
     }
 
     pub fn ui(&mut self, ui: &mut Ui) {
-        let length = self.dock_state.iter_all_tabs().count();
+        let tabs_amount = self.dock_state.iter_all_tabs().count();
 
         for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
-            item.can_close = length > 1;
+            item.can_close = tabs_amount > 1;
         }
+        let mut style = Style::from_egui(ui.style().as_ref());
+        style.dock_area_padding = None;
+        style.tab_bar.fill_tab_bar = true;
+        style.tab_bar.height = if tabs_amount > 1 {
+            style.tab_bar.height * 1.4
+        } else {
+            0.0
+        };
+        style.tab.tab_body.inner_margin = egui::Margin::same(10.0);
+        style.tab.tab_body.stroke = egui::Stroke::NONE;
         DockArea::new(&mut self.dock_state)
-            .style(Style::from_egui(ui.style().as_ref()))
+            .style(style)
             .show_inside(ui, &mut MyTabViewer);
 
         let Some(active_tab) = self.get_current_tab() else {
@@ -312,24 +324,35 @@ impl MyTabs {
         if let Some(path_change) = &active_tab.path_change {
             if path_change.new_tab {
                 let new_window =
-                    TabData::from_path(path_change.path.clone(), Rc::clone(&active_tab.locations));
-                self.dock_state
+                    TabData::from_path(&path_change.path, Rc::clone(&active_tab.locations));
+                let root_node = self
+                    .dock_state
                     .main_surface_mut()
-                    .push_to_first_leaf(new_window);
+                    .root_node_mut()
+                    .expect("NO ROOT");
+                root_node.append_tab(new_window);
             } else {
                 active_tab.set_path(&path_change.path.clone());
             }
         }
     }
 
-    pub fn open_in_new_tab(&mut self, path: PathBuf) {
+    pub fn open_in_new_tab(&mut self, path: &PathBuf) {
+        let is_not_focused = self.dock_state.focused_leaf().is_none();
+        if is_not_focused {
+            self.dock_state
+                .set_focused_node_and_surface((SurfaceIndex::main(), NodeIndex::root()));
+        }
         let Some(active_tab) = self.get_current_tab() else {
             return;
         };
         let new_window = TabData::from_path(path, Rc::clone(&active_tab.locations));
-        self.dock_state
+        let root_node = self
+            .dock_state
             .main_surface_mut()
-            .push_to_first_leaf(new_window);
+            .root_node_mut()
+            .expect("NO ROOT");
+        root_node.append_tab(new_window);
     }
 
     pub(crate) fn refresh_list(&mut self) {

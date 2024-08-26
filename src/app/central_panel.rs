@@ -1,4 +1,4 @@
-use egui::{Context, Layout};
+use egui::{Context, Layout, Shadow};
 
 use crate::consts::TOP_SIDE_MARGIN;
 
@@ -7,7 +7,11 @@ use super::App;
 impl App {
     #[allow(clippy::too_many_lines)] // todo refactor
     pub(crate) fn central_panel(&mut self, ctx: &Context, search_changed: &mut bool) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let frame = egui::Frame::central_panel(&ctx.style())
+            .shadow(Shadow::NONE)
+            .inner_margin(egui::Margin::ZERO)
+            .outer_margin(egui::Margin::ZERO);
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let Some(active_tab) = self.tabs.get_current_tab() else {
                 return;
             };

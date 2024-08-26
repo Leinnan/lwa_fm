@@ -80,7 +80,7 @@ impl Default for App {
         let clone = Rc::clone(&locations);
         Self {
             locations,
-            tabs: crate::app::dock::MyTabs::new(get_starting_path(), clone),
+            tabs: crate::app::dock::MyTabs::new(&get_starting_path(), clone),
         }
     }
 }
@@ -122,7 +122,7 @@ impl App {
                 }
             }
             value.tabs =
-                crate::app::dock::MyTabs::new(get_starting_path(), Rc::clone(&value.locations));
+                crate::app::dock::MyTabs::new(&get_starting_path(), Rc::clone(&value.locations));
             return value;
         }
 
@@ -152,7 +152,7 @@ impl eframe::App for App {
 
         if let Some(new) = &new_path {
             if new.new_tab {
-                self.tabs.open_in_new_tab(new.path.clone());
+                self.tabs.open_in_new_tab(&new.path);
             } else {
                 self.tabs.update_active_tab(&new.path);
             }

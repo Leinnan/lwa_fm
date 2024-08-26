@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use egui::{Context, Layout};
+use egui::{Color32, Context, Layout};
 
 use crate::{
     consts::{GIT_HASH, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
@@ -83,7 +83,11 @@ impl App {
                     };
                     let amount = size_left.x - amount;
                     ui.add_space(amount);
-                    if active_tab.dir_has_cargo && ui.button(">").on_hover_text("Run project").clicked() {
+                    let text = egui::RichText::new("▶").color(Color32::from_hex("#E2A735").expect("WRONG COLOR"));
+                    let button = egui::Button::new(text).frame(false)
+                    .fill(egui::Color32::from_white_alpha(0));
+
+                    if active_tab.dir_has_cargo && ui.add(button).on_hover_text("Run project").clicked() {
                         // todo: add possibility to stop it again
                         match Command::new("cargo")
                             .arg("run")
