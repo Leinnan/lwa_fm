@@ -1,20 +1,19 @@
-use std::path::PathBuf;
-
 use egui::{Context, Layout, RichText};
 
 use crate::consts::TOP_SIDE_MARGIN;
 
-use super::App;
+use super::{App, NewPathRequest};
 
 impl App {
-    pub(crate) fn left_side_panel(&mut self, ctx: &Context, new_path: &mut Option<PathBuf>) {
+    pub(crate) fn left_side_panel(&self, ctx: &Context, new_path: &mut Option<NewPathRequest>) {
         egui::SidePanel::left("leftPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
                 ui.allocate_space([160.0, TOP_SIDE_MARGIN].into());
                 ui.with_layout(Layout::top_down(eframe::emath::Align::Min), |ui| {
+                    let mut locations = self.locations.borrow_mut();
                     for id in ["Favorites", "User", "Drives"] {
-                        let Some(collection) = self.locations.get_mut(id) else {
+                        let Some(collection) = locations.get_mut(id) else {
                             continue;
                         };
                         if collection.locations.is_empty() {
@@ -36,14 +35,24 @@ impl App {
                                                 .fill(egui::Color32::from_white_alpha(0)),
                                             );
                                             if button.clicked() {
-                                                *new_path = Some(location.path.clone());
+                                                *new_path = Some(NewPathRequest {
+                                                    new_tab: false,
+                                                    path: location.path.clone(),
+                                                });
                                                 return;
                                             }
                                             ui.add_space(10.0);
-                                            if !collection.editable {
-                                                return;
-                                            }
                                             button.context_menu(|ui| {
+                                                if ui.button("Open in new tab").clicked() {
+                                                    *new_path = Some(NewPathRequest {
+                                                        new_tab: true,
+                                                        path: location.path.clone(),
+                                                    });
+                                                    return;
+                                                }
+                                                if !collection.editable {
+                                                    return;
+                                                }
                                                 if ui.button("Remove").clicked() {
                                                     id_to_remove = Some(i);
                                                     ui.close_menu();
