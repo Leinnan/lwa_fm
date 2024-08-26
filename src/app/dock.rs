@@ -325,12 +325,17 @@ impl MyTabs {
             if path_change.new_tab {
                 let new_window =
                     TabData::from_path(&path_change.path, Rc::clone(&active_tab.locations));
+
                 let root_node = self
                     .dock_state
                     .main_surface_mut()
                     .root_node_mut()
                     .expect("NO ROOT");
-                root_node.append_tab(new_window);
+                if root_node.is_leaf() {
+                    root_node.append_tab(new_window);
+                } else {
+                    self.dock_state.push_to_focused_leaf(new_window);
+                }
             } else {
                 active_tab.set_path(&path_change.path.clone());
             }
@@ -352,7 +357,11 @@ impl MyTabs {
             .main_surface_mut()
             .root_node_mut()
             .expect("NO ROOT");
-        root_node.append_tab(new_window);
+        if root_node.is_leaf() {
+            root_node.append_tab(new_window);
+        } else {
+            self.dock_state.push_to_focused_leaf(new_window);
+        }
     }
 
     pub(crate) fn refresh_list(&mut self) {
