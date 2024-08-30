@@ -271,11 +271,14 @@ impl TabViewer for MyTabViewer {
                                 });
                                 ui.close_menu();
                             }
-                            ui.separator();
+
                             #[cfg(windows)]
-                            if ui.button("Properties").clicked() {
-                                crate::windows_tools::open_properties(val.path());
-                                ui.close_menu();
+                            {
+                                ui.separator();
+                                if ui.button("Properties").clicked() {
+                                    crate::windows_tools::open_properties(val.path());
+                                    ui.close_menu();
+                                }
                             }
                         });
                         let ext = val
