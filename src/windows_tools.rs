@@ -8,17 +8,13 @@ use windows::{
     },
 };
 
-pub fn open_in_explorer(path: impl AsRef<OsStr>, is_dir: bool) -> anyhow::Result<()> {
-    if is_dir {
-        open::that_detached(path).context("Failed to open dir in explorer")
-    } else {
-        std::process::Command::new("explorer.exe")
-            .arg("/select,")
-            .arg(&path)
-            .spawn()
-            .context("Failed to open explorer")?;
-        Ok(())
-    }
+pub fn display_in_explorer(path: impl AsRef<OsStr>) -> anyhow::Result<()> {
+    std::process::Command::new("explorer.exe")
+        .arg("/select,")
+        .arg(&path)
+        .spawn()
+        .context("Failed to open explorer")?;
+    Ok(())
 }
 
 /// Opens the explorer properties for a given path

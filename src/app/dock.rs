@@ -1,6 +1,7 @@
 use egui::ahash::HashMap;
 use egui::{Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
+use std::fs;
 use std::{cell::RefCell, ffi::OsStr, path::PathBuf, rc::Rc};
 
 use egui::{RichText, Vec2};
@@ -23,6 +24,7 @@ pub struct TabData {
     pub current_path: PathBuf,
     pub settings: DirectoryViewSettings,
     pub locations: Rc<RefCell<HashMap<String, Locations>>>,
+    pub other_tabs_paths: Vec<PathBuf>,
     pub dir_has_cargo: bool,
     pub can_close: bool,
 }
@@ -38,9 +40,17 @@ impl TabData {
             locations,
             dir_has_cargo: false,
             can_close: true,
+            other_tabs_paths: vec![],
         };
         new.set_path(path);
         new
+    }
+    pub fn set_other_paths(&mut self, other_tabs: &[PathBuf]) {
+        self.other_tabs_paths = other_tabs
+            .iter()
+            .filter(|p| !p.eq(&&self.current_path))
+            .cloned()
+            .collect::<Vec<PathBuf>>();
     }
 }
 
@@ -71,6 +81,7 @@ impl TabViewer for MyTabViewer {
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         tab.path_change = None;
+        let mut require_refresh = false; //  replace it with flow using https://docs.rs/notify/latest/notify/
         egui::ScrollArea::vertical().show(ui, |ui| {
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
             let table = TableBuilder::new(ui)
@@ -114,7 +125,7 @@ impl TabViewer for MyTabViewer {
                                     return;
                                 };
                                 tab.path_change = Some(NewPathRequest {
-                                    new_tab: false,
+                                    new_tab: ui.input(|i| i.modifiers.ctrl),
                                     path,
                                 });
                             }
@@ -130,18 +141,15 @@ impl TabViewer for MyTabViewer {
                                     return;
                                 }
                                 #[cfg(windows)]
-                                if ui.button("Open in explorer").clicked() {
-                                    crate::windows_tools::open_in_explorer(val.path(), true)
-                                        .unwrap_or_else(|_| {
-                                            toast!(Error, "Could not open in explorer");
-                                        });
-                                    ui.close_menu();
-                                    return;
-                                }
+                                let open_name = "Open in Explorer";
                                 #[cfg(target_os = "macos")]
-                                if ui.button("Open in Finder").clicked() {
+                                let open_name = "Open in Finder";
+                                #[cfg(target_os = "linux")]
+                                let open_name = "Open in File Manager";
+
+                                if ui.button(open_name).clicked() {
                                     open::that_detached(val.path())
-                                        .expect("Failed to open dir in Finder");
+                                        .expect("Failed to open directory in file manager");
                                     ui.close_menu();
                                     return;
                                 }
@@ -207,13 +215,63 @@ impl TabViewer for MyTabViewer {
                             } else {
                                 #[cfg(windows)]
                                 if ui.button("Show in explorer").clicked() {
-                                    crate::windows_tools::open_in_explorer(val.path(), false)
+                                    crate::windows_tools::display_in_explorer(val.path())
                                         .unwrap_or_else(|_| {
                                             toast!(Error, "Could not open in explorer");
                                         });
                                     ui.close_menu();
                                 }
+                                if !tab.other_tabs_paths.is_empty() {
+                                    ui.separator();
+                                    ui.menu_button("Move to", |ui| {
+                                        for other in &tab.other_tabs_paths {
+                                            let other = PathBuf::from(
+                                                std::fs::canonicalize(other)
+                                                    .unwrap_or_else(|_| val.path().to_path_buf())
+                                                    .to_string_lossy()
+                                                    .replace("\\\\?\\", ""),
+                                            );
+
+                                            if ui
+                                                .button(format!(
+                                                    "{}",
+                                                    &other
+                                                        .file_name()
+                                                        .expect("Failed")
+                                                        .to_string_lossy()
+                                                ))
+                                                .on_hover_text(other.display().to_string())
+                                                .clicked()
+                                            {
+                                                let filename =
+                                                    val.path().file_name().expect("NO FILENAME");
+                                                let target_path = other.join(filename);
+                                                println!("{}", &target_path.display());
+                                                fs::rename(val.path(), target_path).unwrap_or_else(
+                                                    |e| {
+                                                        toast!(
+                                                            Error,
+                                                            "Failed to move file {}: {}",
+                                                            filename.to_string_lossy(),
+                                                            e
+                                                        );
+                                                    },
+                                                );
+                                                require_refresh = true;
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                }
                             }
+                            ui.separator();
+                            if ui.button("Move to Trash").clicked() {
+                                trash::delete(val.path()).unwrap_or_else(|_| {
+                                    toast!(Error, "Could not move it to trash.");
+                                });
+                                ui.close_menu();
+                            }
+                            ui.separator();
                             #[cfg(windows)]
                             if ui.button("Properties").clicked() {
                                 crate::windows_tools::open_properties(val.path());
@@ -253,6 +311,9 @@ impl TabViewer for MyTabViewer {
                 });
             });
         });
+        if require_refresh {
+            tab.refresh_list();
+        }
     }
 }
 
@@ -300,9 +361,15 @@ impl MyTabs {
 
     pub fn ui(&mut self, ui: &mut Ui) {
         let tabs_amount = self.dock_state.iter_all_tabs().count();
+        let tabs: Vec<PathBuf> = self
+            .dock_state
+            .iter_all_tabs()
+            .map(|(_, tab)| tab.current_path.clone())
+            .collect();
 
         for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
             item.can_close = tabs_amount > 1;
+            item.set_other_paths(&tabs);
         }
         let mut style = Style::from_egui(ui.style().as_ref());
         style.dock_area_padding = None;
