@@ -221,6 +221,7 @@ impl TabViewer for MyTabViewer {
                                         });
                                     ui.close_menu();
                                 }
+                                #[allow(clippy::collapsible_else_if)]
                                 if !tab.other_tabs_paths.is_empty() {
                                     ui.separator();
                                     ui.menu_button("Move to", |ui| {
