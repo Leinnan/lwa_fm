@@ -30,15 +30,7 @@ jobs:
             target/
           key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-build-
+      - uses: extractions/setup-just@v2
 
-      - name: Build
-        run: cargo build
-
-      - name: Test
-        run: cargo test
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint
-        run: cargo clippy -- -D warnings
+      - name: Validate
+        run: just validate

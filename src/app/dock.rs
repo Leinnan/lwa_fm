@@ -45,7 +45,9 @@ impl TabData {
         new.set_path(path);
         new
     }
-    pub fn set_other_paths(&mut self, other_tabs: &[PathBuf]) {
+    pub fn update(&mut self, other_tabs: &[PathBuf]) {
+        self.can_close = !other_tabs.is_empty();
+        self.path_change = None;
         self.other_tabs_paths = other_tabs
             .iter()
             .filter(|p| !p.eq(&&self.current_path))
@@ -80,7 +82,13 @@ impl TabViewer for MyTabViewer {
     /// Defines the contents of a given `tab`.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
-        tab.path_change = None;
+        if ui.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) {
+            tab.settings.search.visible = !tab.settings.search.visible;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::H) && i.modifiers.ctrl) {
+            tab.settings.show_hidden = !tab.settings.show_hidden;
+            tab.refresh_list();
+        }
         let mut require_refresh = false; //  replace it with flow using https://docs.rs/notify/latest/notify/
         egui::ScrollArea::vertical().show(ui, |ui| {
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
@@ -364,53 +372,16 @@ impl MyTabs {
     }
 
     pub fn ui(&mut self, ui: &mut Ui) {
-        let tabs_amount = self.dock_state.iter_all_tabs().count();
-        let tabs: Vec<PathBuf> = self
-            .dock_state
-            .iter_all_tabs()
-            .map(|(_, tab)| tab.current_path.clone())
-            .collect();
+        let tabs = self.get_tabs_paths();
 
         for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
-            item.can_close = tabs_amount > 1;
-            item.set_other_paths(&tabs);
+            item.update(&tabs);
         }
-        let mut style = Style::from_egui(ui.style().as_ref());
-        style.dock_area_padding = None;
-        style.tab_bar.fill_tab_bar = true;
-        style.tab_bar.height = if tabs_amount > 1 {
-            style.tab_bar.height * 1.4
-        } else {
-            0.0
-        };
-        style.tab.tab_body.inner_margin = egui::Margin::same(10.0);
-        style.tab.tab_body.stroke = egui::Stroke::NONE;
         DockArea::new(&mut self.dock_state)
-            .style(style)
+            .style(Self::get_dock_style(ui.style().as_ref(), tabs.len()))
             .show_inside(ui, &mut MyTabViewer);
 
-        let Some(active_tab) = self.get_current_tab() else {
-            return;
-        };
-        if let Some(path_change) = &active_tab.path_change {
-            if path_change.new_tab {
-                let new_window =
-                    TabData::from_path(&path_change.path, Rc::clone(&active_tab.locations));
-
-                let root_node = self
-                    .dock_state
-                    .main_surface_mut()
-                    .root_node_mut()
-                    .expect("NO ROOT");
-                if root_node.is_leaf() {
-                    root_node.append_tab(new_window);
-                } else {
-                    self.dock_state.push_to_focused_leaf(new_window);
-                }
-            } else {
-                active_tab.set_path(&path_change.path.clone());
-            }
-        }
+        self.after_update();
     }
 
     pub fn open_in_new_tab(&mut self, path: &PathBuf) {
@@ -440,5 +411,51 @@ impl MyTabs {
             return;
         };
         active_tab.refresh_list();
+    }
+
+    fn get_tabs_paths(&self) -> Vec<PathBuf> {
+        self.dock_state
+            .iter_all_tabs()
+            .map(|(_, tab)| tab.current_path.clone())
+            .collect()
+    }
+
+    fn get_dock_style(ui: &egui::Style, tabs_amount: usize) -> Style {
+        let mut style = Style::from_egui(ui);
+        style.dock_area_padding = None;
+        style.tab_bar.fill_tab_bar = true;
+        style.tab_bar.height = if tabs_amount > 1 {
+            style.tab_bar.height * 1.4
+        } else {
+            0.0
+        };
+        style.tab.tab_body.inner_margin = egui::Margin::same(10.0);
+        style.tab.tab_body.stroke = egui::Stroke::NONE;
+        style
+    }
+
+    fn after_update(&mut self) {
+        let Some(active_tab) = self.get_current_tab() else {
+            return;
+        };
+        if let Some(path_change) = &active_tab.path_change {
+            if path_change.new_tab {
+                let new_window =
+                    TabData::from_path(&path_change.path, Rc::clone(&active_tab.locations));
+
+                let root_node = self
+                    .dock_state
+                    .main_surface_mut()
+                    .root_node_mut()
+                    .expect("NO ROOT");
+                if root_node.is_leaf() {
+                    root_node.append_tab(new_window);
+                } else {
+                    self.dock_state.push_to_focused_leaf(new_window);
+                }
+            } else {
+                active_tab.set_path(&path_change.path.clone());
+            }
+        }
     }
 }

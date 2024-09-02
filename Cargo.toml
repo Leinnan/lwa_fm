@@ -66,6 +66,8 @@ unwrap_used = { level = "deny", priority = 10 }
 
 [package.metadata.bundle]
 name = "LWA File Manager"
-image = ["static/icon.png"]
+image = ["icon32x32.png", "icon128x128.png"]
 identifier = "io.github.Leinnan.lwa_fm"
 osx_url_schemes = ["io.github.Leinnan.lwa_fm"]
+short_description = "File Manager"
+long_description = "File Manager built with egui in Rust"
