@@ -10,7 +10,7 @@ impl App {
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
                 ui.allocate_space([160.0, TOP_SIDE_MARGIN].into());
-                ui.with_layout(Layout::top_down(eframe::emath::Align::Min), |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
                     let mut locations = self.locations.borrow_mut();
                     for id in ["Favorites", "User", "Drives"] {
                         let Some(collection) = locations.get_mut(id) else {

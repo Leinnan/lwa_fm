@@ -145,7 +145,7 @@ impl eframe::App for App {
 
         self.left_side_panel(ctx, &mut new_path);
 
-        self.central_panel(ctx, &mut search_changed);
+        self.central_panel(ctx);
         if search_changed {
             self.tabs.refresh_list();
         }

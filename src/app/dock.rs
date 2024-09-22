@@ -1,5 +1,5 @@
 use egui::ahash::HashMap;
-use egui::{Ui, WidgetText};
+use egui::{Layout, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
 use std::fs;
 use std::{cell::RefCell, ffi::OsStr, path::PathBuf, rc::Rc};
@@ -90,236 +90,271 @@ impl TabViewer for MyTabViewer {
             tab.refresh_list();
         }
         let mut require_refresh = false; //  replace it with flow using https://docs.rs/notify/latest/notify/
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
-            let table = TableBuilder::new(ui)
-                .striped(true)
-                .vscroll(false)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::remainder().at_least(260.0))
-                .resizable(false);
-            table.body(|body| {
-                body.rows(text_height, tab.list.len(), |mut row| {
-                    let val = &tab.list[row.index()];
-                    let Ok(meta) = val.metadata() else {
-                        return;
+
+        if tab.settings.search.visible {
+            ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
+                let search_input = ui.add(
+                    egui::TextEdit::singleline(&mut tab.settings.search.value).hint_text("Search"),
+                );
+                require_refresh |= search_input.changed();
+                ui.memory_mut(|memory| {
+                    memory.request_focus(search_input.id);
+                });
+                require_refresh |= ui
+                    .add(egui::Slider::new(&mut tab.settings.search.depth, 1..=7))
+                    .on_hover_text("Search depth")
+                    .changed();
+                require_refresh |= ui
+                    .toggle_value(&mut tab.settings.search.case_sensitive, "🇨")
+                    .on_hover_text("Case sensitive")
+                    .changed();
+                require_refresh |= ui
+                    .toggle_value(&mut tab.settings.search.favorites, "💕")
+                    .on_hover_text("Search favorites")
+                    .changed();
+            });
+            ui.add_space(crate::consts::TOP_SIDE_MARGIN);
+        }
+        let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
+        let table = TableBuilder::new(ui)
+            .striped(true)
+            .vscroll(false)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::remainder().at_least(260.0))
+            .resizable(false);
+        table.body(|body| {
+            body.rows(text_height, tab.list.len(), |mut row| {
+                let val = &tab.list[row.index()];
+                let Ok(meta) = val.metadata() else {
+                    return;
+                };
+                row.col(|ui| {
+                    ui.add_space(VERTICAL_SPACING);
+                    // ui.allocate_space(egui::vec2(available_width, 20.0));
+                    let file_type = meta.file_type();
+                    #[cfg(target_os = "windows")]
+                    let is_dir = {
+                        use std::os::windows::fs::FileTypeExt;
+                        file_type.is_dir() || file_type.is_symlink_dir()
                     };
-                    row.col(|ui| {
-                        ui.add_space(VERTICAL_SPACING);
-                        // ui.allocate_space(egui::vec2(available_width, 20.0));
-                        let file_type = meta.file_type();
-                        #[cfg(target_os = "windows")]
-                        let is_dir = {
-                            use std::os::windows::fs::FileTypeExt;
-                            file_type.is_dir() || file_type.is_symlink_dir()
-                        };
-                        #[cfg(not(target_os = "windows"))]
-                        let is_dir = file_type.is_dir();
-                        let text = val.file_name().to_string_lossy();
+                    #[cfg(not(target_os = "windows"))]
+                    let is_dir = file_type.is_dir();
+                    let text = val.file_name().to_string_lossy();
 
-                        let text = if is_dir {
-                            RichText::new(text)
+                    let text = if is_dir {
+                        RichText::new(text)
+                    } else {
+                        RichText::strong(text.into())
+                    };
+                    let added_button =
+                        ui.add(egui::Button::new(text).fill(egui::Color32::from_white_alpha(0)));
+
+                    if added_button.clicked() {
+                        if meta.is_file() {
+                            let _ = open::that_detached(val.path());
                         } else {
-                            RichText::strong(text.into())
-                        };
-                        let added_button = ui
-                            .add(egui::Button::new(text).fill(egui::Color32::from_white_alpha(0)));
-
-                        if added_button.clicked() {
-                            if meta.is_file() {
-                                let _ = open::that_detached(val.path());
-                            } else {
-                                let Ok(path) = std::fs::canonicalize(val.path()) else {
-                                    return;
-                                };
-                                tab.path_change = Some(NewPathRequest {
-                                    new_tab: ui.input(|i| i.modifiers.ctrl),
-                                    path,
-                                });
-                            }
+                            let Ok(path) = std::fs::canonicalize(val.path()) else {
+                                return;
+                            };
+                            tab.path_change = Some(NewPathRequest {
+                                new_tab: ui.input(|i| i.modifiers.ctrl),
+                                path,
+                            });
                         }
-                        added_button.context_menu(|ui| {
-                            if is_dir {
-                                if ui.button("Open in new tab").clicked() {
-                                    tab.path_change = Some(NewPathRequest {
-                                        new_tab: true,
-                                        path: val.path().to_path_buf(),
-                                    });
-                                    ui.close_menu();
-                                    return;
-                                }
-                                #[cfg(windows)]
-                                let open_name = "Open in Explorer";
-                                #[cfg(target_os = "macos")]
-                                let open_name = "Open in Finder";
-                                #[cfg(target_os = "linux")]
-                                let open_name = "Open in File Manager";
+                    }
+                    added_button.context_menu(|ui| {
+                        if is_dir {
+                            if ui.button("Open in new tab").clicked() {
+                                tab.path_change = Some(NewPathRequest {
+                                    new_tab: true,
+                                    path: val.path().to_path_buf(),
+                                });
+                                ui.close_menu();
+                                return;
+                            }
+                            #[cfg(windows)]
+                            let open_name = "Open in Explorer";
+                            #[cfg(target_os = "macos")]
+                            let open_name = "Open in Finder";
+                            #[cfg(target_os = "linux")]
+                            let open_name = "Open in File Manager";
 
-                                if ui.button(open_name).clicked() {
-                                    open::that_detached(val.path())
-                                        .expect("Failed to open directory in file manager");
-                                    ui.close_menu();
-                                    return;
-                                }
-                                let Ok(path) = std::fs::canonicalize(val.path()) else {
-                                    return;
-                                };
-                                let mut locations = tab.locations.borrow_mut();
+                            if ui.button(open_name).clicked() {
+                                open::that_detached(val.path())
+                                    .expect("Failed to open directory in file manager");
+                                ui.close_menu();
+                                return;
+                            }
+                            let Ok(path) = std::fs::canonicalize(val.path()) else {
+                                return;
+                            };
+                            let mut locations = tab.locations.borrow_mut();
 
-                                let existing_path =
-                                    locations.get("Favorites").and_then(|favorites| {
-                                        favorites
-                                            .locations
-                                            .iter()
-                                            .enumerate()
-                                            .find(|(_i, loc)| path.ends_with(&loc.path))
-                                            .map(|(i, _)| i)
-                                    });
+                            let existing_path = locations.get("Favorites").and_then(|favorites| {
+                                favorites
+                                    .locations
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_i, loc)| path.ends_with(&loc.path))
+                                    .map(|(i, _)| i)
+                            });
 
-                                if existing_path.is_none()
-                                    && ui.button("Add to favorites").clicked()
-                                {
-                                    if let Some(name) = path.iter().last() {
+                            if existing_path.is_none() && ui.button("Add to favorites").clicked() {
+                                if let Some(name) = path.iter().last() {
+                                    if let Some(fav) = locations.get_mut("Favorites") {
+                                        fav.locations.push(Location {
+                                            name: name.to_string_lossy().to_string(),
+                                            path,
+                                        });
+                                    } else {
+                                        locations.insert(
+                                            "Favorites".into(),
+                                            Locations {
+                                                editable: true,
+                                                ..Default::default()
+                                            },
+                                        );
                                         if let Some(fav) = locations.get_mut("Favorites") {
                                             fav.locations.push(Location {
                                                 name: name.to_string_lossy().to_string(),
                                                 path,
                                             });
                                         } else {
-                                            locations.insert(
-                                                "Favorites".into(),
-                                                Locations {
-                                                    editable: true,
-                                                    ..Default::default()
-                                                },
-                                            );
-                                            if let Some(fav) = locations.get_mut("Favorites") {
-                                                fav.locations.push(Location {
-                                                    name: name.to_string_lossy().to_string(),
-                                                    path,
-                                                });
-                                            } else {
-                                                toast!(Error, "Failed to add favorite");
-                                            }
-                                        }
-                                    } else {
-                                        toast!(Error, "Could not get name of file");
-                                    }
-
-                                    ui.close_menu();
-                                    return;
-                                }
-
-                                if existing_path.is_some()
-                                    && ui.button("Remove from favorites").clicked()
-                                {
-                                    if let Some(fav) = locations.get_mut("Favorites") {
-                                        if let Some(existing_path) = existing_path {
-                                            fav.locations.remove(existing_path);
+                                            toast!(Error, "Failed to add favorite");
                                         }
                                     }
-                                    ui.close_menu();
+                                } else {
+                                    toast!(Error, "Could not get name of file");
                                 }
-                            } else {
-                                #[cfg(windows)]
-                                if ui.button("Show in explorer").clicked() {
-                                    crate::windows_tools::display_in_explorer(val.path())
-                                        .unwrap_or_else(|_| {
-                                            toast!(Error, "Could not open in explorer");
-                                        });
-                                    ui.close_menu();
-                                }
-                                #[allow(clippy::collapsible_else_if)]
-                                if !tab.other_tabs_paths.is_empty() {
-                                    ui.separator();
-                                    ui.menu_button("Move to", |ui| {
-                                        for other in &tab.other_tabs_paths {
-                                            let other = PathBuf::from(
-                                                std::fs::canonicalize(other)
-                                                    .unwrap_or_else(|_| val.path().to_path_buf())
-                                                    .to_string_lossy()
-                                                    .replace("\\\\?\\", ""),
-                                            );
 
-                                            if ui
-                                                .button(format!(
-                                                    "{}",
-                                                    &other
-                                                        .file_name()
-                                                        .expect("Failed")
-                                                        .to_string_lossy()
-                                                ))
-                                                .on_hover_text(other.display().to_string())
-                                                .clicked()
-                                            {
-                                                let filename =
-                                                    val.path().file_name().expect("NO FILENAME");
-                                                let target_path = other.join(filename);
-                                                println!("{}", &target_path.display());
-                                                fs::rename(val.path(), target_path).unwrap_or_else(
-                                                    |e| {
-                                                        toast!(
-                                                            Error,
-                                                            "Failed to move file {}: {}",
-                                                            filename.to_string_lossy(),
-                                                            e
-                                                        );
-                                                    },
-                                                );
-                                                require_refresh = true;
-                                                ui.close_menu();
-                                            }
-                                        }
-                                    });
-                                }
+                                ui.close_menu();
+                                return;
                             }
-                            ui.separator();
-                            if ui.button("Move to Trash").clicked() {
-                                trash::delete(val.path()).unwrap_or_else(|_| {
-                                    toast!(Error, "Could not move it to trash.");
-                                });
+
+                            if existing_path.is_some()
+                                && ui.button("Remove from favorites").clicked()
+                            {
+                                if let Some(fav) = locations.get_mut("Favorites") {
+                                    if let Some(existing_path) = existing_path {
+                                        fav.locations.remove(existing_path);
+                                    }
+                                }
                                 ui.close_menu();
                             }
-
-                            #[cfg(windows)]
-                            {
-                                ui.separator();
-                                if ui.button("Properties").clicked() {
-                                    crate::windows_tools::open_properties(val.path());
-                                    ui.close_menu();
-                                }
-                            }
-                        });
-                        let ext = val
-                            .path()
-                            .extension()
-                            .unwrap_or_default()
-                            .to_ascii_lowercase();
-                        if ext.eq(&OsStr::new("png"))
-                            || ext.eq(&OsStr::new("jpg"))
-                            || ext.eq(&OsStr::new("jpeg"))
-                        {
-                            added_button.on_hover_ui(|ui| {
-                                let path = std::fs::canonicalize(val.path())
-                                    .unwrap_or_else(|_| val.path().to_path_buf())
-                                    .to_string_lossy()
-                                    .replace("\\\\?\\", "");
-                                let path = format!("file://{path}");
-                                ui.add(
-                                    egui::Image::new(path)
-                                        .maintain_aspect_ratio(true)
-                                        .max_size(Vec2::new(300.0, 300.0)),
-                                );
-                            });
                         } else {
-                            added_button.on_hover_text(format!(
-                                "{:?}",
-                                // consider caching here
-                                std::fs::canonicalize(val.path())
-                                    .unwrap_or_else(|_| val.path().to_path_buf())
-                            ));
+                            #[cfg(windows)]
+                            if ui.button("Show in explorer").clicked() {
+                                crate::windows_tools::display_in_explorer(val.path())
+                                    .unwrap_or_else(|_| {
+                                        toast!(Error, "Could not open in explorer");
+                                    });
+                                ui.close_menu();
+                            }
+                            #[allow(clippy::collapsible_else_if)]
+                            if !tab.other_tabs_paths.is_empty() {
+                                ui.separator();
+                                ui.menu_button("Move to", |ui| {
+                                    for other in &tab.other_tabs_paths {
+                                        let other = PathBuf::from(
+                                            std::fs::canonicalize(other)
+                                                .unwrap_or_else(|_| val.path().to_path_buf())
+                                                .to_string_lossy()
+                                                .replace("\\\\?\\", ""),
+                                        );
+
+                                        if ui
+                                            .button(format!(
+                                                "{}",
+                                                &other
+                                                    .file_name()
+                                                    .expect("Failed")
+                                                    .to_string_lossy()
+                                            ))
+                                            .on_hover_text(other.display().to_string())
+                                            .clicked()
+                                        {
+                                            let filename =
+                                                val.path().file_name().expect("NO FILENAME");
+                                            let target_path = other.join(filename);
+                                            println!("{}", &target_path.display());
+                                            let move_result = fs::rename(val.path(), &target_path);
+                                            let mut success = move_result.is_ok();
+                                            let _ = move_result.inspect_err(|e| {
+                                                e.raw_os_error().inspect(|nr| {
+                                                    // OSError: [WinError 17] The system cannot move the file to a different disk drive
+                                                    if *nr == 17 {
+                                                        let copy_success = fs::copy(
+                                                            val.path(),
+                                                            target_path.clone(),
+                                                        )
+                                                        .is_ok();
+                                                        if copy_success {
+                                                            success =
+                                                                fs::remove_file(val.path()).is_ok();
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                            if !success {
+                                                toast!(
+                                                    Error,
+                                                    "Failed to move file {}",
+                                                    filename.to_string_lossy()
+                                                );
+                                            }
+                                            require_refresh = true;
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Move to Trash").clicked() {
+                            trash::delete(val.path()).unwrap_or_else(|_| {
+                                toast!(Error, "Could not move it to trash.");
+                            });
+                            ui.close_menu();
+                        }
+
+                        #[cfg(windows)]
+                        {
+                            ui.separator();
+                            if ui.button("Properties").clicked() {
+                                crate::windows_tools::open_properties(val.path());
+                                ui.close_menu();
+                            }
                         }
                     });
+                    let ext = val
+                        .path()
+                        .extension()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    if ext.eq(&OsStr::new("png"))
+                        || ext.eq(&OsStr::new("jpg"))
+                        || ext.eq(&OsStr::new("jpeg"))
+                    {
+                        added_button.on_hover_ui(|ui| {
+                            let path = std::fs::canonicalize(val.path())
+                                .unwrap_or_else(|_| val.path().to_path_buf())
+                                .to_string_lossy()
+                                .replace("\\\\?\\", "");
+                            let path = format!("file://{path}");
+                            ui.add(
+                                egui::Image::new(path)
+                                    .maintain_aspect_ratio(true)
+                                    .max_size(Vec2::new(300.0, 300.0)),
+                            );
+                        });
+                    } else {
+                        added_button.on_hover_text(format!(
+                            "{:?}",
+                            // consider caching here
+                            std::fs::canonicalize(val.path())
+                                .unwrap_or_else(|_| val.path().to_path_buf())
+                        ));
+                    }
                 });
             });
         });
