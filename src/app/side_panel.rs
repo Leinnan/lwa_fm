@@ -54,7 +54,7 @@ impl App {
                                                 if !collection.editable {
                                                     return;
                                                 }
-                                                if ui.button("Remove").clicked() {
+                                                if ui.button("Remove from favorites").clicked() {
                                                     id_to_remove = Some(i);
                                                     ui.close_menu();
                                                 }

@@ -10,6 +10,7 @@ use crate::{
 use super::{App, NewPathRequest, Sort};
 
 impl App {
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn top_panel(&mut self, ctx: &Context, new_path: &mut Option<NewPathRequest>) {
         egui::TopBottomPanel::top("top_panel")
             .frame(egui::Frame::canvas(&ctx.style()))
@@ -62,16 +63,47 @@ impl App {
                         }
                         #[cfg(not(windows))]
                         {
+                            let shift_pressed = ui.input(|i| i.modifiers.shift);
+
                             if let Some(part) = e.to_str() {
                                 if !part.starts_with('/') && !path.ends_with('/') {
                                     path += "/";
                                 }
                                 path += part;
                             }
-                            if ui.button(e.to_string_lossy()).clicked() {
-                                *new_path = Some(NewPathRequest { new_tab: false, path: path.into() });
+                            let button = ui.button(e.to_string_lossy());
+                            if button.clicked() {
+                                *new_path = Some(NewPathRequest { new_tab: shift_pressed, path: path.into() });
                                 return;
                             }
+                            button.context_menu(|ui|{
+                                if ui.button("Open").clicked() {
+                                        *new_path = Some(NewPathRequest {
+                                            new_tab: false,
+                                            path: path.clone().into(),
+                                        });
+                                        ui.close_menu();
+                                        return;
+                                    }
+                                    if ui.button("Open in new tab").clicked() {
+                                            *new_path = Some(NewPathRequest {
+                                                new_tab: true,
+                                                path: path.clone().into(),
+                                            });
+                                            ui.close_menu();
+                                            return;
+                                    }
+                                    if ui.button("Copy path to clipboard").clicked() {
+                                        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+                                            toast!(Error, "Failed to read the clipboard.");
+                                            return;
+                                        };
+                                        clipboard.set_text(path.clone()).unwrap_or_else(|_| {
+                                            toast!(Error, "Failed to update the clipboard.");
+                                        });
+                                        ui.close_menu();
+                                    }
+                            });
                         }
                     }
                     let size_left = ui.available_size();

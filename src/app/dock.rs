@@ -164,6 +164,14 @@ impl TabViewer for MyTabViewer {
                     }
                     added_button.context_menu(|ui| {
                         if is_dir {
+                            if ui.button("Open").clicked() {
+                                tab.path_change = Some(NewPathRequest {
+                                    new_tab: false,
+                                    path: val.path().to_path_buf(),
+                                });
+                                ui.close_menu();
+                                return;
+                            }
                             if ui.button("Open in new tab").clicked() {
                                 tab.path_change = Some(NewPathRequest {
                                     new_tab: true,
@@ -242,6 +250,11 @@ impl TabViewer for MyTabViewer {
                                 ui.close_menu();
                             }
                         } else {
+                            if ui.button("Open").clicked() {
+                                let _ = open::that_detached(val.path());
+                                ui.close_menu();
+                                return;
+                            }
                             #[cfg(windows)]
                             if ui.button("Show in explorer").clicked() {
                                 crate::windows_tools::display_in_explorer(val.path())
@@ -313,6 +326,17 @@ impl TabViewer for MyTabViewer {
                         if ui.button("Move to Trash").clicked() {
                             trash::delete(val.path()).unwrap_or_else(|_| {
                                 toast!(Error, "Could not move it to trash.");
+                            });
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy path to clipboard").clicked() {
+                            let Ok(mut clipboard) = arboard::Clipboard::new() else {
+                                toast!(Error, "Failed to read the clipboard.");
+                                return;
+                            };
+                            let path = val.path().display().to_string();
+                            clipboard.set_text(path).unwrap_or_else(|_| {
+                                toast!(Error, "Failed to update the clipboard.");
                             });
                             ui.close_menu();
                         }

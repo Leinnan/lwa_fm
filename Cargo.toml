@@ -33,6 +33,7 @@ egui-notify = "0.15.0"
 once_cell = "1.19.0"
 egui_dock = "0.13.0"
 trash = "5.1.0"
+arboard = "3.4.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58.0", features = [
