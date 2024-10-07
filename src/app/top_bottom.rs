@@ -155,7 +155,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.add_space(TOP_SIDE_MARGIN);
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
-                    egui::widgets::global_dark_light_mode_switch(ui);
+                    egui::widgets::global_theme_preference_switch(ui);
                     ui.hyperlink_to(
                         format!("{} v {}", egui::special_emojis::GITHUB, VERSION),
                         HOMEPAGE,
