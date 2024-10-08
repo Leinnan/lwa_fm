@@ -1,9 +1,9 @@
 use std::{
     cmp::Ordering,
+    collections::BTreeSet,
     ffi::OsStr,
     path::{Path, PathBuf},
 };
-
 use walkdir::DirEntry;
 
 use crate::toast;
@@ -38,6 +38,10 @@ impl TabData {
         self.name = Self::get_name_from_path(path);
         self.current_path.clone_from(path);
         self.path_change = None;
+        if self.settings.is_searching() {
+            self.settings.search.value = String::new();
+            self.settings.search.visible = false;
+        }
         self.refresh_list();
     }
 
@@ -176,4 +180,43 @@ impl TabData {
             })
         });
     }
+}
+
+pub fn get_directories(path: &Path, show_hidden: bool) -> BTreeSet<String> {
+    get_directories_recursive(path, show_hidden, 2)
+}
+
+pub fn get_directories_recursive(path: &Path, show_hidden: bool, depth: usize) -> BTreeSet<String> {
+    let directories = walkdir::WalkDir::new(path)
+        .max_depth(depth)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            if !e.file_type().is_dir() {
+                return false;
+            }
+            if show_hidden {
+                return true;
+            }
+            let s = e.file_name().to_string_lossy();
+            if s.starts_with('.') || s.starts_with('$') {
+                return false;
+            }
+            let mut current_path: Option<&Path> = e.path().parent();
+
+            while let Some(parent) = current_path {
+                if let Some(parent_name) = parent.file_name().and_then(|name| name.to_str()) {
+                    if (parent_name.starts_with('.') || parent_name.starts_with('$'))
+                        && !parent.eq(path)
+                    {
+                        return false;
+                    }
+                }
+                current_path = parent.parent(); // Move to the next parent
+            }
+            true
+        })
+        .map(|e| format!("{}", e.path().display()))
+        .collect::<BTreeSet<_>>();
+    directories
 }

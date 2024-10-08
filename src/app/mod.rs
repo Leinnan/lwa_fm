@@ -1,7 +1,7 @@
 use crate::locations::Locations;
 use egui::ahash::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, fs, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, collections::BTreeSet, fs, path::PathBuf, rc::Rc};
 
 mod central_panel;
 mod dir_handling;
@@ -42,6 +42,10 @@ pub struct App {
     locations: Rc<RefCell<HashMap<String, Locations>>>,
     #[serde(skip)]
     tabs: crate::app::dock::MyTabs,
+    #[serde(skip)]
+    display_edit_top: bool,
+    top_edit: String,
+    possible_options: BTreeSet<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
@@ -81,6 +85,9 @@ impl Default for App {
         Self {
             locations,
             tabs: crate::app::dock::MyTabs::new(&get_starting_path(), clone),
+            display_edit_top: false,
+            possible_options: BTreeSet::new(),
+            top_edit: String::new(),
         }
     }
 }
@@ -154,6 +161,8 @@ impl eframe::App for App {
             if new.new_tab {
                 self.tabs.open_in_new_tab(&new.path);
             } else {
+                use crate::helper::PathFixer;
+                self.top_edit = new.path.to_fixed_string();
                 self.tabs.update_active_tab(&new.path);
             }
         }

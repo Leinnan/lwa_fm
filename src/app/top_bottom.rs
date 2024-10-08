@@ -1,26 +1,141 @@
-use std::process::Command;
-
-use egui::{Color32, Context, Layout};
+use std::{path::PathBuf, process::Command, str::FromStr};
 
 use crate::{
+    app::dir_handling::{get_directories, get_directories_recursive},
     consts::{GIT_HASH, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
+    helper::PathFixer,
     toast,
 };
+use egui::{Color32, Context, Layout, Ui};
 
 use super::{App, NewPathRequest, Sort};
 
+#[allow(clippy::too_many_lines)]
 impl App {
-    #[allow(clippy::too_many_lines)]
+    pub(crate) fn top_display(&mut self, ui: &mut Ui) -> Option<NewPathRequest> {
+        let mut new_path = None;
+        let mut path: String = String::new();
+        let current_path = self.tabs.get_current_path();
+        let parts = current_path.iter().count();
+        #[allow(unused_variables)] // not used on linux
+        for (i, e) in current_path.iter().enumerate() {
+            #[cfg(windows)]
+            {
+                let text = match &i {
+                    0 => {
+                        let Some(s) = e.to_str() else {
+                            continue;
+                        };
+                        let last_two_chars: String = s.chars().rev().take(2).collect();
+                        path += &last_two_chars.chars().rev().collect::<String>();
+                        path.push(std::path::MAIN_SEPARATOR);
+                        continue;
+                    }
+                    1 => &path,
+                    _ => {
+                        let s = e.to_str()?;
+                        path += s;
+                        path.push(std::path::MAIN_SEPARATOR);
+                        s
+                    }
+                };
+                if ui.button(text).clicked() {
+                    new_path = Some(NewPathRequest {
+                        new_tab: false,
+                        path: path.into(),
+                    });
+                    return new_path;
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let shift_pressed = ui.input(|i| i.modifiers.shift);
+
+                if let Some(part) = e.to_str() {
+                    if !part.starts_with('/') && !path.ends_with('/') {
+                        path += "/";
+                    }
+                    path += part;
+                }
+                let button = ui.button(part);
+                if button.clicked() {
+                    new_path = Some(NewPathRequest {
+                        new_tab: shift_pressed,
+                        path: path.into(),
+                    });
+                    return new_path;
+                }
+                button.context_menu(|ui| {
+                    if ui.button("Open").clicked() {
+                        new_path = Some(NewPathRequest {
+                            new_tab: false,
+                            path: path.clone().into(),
+                        });
+                        ui.close_menu();
+                        return new_path;
+                    }
+                    if ui.button("Open in new tab").clicked() {
+                        new_path = Some(NewPathRequest {
+                            new_tab: true,
+                            path: path.clone().into(),
+                        });
+                        ui.close_menu();
+                        return new_path;
+                    }
+                    if ui.button("Copy path to clipboard").clicked() {
+                        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+                            toast!(Error, "Failed to read the clipboard.");
+                            return new_path;
+                        };
+                        clipboard.set_text(path.clone()).unwrap_or_else(|_| {
+                            toast!(Error, "Failed to update the clipboard.");
+                        });
+                        ui.close_menu();
+                    }
+                });
+            }
+            if parts - 1 != i {
+                ui.menu_button(std::path::MAIN_SEPARATOR.to_string(), |ui| {
+                    let p = std::path::Path::new(&path);
+                    let dirs = get_directories_recursive(p, false, 1);
+                    if dirs.is_empty() {
+                        ui.close_menu();
+                    }
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for dir in &dirs {
+                            let dir_display = dir.replace(&path, "");
+                            if dir_display.is_empty() {
+                                continue;
+                            }
+                            if ui.button(dir_display.as_str()).clicked() {
+                                new_path = Some(NewPathRequest {
+                                    new_tab: false,
+                                    path: PathBuf::from_str(dir).expect("Failed to convert path"),
+                                });
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                });
+            }
+        }
+        new_path
+    }
+
     pub(crate) fn top_panel(&mut self, ctx: &Context, new_path: &mut Option<NewPathRequest>) {
         egui::TopBottomPanel::top("top_panel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
+                let Some(current_tab) = self.tabs.get_current_tab() else {return;};
+                let show_hidden = current_tab.settings.show_hidden;
+                let is_searching = current_tab.settings.is_searching();
+                let current_path = current_tab.current_path.clone();
+                let parent = current_path.parent();
+
                 ui.add_space(TOP_SIDE_MARGIN);
                 ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
                     ui.add_space(TOP_SIDE_MARGIN);
-                    let current_path = self.tabs.get_current_path();
-                    let parent = current_path.parent();
-                    ui.add_enabled_ui(parent.is_some(), |ui| {
+                    ui.add_enabled_ui(parent.is_some() && !self.display_edit_top && !is_searching, |ui| {
                         if ui
                             .button("⬆")
                             .on_hover_text("Go to parent directory")
@@ -30,82 +145,40 @@ impl App {
                         }
                     });
                     ui.add_space(TOP_SIDE_MARGIN);
-                    let mut path: String = String::new();
-
-                    #[allow(unused_variables)] // not used on linux
-                    for (i, e) in self.tabs.get_current_path().iter().enumerate() {
-                        #[cfg(windows)]
-                        {
-                            let text = match &i {
-                                0 => {
-                                    let Some(s) = e.to_str() else {
-                                        continue;
-                                    };
-                                    let last_two_chars: String = s.chars().rev().take(2).collect();
-                                    path += &last_two_chars.chars().rev().collect::<String>();
-                                    path.push(std::path::MAIN_SEPARATOR);
-                                    continue;
-                                }
-                                1 => &path,
-                                _ => {
-                                    let Some(s) = e.to_str() else {
-                                        return;
-                                    };
-                                    path += s;
-                                    path.push(std::path::MAIN_SEPARATOR);
-                                    s
-                                }
-                            };
-                            if ui.button(text).clicked() {
-                                *new_path = Some(NewPathRequest { new_tab: false, path: path.into() });
-                                return;
-                            }
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            let shift_pressed = ui.input(|i| i.modifiers.shift);
-
-                            if let Some(part) = e.to_str() {
-                                if !part.starts_with('/') && !path.ends_with('/') {
-                                    path += "/";
-                                }
-                                path += part;
-                            }
-                            let button = ui.button(e.to_string_lossy());
-                            if button.clicked() {
-                                *new_path = Some(NewPathRequest { new_tab: shift_pressed, path: path.into() });
-                                return;
-                            }
-                            button.context_menu(|ui|{
-                                if ui.button("Open").clicked() {
-                                        *new_path = Some(NewPathRequest {
-                                            new_tab: false,
-                                            path: path.clone().into(),
-                                        });
-                                        ui.close_menu();
-                                        return;
-                                    }
-                                    if ui.button("Open in new tab").clicked() {
-                                            *new_path = Some(NewPathRequest {
-                                                new_tab: true,
-                                                path: path.clone().into(),
-                                            });
-                                            ui.close_menu();
-                                            return;
-                                    }
-                                    if ui.button("Copy path to clipboard").clicked() {
-                                        let Ok(mut clipboard) = arboard::Clipboard::new() else {
-                                            toast!(Error, "Failed to read the clipboard.");
-                                            return;
-                                        };
-                                        clipboard.set_text(path.clone()).unwrap_or_else(|_| {
-                                            toast!(Error, "Failed to update the clipboard.");
-                                        });
-                                        ui.close_menu();
-                                    }
-                            });
+                    ui.add_enabled_ui(!is_searching, |ui|{                    if ui.button("✏").clicked() {
+                        self.display_edit_top = !self.display_edit_top;
+                        if self.display_edit_top {
+                            self.top_edit = current_path.to_fixed_string();
+                            self.possible_options = get_directories(parent.unwrap_or(current_path.as_path()), show_hidden);
                         }
                     }
+                    if self.display_edit_top {
+                        use crate::widgets::autocomplete_text::AutoCompleteTextEdit;
+                        let edit = AutoCompleteTextEdit::new(&mut self.top_edit, &self.possible_options)
+                                                        .max_suggestions(20)
+                                                        .highlight_matches(true);
+                        let _response = ui.add(edit);
+
+                        let should_close = ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape));
+                        if should_close {
+                            self.display_edit_top = false;
+                        }
+
+                        let top_edit_path = std::path::Path::new(&self.top_edit);
+                        if top_edit_path.exists() && !self.possible_options.first().is_some_and(|first| first.eq(&self.top_edit)) {
+                            self.possible_options = get_directories(top_edit_path, show_hidden);
+                            *new_path = Some(NewPathRequest{
+                                new_tab:false,
+                                path: top_edit_path.to_path_buf()
+                            });
+                        }
+                    } else {
+
+                        *new_path = self.top_display(ui);
+                        if new_path.is_some() {
+                        }}});
+
+
                     let size_left = ui.available_size();
                     let Some(active_tab) = self.tabs.get_current_tab() else {return;};
                     let amount = if active_tab.dir_has_cargo {
@@ -137,13 +210,9 @@ impl App {
                     }
                     ui.toggle_value(&mut active_tab.settings.search.visible, "🔍")
                         .on_hover_text("Search");
-                    if ui
+                    ui
                         .toggle_value(&mut active_tab.settings.show_hidden, "👁")
-                        .on_hover_text("Display hidden files")
-                        .changed()
-                    {
-                        // self.refresh_list();
-                    }
+                        .on_hover_text("Display hidden files");
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             });

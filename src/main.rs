@@ -6,7 +6,9 @@ use eframe::egui;
 
 mod app;
 mod consts;
+mod helper;
 mod locations;
+mod widgets;
 #[cfg(windows)]
 mod windows_tools;
 
