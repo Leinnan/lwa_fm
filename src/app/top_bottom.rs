@@ -51,12 +51,13 @@ impl App {
             {
                 let shift_pressed = ui.input(|i| i.modifiers.shift);
 
-                if let Some(part) = e.to_str() {
-                    if !part.starts_with('/') && !path.ends_with('/') {
-                        path += "/";
-                    }
-                    path += part;
+                let Some(part) = e.to_str() else {
+                    continue;
+                };
+                if !part.starts_with('/') && !path.ends_with('/') {
+                    path += "/";
                 }
+                path += part;
                 let button = ui.button(part);
                 if button.clicked() {
                     new_path = Some(NewPathRequest {
@@ -72,7 +73,6 @@ impl App {
                             path: path.clone().into(),
                         });
                         ui.close_menu();
-                        return new_path;
                     }
                     if ui.button("Open in new tab").clicked() {
                         new_path = Some(NewPathRequest {
@@ -80,12 +80,11 @@ impl App {
                             path: path.clone().into(),
                         });
                         ui.close_menu();
-                        return new_path;
                     }
                     if ui.button("Copy path to clipboard").clicked() {
                         let Ok(mut clipboard) = arboard::Clipboard::new() else {
                             toast!(Error, "Failed to read the clipboard.");
-                            return new_path;
+                            return;
                         };
                         clipboard.set_text(path.clone()).unwrap_or_else(|_| {
                             toast!(Error, "Failed to update the clipboard.");
