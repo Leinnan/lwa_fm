@@ -175,12 +175,14 @@ fn setup_custom_fonts(ctx: &egui::Context) {
     // Start with the default fonts (we will be adding to them rather than replacing them).
     let mut fonts = egui::FontDefinitions::default();
     if let Ok((regular, semibold)) = get_fonts() {
-        fonts
-            .font_data
-            .insert("regular".to_owned(), egui::FontData::from_owned(regular));
-        fonts
-            .font_data
-            .insert("semibold".to_owned(), egui::FontData::from_owned(semibold));
+        fonts.font_data.insert(
+            "regular".to_owned(),
+            egui::FontData::from_owned(regular).into(),
+        );
+        fonts.font_data.insert(
+            "semibold".to_owned(),
+            egui::FontData::from_owned(semibold).into(),
+        );
 
         // Put my font first (highest priority) for proportional text:
         fonts
