@@ -1,5 +1,3 @@
-#[allow(dead_code)]
-#[allow(unused_mut)]
 use std::io;
 use std::process::{Child, Command, Stdio};
 
@@ -12,12 +10,13 @@ impl PathFixer for std::path::PathBuf {
         self.display().to_string().replace("\\\\?\\", "")
     }
 }
-
+#[allow(dead_code)]
 pub trait DetachedSpawn {
     fn spawn_detached(&mut self) -> io::Result<Child>;
 }
 
 impl DetachedSpawn for Command {
+    #[allow(unused_mut)]
     fn spawn_detached(&mut self) -> io::Result<Child> {
         let mut command = self;
         #[cfg(windows)]
