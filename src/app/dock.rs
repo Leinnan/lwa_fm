@@ -26,9 +26,13 @@ pub struct TabData {
     pub locations: Rc<RefCell<HashMap<String, Locations>>>,
     pub other_tabs_paths: Vec<PathBuf>,
     pub can_close: bool,
+    pub search: super::Search,
 }
 
 impl TabData {
+    pub fn is_searching(&self) -> bool {
+        !self.search.value.is_empty()
+    }
     pub fn from_path(path: &PathBuf, locations: Rc<RefCell<HashMap<String, Locations>>>) -> Self {
         let mut new = Self {
             list: vec![],
@@ -39,6 +43,13 @@ impl TabData {
             locations,
             can_close: true,
             other_tabs_paths: vec![],
+            search: super::Search {
+                visible: false,
+                case_sensitive: false,
+                depth: 3,
+                favorites: false,
+                value: String::new(),
+            },
         };
         new.set_path(path);
         new
@@ -70,8 +81,8 @@ impl TabViewer for MyTabViewer {
 
     // Returns the current `tab`'s title.
     fn title(&mut self, tab: &mut Self::Tab) -> egui_dock::egui::WidgetText {
-        if tab.settings.is_searching() {
-            format!("Searching: {}", &tab.settings.search.value).into()
+        if tab.is_searching() {
+            format!("Searching: {}", &tab.search.value).into()
         } else {
             tab.name.as_str().into()
         }
@@ -81,7 +92,7 @@ impl TabViewer for MyTabViewer {
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         if ui.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) {
-            tab.settings.search.visible = !tab.settings.search.visible;
+            tab.search.visible = !tab.search.visible;
         }
         if ui.input(|i| i.key_pressed(egui::Key::H) && i.modifiers.ctrl) {
             tab.settings.show_hidden = !tab.settings.show_hidden;
@@ -89,25 +100,24 @@ impl TabViewer for MyTabViewer {
         }
         let mut require_refresh = false; //  replace it with flow using https://docs.rs/notify/latest/notify/
 
-        if tab.settings.search.visible {
+        if tab.search.visible {
             ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
-                let search_input = ui.add(
-                    egui::TextEdit::singleline(&mut tab.settings.search.value).hint_text("Search"),
-                );
+                let search_input =
+                    ui.add(egui::TextEdit::singleline(&mut tab.search.value).hint_text("Search"));
                 require_refresh |= search_input.changed();
                 ui.memory_mut(|memory| {
                     memory.request_focus(search_input.id);
                 });
                 require_refresh |= ui
-                    .add(egui::Slider::new(&mut tab.settings.search.depth, 1..=7))
+                    .add(egui::Slider::new(&mut tab.search.depth, 1..=7))
                     .on_hover_text("Search depth")
                     .changed();
                 require_refresh |= ui
-                    .toggle_value(&mut tab.settings.search.case_sensitive, "🇨")
+                    .toggle_value(&mut tab.search.case_sensitive, "🇨")
                     .on_hover_text("Case sensitive")
                     .changed();
                 require_refresh |= ui
-                    .toggle_value(&mut tab.settings.search.favorites, "💕")
+                    .toggle_value(&mut tab.search.favorites, "💕")
                     .on_hover_text("Search favorites")
                     .changed();
             });

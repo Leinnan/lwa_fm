@@ -158,7 +158,7 @@ impl App {
             .show(ctx, |ui| {
                 let Some(current_tab) = self.tabs.get_current_tab() else {return;};
                 let show_hidden = current_tab.settings.show_hidden;
-                let is_searching = current_tab.settings.is_searching();
+                let is_searching = current_tab.is_searching();
                 let current_path = current_tab.current_path.clone();
                 let parent = current_path.parent();
 
@@ -211,7 +211,7 @@ impl App {
                         }
 
                     }
-                    ui.toggle_value(&mut active_tab.settings.search.visible, "🔍")
+                    ui.toggle_value(&mut active_tab.search.visible, "🔍")
                         .on_hover_text("Search");
                 });
                 ui.add_space(TOP_SIDE_MARGIN);

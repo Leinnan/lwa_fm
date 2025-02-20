@@ -37,9 +37,9 @@ impl TabData {
         self.name = Self::get_name_from_path(path);
         self.current_path.clone_from(path);
         self.path_change = None;
-        if self.settings.is_searching() {
-            self.settings.search.value = String::new();
-            self.settings.search.visible = false;
+        if self.is_searching() {
+            self.search.value = String::new();
+            self.search.visible = false;
         }
         self.refresh_list();
     }
@@ -49,10 +49,10 @@ impl TabData {
     }
 
     fn read_dir(&self) -> Vec<walkdir::DirEntry> {
-        let search = &self.settings.search.value;
-        let use_search = self.settings.is_searching();
+        let search = &self.search.value;
+        let use_search = self.is_searching();
         let locations = self.locations.borrow();
-        let directories = if use_search && self.settings.search.favorites {
+        let directories = if use_search && self.search.favorites {
             locations
                 .get("Favorites")
                 .map_or_else(Vec::new, |favorites| {
@@ -66,11 +66,7 @@ impl TabData {
             [&self.current_path].to_vec()
         };
 
-        let depth = if use_search {
-            self.settings.search.depth
-        } else {
-            1
-        };
+        let depth = if use_search { self.search.depth } else { 1 };
         let mut dir_entries: Vec<walkdir::DirEntry> = directories
             .iter()
             .flat_map(|d| {
@@ -86,7 +82,7 @@ impl TabData {
                         {
                             return false;
                         }
-                        if self.settings.search.case_sensitive {
+                        if self.search.case_sensitive {
                             s.contains(search)
                         } else {
                             s.to_ascii_lowercase()
