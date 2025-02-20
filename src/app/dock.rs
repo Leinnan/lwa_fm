@@ -1,5 +1,5 @@
 use egui::ahash::HashMap;
-use egui::{Layout, Ui, WidgetText};
+use egui::{Layout, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
 use std::fs;
 use std::{cell::RefCell, ffi::OsStr, path::PathBuf, rc::Rc};
@@ -25,7 +25,6 @@ pub struct TabData {
     pub settings: DirectoryViewSettings,
     pub locations: Rc<RefCell<HashMap<String, Locations>>>,
     pub other_tabs_paths: Vec<PathBuf>,
-    pub dir_has_cargo: bool,
     pub can_close: bool,
 }
 
@@ -38,7 +37,6 @@ impl TabData {
             current_path: PathBuf::new(),
             settings: DirectoryViewSettings::default(),
             locations,
-            dir_has_cargo: false,
             can_close: true,
             other_tabs_paths: vec![],
         };
@@ -71,7 +69,7 @@ impl TabViewer for MyTabViewer {
     }
 
     // Returns the current `tab`'s title.
-    fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
+    fn title(&mut self, tab: &mut Self::Tab) -> egui_dock::egui::WidgetText {
         if tab.settings.is_searching() {
             format!("Searching: {}", &tab.settings.search.value).into()
         } else {
@@ -328,6 +326,7 @@ impl TabViewer for MyTabViewer {
                                 toast!(Error, "Could not move it to trash.");
                             });
                             ui.close_menu();
+                            require_refresh = true;
                         }
                         if ui.button("Copy path to clipboard").clicked() {
                             let Ok(mut clipboard) = arboard::Clipboard::new() else {
@@ -437,6 +436,8 @@ impl MyTabs {
             item.update(&tabs);
         }
         DockArea::new(&mut self.dock_state)
+            .show_leaf_close_all_buttons(false)
+            .show_leaf_collapse_buttons(false)
             .style(Self::get_dock_style(ui.style().as_ref(), tabs.len()))
             .show_inside(ui, &mut MyTabViewer);
 
@@ -488,7 +489,7 @@ impl MyTabs {
         } else {
             0.0
         };
-        style.tab.tab_body.inner_margin = egui::Margin::same(10.0);
+        style.tab.tab_body.inner_margin = egui::Margin::same(10);
         style.tab.tab_body.stroke = egui::Stroke::NONE;
         style
     }

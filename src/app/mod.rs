@@ -1,3 +1,4 @@
+use crate::app::settings::ApplicationSettings;
 use crate::locations::Locations;
 use egui::ahash::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,7 @@ mod central_panel;
 mod dir_handling;
 mod directory_view_settings;
 mod dock;
+mod settings;
 mod side_panel;
 mod top_bottom;
 
@@ -46,6 +48,7 @@ pub struct App {
     display_edit_top: bool,
     top_edit: String,
     possible_options: BTreeSet<String>,
+    pub settings: ApplicationSettings,
 }
 
 #[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
@@ -88,6 +91,7 @@ impl Default for App {
             display_edit_top: false,
             possible_options: BTreeSet::new(),
             top_edit: String::new(),
+            settings: ApplicationSettings::default(),
         }
     }
 }

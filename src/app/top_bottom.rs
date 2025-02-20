@@ -1,17 +1,48 @@
 use std::{path::PathBuf, process::Command, str::FromStr};
 
+use super::{App, NewPathRequest, Sort};
 use crate::{
     app::dir_handling::{get_directories, get_directories_recursive},
     consts::{GIT_HASH, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
     helper::PathFixer,
     toast,
 };
-use egui::{Color32, Context, Layout, Ui};
-
-use super::{App, NewPathRequest, Sort};
+use egui::{Context, Layout, Ui};
 
 #[allow(clippy::too_many_lines)]
 impl App {
+    pub(crate) fn top_display_editable(
+        &mut self,
+        ui: &mut Ui,
+        show_hidden: bool,
+    ) -> Option<NewPathRequest> {
+        use crate::widgets::autocomplete_text::AutoCompleteTextEdit;
+        let edit = AutoCompleteTextEdit::new(&mut self.top_edit, &self.possible_options)
+            .max_suggestions(20)
+            .highlight_matches(true);
+        let _response = ui.add(edit);
+
+        let should_close =
+            ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape));
+        if should_close {
+            self.display_edit_top = false;
+        }
+
+        let top_edit_path = std::path::Path::new(&self.top_edit);
+        if top_edit_path.exists()
+            && !self
+                .possible_options
+                .first()
+                .is_some_and(|first| first.eq(&self.top_edit))
+        {
+            self.possible_options = get_directories(top_edit_path, show_hidden);
+            return Some(NewPathRequest {
+                new_tab: false,
+                path: top_edit_path.to_path_buf(),
+            });
+        }
+        None
+    }
     pub(crate) fn top_display(&mut self, ui: &mut Ui) -> Option<NewPathRequest> {
         let mut new_path = None;
         let mut path: String = String::new();
@@ -151,67 +182,37 @@ impl App {
                             self.possible_options = get_directories(parent.unwrap_or(current_path.as_path()), show_hidden);
                         }
                     }
-                    if self.display_edit_top {
-                        use crate::widgets::autocomplete_text::AutoCompleteTextEdit;
-                        let edit = AutoCompleteTextEdit::new(&mut self.top_edit, &self.possible_options)
-                                                        .max_suggestions(20)
-                                                        .highlight_matches(true);
-                        let _response = ui.add(edit);
-
-                        let should_close = ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape));
-                        if should_close {
-                            self.display_edit_top = false;
-                        }
-
-                        let top_edit_path = std::path::Path::new(&self.top_edit);
-                        if top_edit_path.exists() && !self.possible_options.first().is_some_and(|first| first.eq(&self.top_edit)) {
-                            self.possible_options = get_directories(top_edit_path, show_hidden);
-                            *new_path = Some(NewPathRequest{
-                                new_tab:false,
-                                path: top_edit_path.to_path_buf()
-                            });
-                        }
+                    *new_path = if self.display_edit_top {
+                        self.top_display_editable(ui, show_hidden)
                     } else {
-
-                        *new_path = self.top_display(ui);
-                        if new_path.is_some() {
-                        }}});
+                        self.top_display(ui)
+                    };
+                    });
 
 
                     let size_left = ui.available_size();
                     let Some(active_tab) = self.tabs.get_current_tab() else {return;};
-                    let amount = if active_tab.dir_has_cargo {
-                        size_left.y * 3.0
-                    } else {
-                        size_left.y * 2.0
-                    };
+                    let amount = size_left.y * 2.0;
                     let amount = size_left.x - amount;
                     ui.add_space(amount);
-                    let text = egui::RichText::new("▶").color(Color32::from_hex("#E2A735").expect("WRONG COLOR"));
-                    let button = egui::Button::new(text).frame(false)
-                    .fill(egui::Color32::from_white_alpha(0));
 
-                    if active_tab.dir_has_cargo && ui.add(button).on_hover_text("Run project").clicked() {
-                        // todo: add possibility to stop it again
-                        match Command::new("cargo")
-                            .arg("run")
-                            .arg("--release")
-                            .current_dir(&active_tab.current_path)
-                            .spawn()
+                    let button = egui::Button::new("🖳").frame(false)
+                        .fill(egui::Color32::from_white_alpha(0));
+                    if ui.add(button).on_hover_text("Open in terminal").clicked() {
+                        match Command::new(&self.settings.terminal_path)
+                            .current_dir(&active_tab.current_path).spawn()
                         {
                             Ok(_) => {
-                                toast!(Success, "Running project");
+                                toast!(Success, "Open in terminal");
                             }
                             Err(_) => {
-                                toast!(Error, "Failed to run project");
+                                toast!(Error, "Failed to open directory");
                             }
                         }
+
                     }
                     ui.toggle_value(&mut active_tab.settings.search.visible, "🔍")
                         .on_hover_text("Search");
-                    ui
-                        .toggle_value(&mut active_tab.settings.show_hidden, "👁")
-                        .on_hover_text("Display hidden files");
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             });
@@ -271,6 +272,13 @@ impl App {
                                 .toggle_value(
                                     &mut active_tab.settings.invert_sort,
                                     "Inverted Sorting",
+                                )
+                                .changed();
+
+                            *search_changed |= ui
+                                .toggle_value(
+                                    &mut active_tab.settings.show_hidden,
+                                    "Display hidden files",
                                 )
                                 .changed();
                         });

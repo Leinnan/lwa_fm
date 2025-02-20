@@ -15,13 +15,13 @@ opt-level = 2
 [dependencies]
 fuzzy-matcher = "0.3"
 serde = { version = "1", features = ["derive"] }
-eframe = { version = "0.30", default-features = false, features = [
+eframe = { version = "0.31", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     "default_fonts", # Embed the default egui fonts.
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
 ] }
-egui = "0.30"
+egui = "0.31"
 egui_extras = { version = "*", features = ["all_loaders"] }
 open = "5.3"
 walkdir = "2"
@@ -29,13 +29,13 @@ sysinfo = "0.33"
 directories = "6"
 image = { version = "0.25", features = ["jpeg", "png"] }
 rand = "0.8"
-anyhow = "1.0"
-egui-notify = "0.18"
+anyhow = "1"
+egui-notify = "0.19"
 once_cell = "1.20"
-egui_dock = "0.15"
-trash = "5.1.0"
+egui_dock = "0.16"
+trash = "5.2"
 arboard = "3.4.1"
-rayon = "1.10.0"
+rayon = "1.10"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [

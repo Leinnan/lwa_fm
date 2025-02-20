@@ -44,7 +44,7 @@ where
     }
 }
 
-impl<'a, T, S> AutoCompleteTextEdit<'a, T>
+impl<T, S> AutoCompleteTextEdit<'_, T>
 where
     T: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -83,7 +83,7 @@ where
     }
 }
 
-impl<'a, T, S> Widget for AutoCompleteTextEdit<'a, T>
+impl<T, S> Widget for AutoCompleteTextEdit<'_, T>
 where
     T: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -162,7 +162,7 @@ where
                 for (i, (output, _, match_indices)) in
                     match_results.iter().take(max_suggestions).enumerate()
                 {
-                    let mut selected = state.selected_index.map_or(false, |x| x == i);
+                    let mut selected = state.selected_index.is_some_and(|x| x == i);
 
                     let text = if highlight {
                         highlight_matches(
@@ -326,27 +326,27 @@ mod test {
         let match_indices = vec![1, 5, 6, 8, 9, 10];
         let layout = highlight_matches(&text, &match_indices, egui::Color32::RED);
         assert_eq!(6, layout.sections.len());
-        let sec1 = layout.sections.first().unwrap();
+        let sec1 = layout.sections.first().expect("Failed test");
         assert_eq!(&text[sec1.byte_range.start..sec1.byte_range.end], "T");
         assert_ne!(sec1.format.color, egui::Color32::RED);
 
-        let sec2 = layout.sections.get(1).unwrap();
+        let sec2 = layout.sections.get(1).expect("Failed test");
         assert_eq!(&text[sec2.byte_range.start..sec2.byte_range.end], "e");
         assert_eq!(sec2.format.color, egui::Color32::RED);
 
-        let sec3 = layout.sections.get(2).unwrap();
+        let sec3 = layout.sections.get(2).expect("Failed test");
         assert_eq!(&text[sec3.byte_range.start..sec3.byte_range.end], "st1");
         assert_ne!(sec3.format.color, egui::Color32::RED);
 
-        let sec4 = layout.sections.get(3).unwrap();
+        let sec4 = layout.sections.get(3).expect("Failed test");
         assert_eq!(&text[sec4.byte_range.start..sec4.byte_range.end], "23");
         assert_eq!(sec4.format.color, egui::Color32::RED);
 
-        let sec5 = layout.sections.get(4).unwrap();
+        let sec5 = layout.sections.get(4).expect("Failed test");
         assert_eq!(&text[sec5.byte_range.start..sec5.byte_range.end], "á");
         assert_ne!(sec5.format.color, egui::Color32::RED);
 
-        let sec6 = layout.sections.get(5).unwrap();
+        let sec6 = layout.sections.get(5).expect("Failed test");
         assert_eq!(&text[sec6.byte_range.start..sec6.byte_range.end], "éíó");
         assert_eq!(sec6.format.color, egui::Color32::RED);
     }

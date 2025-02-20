@@ -1,7 +1,6 @@
 use std::{
     cmp::Ordering,
     collections::BTreeSet,
-    ffi::OsStr,
     path::{Path, PathBuf},
 };
 use walkdir::DirEntry;
@@ -47,10 +46,6 @@ impl TabData {
 
     pub fn refresh_list(&mut self) {
         self.list = self.read_dir();
-        self.dir_has_cargo = self
-            .list
-            .iter()
-            .any(|entry| entry.file_name().eq(OsStr::new("Cargo.toml")));
     }
 
     fn read_dir(&self) -> Vec<walkdir::DirEntry> {
@@ -110,9 +105,6 @@ impl TabData {
             return dir_entries;
         }
         self.sort_entries(&mut dir_entries);
-        if self.settings.invert_sort {
-            dir_entries.reverse();
-        }
         dir_entries
     }
 
@@ -124,7 +116,7 @@ impl TabData {
 
             let file_type_cmp = a.file_type().is_file().cmp(&b.file_type().is_file());
 
-            file_type_cmp.then(match &self.settings.sorting {
+            let result = file_type_cmp.then(match &self.settings.sorting {
                 Sort::Random => {
                     toast!(Info, "Random sort is not supported");
                     let name_a = a.file_name().to_ascii_lowercase();
@@ -139,14 +131,14 @@ impl TabData {
                 Sort::Modified => match (metadata_a, metadata_b) {
                     (Ok(meta_a), Ok(meta_b)) => match (meta_a.modified(), meta_b.modified()) {
                         (Ok(time_a), Ok(time_b)) => time_a.cmp(&time_b),
-                        (Err(_), _) | (_, Err(_)) => Ordering::Equal,
+                        _ => Ordering::Equal,
                     },
                     _ => Ordering::Equal,
                 },
                 Sort::Created => match (metadata_a, metadata_b) {
                     (Ok(meta_a), Ok(meta_b)) => match (meta_a.created(), meta_b.created()) {
                         (Ok(time_a), Ok(time_b)) => time_a.cmp(&time_b),
-                        (Err(_), _) | (_, Err(_)) => Ordering::Equal,
+                        _ => Ordering::Equal,
                     },
                     _ => Ordering::Equal,
                 },
@@ -177,7 +169,12 @@ impl TabData {
                     }
                     _ => Ordering::Equal,
                 },
-            })
+            });
+            if self.settings.invert_sort {
+                file_type_cmp.then(result.reverse())
+            } else {
+                result
+            }
         });
     }
 }

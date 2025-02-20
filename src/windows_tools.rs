@@ -1,3 +1,4 @@
+use crate::helper::DetachedSpawn;
 use anyhow::Context;
 use std::{ffi::OsStr, iter::once, os::windows::ffi::OsStrExt};
 use windows::{
@@ -12,7 +13,7 @@ pub fn display_in_explorer(path: impl AsRef<OsStr>) -> anyhow::Result<()> {
     std::process::Command::new("explorer.exe")
         .arg("/select,")
         .arg(&path)
-        .spawn()
+        .spawn_detached()
         .context("Failed to open explorer")?;
     Ok(())
 }
