@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+#[allow(unused_mut)]
 use std::io;
 use std::process::{Child, Command, Stdio};
 
@@ -33,5 +35,3 @@ impl DetachedSpawn for Command {
             .spawn()
     }
 }
-
-// pub fn open_in_terminal(&)
