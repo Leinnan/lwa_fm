@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::Command, str::FromStr};
+use std::{path::PathBuf, str::FromStr};
 
 use super::{App, NewPathRequest, Sort};
 use crate::{
@@ -199,8 +199,7 @@ impl App {
                     let button = egui::Button::new("🖳").frame(false)
                         .fill(egui::Color32::from_white_alpha(0));
                     if ui.add(button).on_hover_text("Open in terminal").clicked() {
-                        match Command::new(&self.settings.terminal_path)
-                            .current_dir(&active_tab.current_path).spawn()
+                        match self.settings.open_in_terminal(&active_tab.current_path)
                         {
                             Ok(_) => {
                                 toast!(Success, "Open in terminal");
