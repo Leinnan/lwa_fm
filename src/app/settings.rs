@@ -20,13 +20,6 @@ impl ApplicationSettings {
     where
         P: AsRef<Path>,
     {
-        #[cfg(windows)]
-        {
-            Command::new(&self.terminal_path)
-                .current_dir(directory)
-                .spawn()
-        }
-
         #[cfg(target_os = "macos")]
         {
             Command::new("open")
@@ -34,6 +27,12 @@ impl ApplicationSettings {
                 .arg("-a")
                 .arg("Terminal")
                 .arg(".")
+                .spawn()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Command::new(&self.terminal_path)
+                .current_dir(directory)
                 .spawn()
         }
     }
