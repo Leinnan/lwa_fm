@@ -13,6 +13,7 @@ mod widgets;
 mod windows_tools;
 
 fn main() -> anyhow::Result<()> {
+    embed_plist::embed_info_plist!("../static/info.plist");
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])

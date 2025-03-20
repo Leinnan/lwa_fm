@@ -36,6 +36,7 @@ once_cell = "1.20"
 egui_dock = "0.16"
 trash = "5.2"
 arboard = "3.4.1"
+embed_plist = "1.2"
 rayon = "1.10"
 
 [target.'cfg(windows)'.dependencies]
@@ -71,7 +72,7 @@ unwrap_used = { level = "deny", priority = 10 }
 [package.metadata.bundle]
 name = "LWA File Manager"
 image = ["icon32x32.png", "icon128x128.png"]
-identifier = "io.github.Leinnan.lwa_fm"
-osx_url_schemes = ["io.github.Leinnan.lwa_fm"]
+identifier = "com.mevlyshkin.lwa_fm"
+osx_url_schemes = ["com.mevlyshkin.lwa_fm"]
 short_description = "File Manager"
 long_description = "File Manager built with egui in Rust"
