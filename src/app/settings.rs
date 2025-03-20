@@ -16,6 +16,7 @@ impl Default for ApplicationSettings {
 }
 
 impl ApplicationSettings {
+    #[allow(clippy::unused_self)]
     pub fn open_in_terminal<P>(&self, directory: P) -> std::io::Result<std::process::Child>
     where
         P: AsRef<Path>,
