@@ -71,7 +71,8 @@ unwrap_used = { level = "deny", priority = 10 }
 
 [package.metadata.bundle]
 name = "LWA File Manager"
-image = ["icon32x32.png", "icon128x128.png"]
+image = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.icns"]
+resources = ["res/*"]
 identifier = "com.mevlyshkin.lwa_fm"
 osx_url_schemes = ["com.mevlyshkin.lwa_fm"]
 short_description = "File Manager"
