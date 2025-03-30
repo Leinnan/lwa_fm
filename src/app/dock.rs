@@ -7,6 +7,7 @@ use std::{cell::RefCell, ffi::OsStr, path::PathBuf, rc::Rc};
 use egui::{RichText, Vec2};
 use egui_extras::{Column, TableBuilder};
 
+use crate::helper::KeyWithCommandPressed;
 use crate::{
     consts::VERTICAL_SPACING,
     locations::{Location, Locations},
@@ -91,10 +92,10 @@ impl TabViewer for MyTabViewer {
     /// Defines the contents of a given `tab`.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
-        if ui.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) {
+        if ui.key_with_command_pressed(egui::Key::F) {
             tab.search.visible = !tab.search.visible;
         }
-        if ui.input(|i| i.key_pressed(egui::Key::H) && i.modifiers.ctrl) {
+        if ui.key_with_command_pressed(egui::Key::H) {
             tab.settings.show_hidden = !tab.settings.show_hidden;
             tab.refresh_list();
         }

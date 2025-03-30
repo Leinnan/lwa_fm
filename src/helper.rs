@@ -1,6 +1,8 @@
 use std::io;
 use std::process::{Child, Command, Stdio};
 
+use egui::{Context, InputState, Ui};
+
 pub trait PathFixer {
     fn to_fixed_string(&self) -> String;
 }
@@ -32,5 +34,27 @@ impl DetachedSpawn for Command {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
+    }
+}
+
+pub trait KeyWithCommandPressed {
+    fn key_with_command_pressed(&self, key: egui::Key) -> bool;
+}
+
+impl KeyWithCommandPressed for InputState {
+    fn key_with_command_pressed(&self, key: egui::Key) -> bool {
+        self.modifiers.command_only() && self.key_pressed(key)
+    }
+}
+
+impl KeyWithCommandPressed for Context {
+    fn key_with_command_pressed(&self, key: egui::Key) -> bool {
+        self.input(|i| i.key_with_command_pressed(key))
+    }
+}
+
+impl KeyWithCommandPressed for Ui {
+    fn key_with_command_pressed(&self, key: egui::Key) -> bool {
+        self.input(|i| i.key_with_command_pressed(key))
     }
 }

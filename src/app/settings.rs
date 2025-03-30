@@ -11,7 +11,10 @@ pub struct ApplicationSettings {
 impl Default for ApplicationSettings {
     fn default() -> Self {
         Self {
+            #[cfg(not(target_os = "macos"))]
             terminal_path: "C:\\Program Files\\Alacritty\\alacritty.exe".into(),
+            #[cfg(target_os = "macos")]
+            terminal_path: "Terminal".into(),
         }
     }
 }
@@ -27,7 +30,7 @@ impl ApplicationSettings {
             Command::new("open")
                 .current_dir(directory)
                 .arg("-a")
-                .arg("Terminal")
+                .arg(&self.terminal_path)
                 .arg(".")
                 .spawn()
         }
@@ -44,10 +47,16 @@ impl ApplicationSettings {
     pub(crate) fn display(&mut self, ctx: &egui::Context) -> bool {
         let mut close = false;
         let modal = Modal::new("Settings".into()).show(ctx, |ui| {
-            ui.label("Terminal Path");
-            ui.text_edit_singleline(&mut self.terminal_path);
-            ui.separator();
-            close = ui.button("Close").clicked();
+            ui.vertical_centered(|ui| {
+                ui.heading("Settings");
+                ui.separator();
+                ui.add_space(10.0);
+                ui.label("Terminal App");
+                ui.text_edit_singleline(&mut self.terminal_path);
+                ui.add_space(10.0);
+                ui.separator();
+                close = ui.button("Close").clicked();
+            });
         });
 
         modal.should_close() || close

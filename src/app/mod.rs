@@ -1,4 +1,5 @@
 use crate::app::settings::ApplicationSettings;
+use crate::helper::KeyWithCommandPressed;
 use crate::locations::Locations;
 use egui::ahash::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
@@ -94,7 +95,7 @@ impl Default for App {
             possible_options: BTreeSet::new(),
             top_edit: String::new(),
             settings: ApplicationSettings::default(),
-            display_settings: true,
+            display_settings: false,
         }
     }
 }
@@ -173,7 +174,7 @@ impl eframe::App for App {
                 self.tabs.update_active_tab(&new.path);
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::P)) {
+        if ctx.key_with_command_pressed(egui::Key::P) {
             self.display_settings = true;
         }
 
