@@ -39,11 +39,15 @@ impl DetachedSpawn for Command {
 
 pub trait KeyWithCommandPressed {
     fn key_with_command_pressed(&self, key: egui::Key) -> bool;
+    fn command_pressed(&self) -> bool;
 }
 
 impl KeyWithCommandPressed for InputState {
     fn key_with_command_pressed(&self, key: egui::Key) -> bool {
         self.modifiers.command_only() && self.key_pressed(key)
+    }
+    fn command_pressed(&self) -> bool {
+        self.modifiers.command_only()
     }
 }
 
@@ -51,10 +55,16 @@ impl KeyWithCommandPressed for Context {
     fn key_with_command_pressed(&self, key: egui::Key) -> bool {
         self.input(|i| i.key_with_command_pressed(key))
     }
+    fn command_pressed(&self) -> bool {
+        self.input(|i| i.modifiers.command_only())
+    }
 }
 
 impl KeyWithCommandPressed for Ui {
     fn key_with_command_pressed(&self, key: egui::Key) -> bool {
         self.input(|i| i.key_with_command_pressed(key))
+    }
+    fn command_pressed(&self) -> bool {
+        self.input(|i| i.modifiers.command_only())
     }
 }

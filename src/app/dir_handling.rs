@@ -36,7 +36,6 @@ impl TabData {
     pub fn set_path(&mut self, path: &PathBuf) {
         self.name = Self::get_name_from_path(path);
         self.current_path.clone_from(path);
-        self.path_change = None;
         if self.is_searching() {
             self.search.value = String::new();
             self.search.visible = false;

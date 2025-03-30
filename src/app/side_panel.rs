@@ -1,11 +1,12 @@
 use egui::{Context, Layout, RichText};
 
-use crate::consts::TOP_SIDE_MARGIN;
+use crate::{consts::TOP_SIDE_MARGIN, helper::KeyWithCommandPressed};
 
-use super::{App, NewPathRequest};
+use super::{ActionToPerform, App};
 
 impl App {
-    pub(crate) fn left_side_panel(&self, ctx: &Context, new_path: &mut Option<NewPathRequest>) {
+    pub(crate) fn left_side_panel(&self, ctx: &Context) -> Option<ActionToPerform> {
+        let mut action = None;
         egui::SidePanel::left("leftPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
@@ -35,19 +36,23 @@ impl App {
                                                 .fill(egui::Color32::from_white_alpha(0)),
                                             );
                                             if button.clicked() {
-                                                *new_path = Some(NewPathRequest {
-                                                    new_tab: false,
-                                                    path: location.path.clone(),
-                                                });
+                                                action = match ui.command_pressed() {
+                                                    true => ActionToPerform::NewTab(
+                                                        location.path.clone(),
+                                                    ),
+                                                    false => ActionToPerform::ChangePath(
+                                                        location.path.clone(),
+                                                    ),
+                                                }
+                                                .into();
                                                 return;
                                             }
                                             ui.add_space(10.0);
                                             button.context_menu(|ui| {
                                                 if ui.button("Open in new tab").clicked() {
-                                                    *new_path = Some(NewPathRequest {
-                                                        new_tab: true,
-                                                        path: location.path.clone(),
-                                                    });
+                                                    action = Some(ActionToPerform::NewTab(
+                                                        location.path.clone(),
+                                                    ));
                                                     ui.close_menu();
                                                     return;
                                                 }
@@ -70,5 +75,6 @@ impl App {
                     }
                 });
             });
+        action
     }
 }

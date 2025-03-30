@@ -100,10 +100,12 @@ impl Default for App {
     }
 }
 
-#[derive(Debug)]
-pub struct NewPathRequest {
-    pub new_tab: bool,
-    pub path: PathBuf,
+#[derive(Debug, Clone)]
+pub enum ActionToPerform {
+    ChangePath(PathBuf),
+    NewTab(PathBuf),
+    OpenInTerminal(PathBuf),
+    RequestFilesRefresh,
 }
 
 impl App {
@@ -153,27 +155,17 @@ impl eframe::App for App {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut new_path = None;
-        let mut search_changed = false;
-        self.top_panel(ctx, &mut new_path);
-        self.bottom_panel(ctx, &mut search_changed);
-
-        self.left_side_panel(ctx, &mut new_path);
-
-        self.central_panel(ctx);
-        if search_changed {
-            self.tabs.refresh_list();
+        let mut command_request = self.top_panel(ctx);
+        if command_request.is_none() {
+            command_request = self.bottom_panel(ctx);
+        }
+        if command_request.is_none() {
+            command_request = self.left_side_panel(ctx);
+        }
+        if command_request.is_none() {
+            command_request = self.central_panel(ctx);
         }
 
-        if let Some(new) = &new_path {
-            if new.new_tab {
-                self.tabs.open_in_new_tab(&new.path);
-            } else {
-                use crate::helper::PathFixer;
-                self.top_edit = new.path.to_fixed_string();
-                self.tabs.update_active_tab(&new.path);
-            }
-        }
         if ctx.key_with_command_pressed(egui::Key::P) {
             self.display_settings = true;
         }
@@ -183,6 +175,28 @@ impl eframe::App for App {
         }
 
         TOASTS.write().show(ctx);
+        let Some(action) = command_request else {
+            return;
+        };
+        match action {
+            ActionToPerform::ChangePath(path) => {
+                use crate::helper::PathFixer;
+                self.top_edit = path.to_fixed_string();
+                self.tabs.update_active_tab(&path);
+            }
+            ActionToPerform::NewTab(path) => self.tabs.open_in_new_tab(&path),
+            ActionToPerform::OpenInTerminal(path_buf) => {
+                match self.settings.open_in_terminal(&path_buf) {
+                    Ok(_) => {
+                        toast!(Success, "Open in terminal");
+                    }
+                    Err(_) => {
+                        toast!(Error, "Failed to open directory");
+                    }
+                }
+            }
+            ActionToPerform::RequestFilesRefresh => self.tabs.refresh_list(),
+        }
     }
 }
 

@@ -1,10 +1,10 @@
 use std::{path::PathBuf, str::FromStr};
 
-use super::{App, NewPathRequest, Sort};
+use super::{ActionToPerform, App, Sort};
 use crate::{
     app::dir_handling::{get_directories, get_directories_recursive},
     consts::{GIT_HASH, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
-    helper::PathFixer,
+    helper::{KeyWithCommandPressed, PathFixer},
     toast,
 };
 use egui::{Context, Layout, Ui};
@@ -15,7 +15,7 @@ impl App {
         &mut self,
         ui: &mut Ui,
         show_hidden: bool,
-    ) -> Option<NewPathRequest> {
+    ) -> Option<ActionToPerform> {
         use crate::widgets::autocomplete_text::AutoCompleteTextEdit;
         let edit = AutoCompleteTextEdit::new(&mut self.top_edit, &self.possible_options)
             .max_suggestions(20)
@@ -36,14 +36,11 @@ impl App {
                 .is_some_and(|first| first.eq(&self.top_edit))
         {
             self.possible_options = get_directories(top_edit_path, show_hidden);
-            return Some(NewPathRequest {
-                new_tab: false,
-                path: top_edit_path.to_path_buf(),
-            });
+            return ActionToPerform::ChangePath(top_edit_path.to_path_buf()).into();
         }
         None
     }
-    pub(crate) fn top_display(&mut self, ui: &mut Ui) -> Option<NewPathRequest> {
+    pub(crate) fn top_display(&mut self, ui: &mut Ui) -> Option<ActionToPerform> {
         let mut new_path = None;
         let mut path: String = String::new();
         let current_path = self.tabs.get_current_path();
@@ -71,17 +68,12 @@ impl App {
                     }
                 };
                 if ui.button(text).clicked() {
-                    new_path = Some(NewPathRequest {
-                        new_tab: false,
-                        path: path.into(),
-                    });
+                    new_path = Some(ActionToPerform::ChangePath(path.into()));
                     return new_path;
                 }
             }
             #[cfg(not(windows))]
             {
-                let shift_pressed = ui.input(|i| i.modifiers.shift);
-
                 let Some(part) = e.to_str() else {
                     continue;
                 };
@@ -91,25 +83,20 @@ impl App {
                 path += part;
                 let button = ui.button(part);
                 if button.clicked() {
-                    new_path = Some(NewPathRequest {
-                        new_tab: shift_pressed,
-                        path: path.into(),
-                    });
+                    new_path = match ui.command_pressed() {
+                        true => ActionToPerform::NewTab(path.into()),
+                        false => ActionToPerform::ChangePath(path.into()),
+                    }
+                    .into();
                     return new_path;
                 }
                 button.context_menu(|ui| {
                     if ui.button("Open").clicked() {
-                        new_path = Some(NewPathRequest {
-                            new_tab: false,
-                            path: path.clone().into(),
-                        });
+                        new_path = Some(ActionToPerform::ChangePath(path.clone().into()));
                         ui.close_menu();
                     }
                     if ui.button("Open in new tab").clicked() {
-                        new_path = Some(NewPathRequest {
-                            new_tab: true,
-                            path: path.clone().into(),
-                        });
+                        new_path = Some(ActionToPerform::NewTab(path.clone().into()));
                         ui.close_menu();
                     }
                     if ui.button("Copy path to clipboard").clicked() {
@@ -138,10 +125,9 @@ impl App {
                                 continue;
                             }
                             if ui.button(dir_display.as_str()).clicked() {
-                                new_path = Some(NewPathRequest {
-                                    new_tab: false,
-                                    path: PathBuf::from_str(dir).expect("Failed to convert path"),
-                                });
+                                new_path = Some(ActionToPerform::ChangePath(
+                                    PathBuf::from_str(dir).expect("Failed to convert path"),
+                                ));
                                 ui.close_menu();
                             }
                         }
@@ -152,7 +138,8 @@ impl App {
         new_path
     }
 
-    pub(crate) fn top_panel(&mut self, ctx: &Context, new_path: &mut Option<NewPathRequest>) {
+    pub(crate) fn top_panel(&mut self, ctx: &Context) -> Option<ActionToPerform> {
+        let mut action = None;
         egui::TopBottomPanel::top("top_panel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
@@ -171,18 +158,19 @@ impl App {
                             .on_hover_text("Go to parent directory")
                             .clicked()
                         {
-                            *new_path = Some(NewPathRequest { new_tab: false, path: parent.expect("It should not be possible to click this when parent is None").into() });
+                            action = Some(ActionToPerform::ChangePath(parent.expect("It should not be possible to click this when parent is None").into()));
                         }
                     });
                     ui.add_space(TOP_SIDE_MARGIN);
-                    ui.add_enabled_ui(!is_searching, |ui|{                    if ui.button("✏").clicked() {
+                    ui.add_enabled_ui(!is_searching, |ui|{
+                        if ui.button("✏").clicked() {
                         self.display_edit_top = !self.display_edit_top;
                         if self.display_edit_top {
                             self.top_edit = current_path.to_fixed_string();
                             self.possible_options = get_directories(parent.unwrap_or(current_path.as_path()), show_hidden);
                         }
                     }
-                    *new_path = if self.display_edit_top {
+                    action = if self.display_edit_top {
                         self.top_display_editable(ui, show_hidden)
                     } else {
                         self.top_display(ui)
@@ -199,25 +187,18 @@ impl App {
                     let button = egui::Button::new("🖳").frame(false)
                         .fill(egui::Color32::from_white_alpha(0));
                     if ui.add(button).on_hover_text("Open in terminal").clicked() {
-                        match self.settings.open_in_terminal(&active_tab.current_path)
-                        {
-                            Ok(_) => {
-                                toast!(Success, "Open in terminal");
-                            }
-                            Err(_) => {
-                                toast!(Error, "Failed to open directory");
-                            }
-                        }
-
+                        action = Some(ActionToPerform::OpenInTerminal(active_tab.current_path.clone()));
                     }
                     ui.toggle_value(&mut active_tab.search.visible, "🔍")
                         .on_hover_text("Search");
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             });
+        action
     }
 
-    pub(crate) fn bottom_panel(&mut self, ctx: &Context, search_changed: &mut bool) {
+    pub(crate) fn bottom_panel(&mut self, ctx: &Context) -> Option<ActionToPerform> {
+        let mut search_changed = false;
         egui::TopBottomPanel::bottom("bottomPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
@@ -267,23 +248,29 @@ impl App {
                             );
                             ui.separator();
 
-                            *search_changed |= ui
+                            search_changed |= ui
                                 .toggle_value(
                                     &mut active_tab.settings.invert_sort,
                                     "Inverted Sorting",
                                 )
                                 .changed();
 
-                            *search_changed |= ui
+                            search_changed |= ui
                                 .toggle_value(
                                     &mut active_tab.settings.show_hidden,
                                     "Display hidden files",
                                 )
                                 .changed();
                         });
-                    *search_changed |= old_value != active_tab.settings.sorting;
+                    search_changed |= old_value != active_tab.settings.sorting;
                 });
                 ui.add_space(TOP_SIDE_MARGIN);
             });
+
+        if search_changed {
+            Some(ActionToPerform::RequestFilesRefresh)
+        } else {
+            None
+        }
     }
 }

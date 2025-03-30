@@ -15,13 +15,13 @@ use crate::{
 };
 
 use super::directory_view_settings::DirectoryViewSettings;
-use super::NewPathRequest;
+use super::ActionToPerform;
 
 #[derive(Debug)]
 pub struct TabData {
     pub name: String,
     pub list: Vec<walkdir::DirEntry>,
-    pub path_change: Option<NewPathRequest>,
+    pub action_to_perform: Option<ActionToPerform>,
     pub current_path: PathBuf,
     pub settings: DirectoryViewSettings,
     pub locations: Rc<RefCell<HashMap<String, Locations>>>,
@@ -37,7 +37,7 @@ impl TabData {
     pub fn from_path(path: &PathBuf, locations: Rc<RefCell<HashMap<String, Locations>>>) -> Self {
         let mut new = Self {
             list: vec![],
-            path_change: None,
+            action_to_perform: None,
             name: String::new(),
             current_path: PathBuf::new(),
             settings: DirectoryViewSettings::default(),
@@ -57,7 +57,7 @@ impl TabData {
     }
     pub fn update(&mut self, other_tabs: &[PathBuf]) {
         self.can_close = !other_tabs.is_empty();
-        self.path_change = None;
+        self.action_to_perform = None;
         self.other_tabs_paths = other_tabs
             .iter()
             .filter(|p| !p.eq(&&self.current_path))
@@ -165,27 +165,24 @@ impl TabViewer for MyTabViewer {
                             let Ok(path) = std::fs::canonicalize(val.path()) else {
                                 return;
                             };
-                            tab.path_change = Some(NewPathRequest {
-                                new_tab: ui.input(|i| i.modifiers.ctrl),
-                                path,
-                            });
+                            let action = match ui.command_pressed() {
+                                true => ActionToPerform::NewTab(path),
+                                false => ActionToPerform::ChangePath(path),
+                            };
+                            tab.action_to_perform = action.into();
                         }
                     }
                     added_button.context_menu(|ui| {
                         if is_dir {
                             if ui.button("Open").clicked() {
-                                tab.path_change = Some(NewPathRequest {
-                                    new_tab: false,
-                                    path: val.path().to_path_buf(),
-                                });
+                                tab.action_to_perform =
+                                    ActionToPerform::ChangePath(val.path().to_path_buf()).into();
                                 ui.close_menu();
                                 return;
                             }
                             if ui.button("Open in new tab").clicked() {
-                                tab.path_change = Some(NewPathRequest {
-                                    new_tab: true,
-                                    path: val.path().to_path_buf(),
-                                });
+                                tab.action_to_perform =
+                                    ActionToPerform::NewTab(val.path().to_path_buf()).into();
                                 ui.close_menu();
                                 return;
                             }
@@ -440,7 +437,7 @@ impl MyTabs {
         active_tab.set_path(path);
     }
 
-    pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn ui(&mut self, ui: &mut Ui) -> Option<ActionToPerform> {
         let tabs = self.get_tabs_paths();
 
         for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
@@ -451,8 +448,11 @@ impl MyTabs {
             .show_leaf_collapse_buttons(false)
             .style(Self::get_dock_style(ui.style().as_ref(), tabs.len()))
             .show_inside(ui, &mut MyTabViewer);
-
-        self.after_update();
+        if let Some(active_tab) = self.get_current_tab() {
+            active_tab.action_to_perform.clone()
+        } else {
+            None
+        }
     }
 
     pub fn open_in_new_tab(&mut self, path: &PathBuf) {
@@ -505,28 +505,28 @@ impl MyTabs {
         style
     }
 
-    fn after_update(&mut self) {
-        let Some(active_tab) = self.get_current_tab() else {
-            return;
-        };
-        if let Some(path_change) = &active_tab.path_change {
-            if path_change.new_tab {
-                let new_window =
-                    TabData::from_path(&path_change.path, Rc::clone(&active_tab.locations));
+    // fn after_update(&mut self) {
+    //     let Some(active_tab) = self.get_current_tab() else {
+    //         return;
+    //     };
+    //     if let Some(path_change) = &active_tab.path_change {
+    //         if path_change.new_tab {
+    //             let new_window =
+    //                 TabData::from_path(&path_change.path, Rc::clone(&active_tab.locations));
 
-                let root_node = self
-                    .dock_state
-                    .main_surface_mut()
-                    .root_node_mut()
-                    .expect("NO ROOT");
-                if root_node.is_leaf() {
-                    root_node.append_tab(new_window);
-                } else {
-                    self.dock_state.push_to_focused_leaf(new_window);
-                }
-            } else {
-                active_tab.set_path(&path_change.path.clone());
-            }
-        }
-    }
+    //             let root_node = self
+    //                 .dock_state
+    //                 .main_surface_mut()
+    //                 .root_node_mut()
+    //                 .expect("NO ROOT");
+    //             if root_node.is_leaf() {
+    //                 root_node.append_tab(new_window);
+    //             } else {
+    //                 self.dock_state.push_to_focused_leaf(new_window);
+    //             }
+    //         } else {
+    //             active_tab.set_path(&path_change.path.clone());
+    //         }
+    //     }
+    // }
 }
