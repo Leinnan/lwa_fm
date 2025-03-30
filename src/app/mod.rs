@@ -49,6 +49,8 @@ pub struct App {
     top_edit: String,
     possible_options: BTreeSet<String>,
     pub settings: ApplicationSettings,
+    #[serde(skip)]
+    display_settings: bool,
 }
 
 #[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
@@ -92,6 +94,7 @@ impl Default for App {
             possible_options: BTreeSet::new(),
             top_edit: String::new(),
             settings: ApplicationSettings::default(),
+            display_settings: true,
         }
     }
 }
@@ -169,6 +172,13 @@ impl eframe::App for App {
                 self.top_edit = new.path.to_fixed_string();
                 self.tabs.update_active_tab(&new.path);
             }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::P)) {
+            self.display_settings = true;
+        }
+
+        if self.display_settings {
+            self.display_settings = !self.settings.display(ctx);
         }
 
         TOASTS.write().show(ctx);
