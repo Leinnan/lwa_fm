@@ -83,9 +83,10 @@ impl App {
                 path += part;
                 let button = ui.button(part);
                 if button.clicked() {
-                    new_path = match ui.command_pressed() {
-                        true => ActionToPerform::NewTab(path.into()),
-                        false => ActionToPerform::ChangePath(path.into()),
+                    new_path = if ui.command_pressed() {
+                        ActionToPerform::NewTab(path.into())
+                    } else {
+                        ActionToPerform::ChangePath(path.into())
                     }
                     .into();
                     return new_path;

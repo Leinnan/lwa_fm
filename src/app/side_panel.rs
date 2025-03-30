@@ -36,13 +36,12 @@ impl App {
                                                 .fill(egui::Color32::from_white_alpha(0)),
                                             );
                                             if button.clicked() {
-                                                action = match ui.command_pressed() {
-                                                    true => ActionToPerform::NewTab(
+                                                action = if ui.command_pressed() {
+                                                    ActionToPerform::NewTab(location.path.clone())
+                                                } else {
+                                                    ActionToPerform::ChangePath(
                                                         location.path.clone(),
-                                                    ),
-                                                    false => ActionToPerform::ChangePath(
-                                                        location.path.clone(),
-                                                    ),
+                                                    )
                                                 }
                                                 .into();
                                                 return;

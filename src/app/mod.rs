@@ -1,12 +1,14 @@
 use crate::app::settings::ApplicationSettings;
 use crate::helper::KeyWithCommandPressed;
 use crate::locations::Locations;
+use command_palette::CommandPalette;
 use commands::ActionToPerform;
 use egui::ahash::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, collections::BTreeSet, fs, path::PathBuf, rc::Rc};
 
 mod central_panel;
+pub mod command_palette;
 pub mod commands;
 mod dir_handling;
 mod directory_view_settings;
@@ -54,6 +56,8 @@ pub struct App {
     pub settings: ApplicationSettings,
     #[serde(skip)]
     display_settings: bool,
+    #[serde(skip)]
+    command_palette: CommandPalette,
 }
 
 #[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
@@ -90,6 +94,7 @@ impl Default for App {
         );
         let locations = Rc::new(RefCell::new(locations));
         let clone = Rc::clone(&locations);
+        let command_palette = CommandPalette::default();
         Self {
             locations,
             tabs: crate::app::dock::MyTabs::new(&get_starting_path(), clone),
@@ -98,6 +103,7 @@ impl Default for App {
             top_edit: String::new(),
             settings: ApplicationSettings::default(),
             display_settings: false,
+            command_palette,
         }
     }
 }
@@ -164,8 +170,18 @@ impl eframe::App for App {
             self.display_settings = true;
         }
 
+        if ctx.key_with_command_pressed(egui::Key::R) {
+            self.command_palette.visible = !self.command_palette.visible;
+            let current_path = self.tabs.get_current_path();
+            self.command_palette.build_for_path(&current_path);
+        }
+
         if self.display_settings {
             self.display_settings = !self.settings.display(ctx);
+        }
+        if self.command_palette.visible && command_request.is_none() {
+            command_request = self.command_palette.ui(ctx);
+            self.command_palette.visible = command_request.is_none();
         }
 
         TOASTS.write().show(ctx);

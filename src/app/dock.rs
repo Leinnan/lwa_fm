@@ -165,9 +165,10 @@ impl TabViewer for MyTabViewer {
                             let Ok(path) = std::fs::canonicalize(val.path()) else {
                                 return;
                             };
-                            let action = match ui.command_pressed() {
-                                true => ActionToPerform::NewTab(path),
-                                false => ActionToPerform::ChangePath(path),
+                            let action = if ui.command_pressed() {
+                                ActionToPerform::NewTab(path)
+                            } else {
+                                ActionToPerform::ChangePath(path)
                             };
                             tab.action_to_perform = action.into();
                         }
