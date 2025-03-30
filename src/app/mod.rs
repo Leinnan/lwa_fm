@@ -1,11 +1,13 @@
 use crate::app::settings::ApplicationSettings;
 use crate::helper::KeyWithCommandPressed;
 use crate::locations::Locations;
+use commands::ActionToPerform;
 use egui::ahash::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, collections::BTreeSet, fs, path::PathBuf, rc::Rc};
 
 mod central_panel;
+pub mod commands;
 mod dir_handling;
 mod directory_view_settings;
 mod dock;
@@ -98,14 +100,6 @@ impl Default for App {
             display_settings: false,
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum ActionToPerform {
-    ChangePath(PathBuf),
-    NewTab(PathBuf),
-    OpenInTerminal(PathBuf),
-    RequestFilesRefresh,
 }
 
 impl App {

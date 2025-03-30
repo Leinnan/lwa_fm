@@ -14,8 +14,8 @@ use crate::{
     toast,
 };
 
+use super::commands::ActionToPerform;
 use super::directory_view_settings::DirectoryViewSettings;
-use super::ActionToPerform;
 
 #[derive(Debug)]
 pub struct TabData {
