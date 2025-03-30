@@ -4,8 +4,7 @@ use super::{ActionToPerform, App, Sort};
 use crate::{
     app::dir_handling::{get_directories, get_directories_recursive},
     consts::{GIT_HASH, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
-    helper::{KeyWithCommandPressed, PathFixer},
-    toast,
+    helper::PathFixer,
 };
 use egui::{Context, Layout, Ui};
 
@@ -74,6 +73,7 @@ impl App {
             }
             #[cfg(not(windows))]
             {
+                use crate::helper::KeyWithCommandPressed;
                 let Some(part) = e.to_str() else {
                     continue;
                 };
@@ -102,11 +102,11 @@ impl App {
                     }
                     if ui.button("Copy path to clipboard").clicked() {
                         let Ok(mut clipboard) = arboard::Clipboard::new() else {
-                            toast!(Error, "Failed to read the clipboard.");
+                            crate::toast!(Error, "Failed to read the clipboard.");
                             return;
                         };
                         clipboard.set_text(path.clone()).unwrap_or_else(|_| {
-                            toast!(Error, "Failed to update the clipboard.");
+                            crate::toast!(Error, "Failed to update the clipboard.");
                         });
                         ui.close_menu();
                     }
