@@ -3,6 +3,8 @@ use std::{path::Path, process::Command};
 use egui::Modal;
 use serde::{Deserialize, Serialize};
 
+use super::commands::ActionToPerform;
+
 #[derive(Serialize, Deserialize)]
 pub struct ApplicationSettings {
     pub terminal_path: String,
@@ -44,7 +46,7 @@ impl ApplicationSettings {
 
     /// Display the settings modal.
     /// returns true if the modal was closed.
-    pub(crate) fn display(&mut self, ctx: &egui::Context) -> bool {
+    pub(crate) fn display(&mut self, ctx: &egui::Context) -> Option<ActionToPerform> {
         let mut close = false;
         let modal = Modal::new("Settings".into()).show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -59,6 +61,10 @@ impl ApplicationSettings {
             });
         });
 
-        modal.should_close() || close
+        if modal.should_close() || close {
+            Some(ActionToPerform::CloseActiveModalWindow)
+        } else {
+            None
+        }
     }
 }

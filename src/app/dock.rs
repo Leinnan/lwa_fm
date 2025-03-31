@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::commands::ActionToPerform;
+use super::directory_path_info::DirectoryPathInfo;
 use super::directory_view_settings::DirectoryViewSettings;
 
 #[derive(Debug)]
@@ -28,6 +29,7 @@ pub struct TabData {
     pub other_tabs_paths: Vec<PathBuf>,
     pub can_close: bool,
     pub search: super::Search,
+    pub path_info: DirectoryPathInfo,
 }
 
 impl TabData {
@@ -35,6 +37,7 @@ impl TabData {
         !self.search.value.is_empty()
     }
     pub fn from_path(path: &PathBuf, locations: Rc<RefCell<HashMap<String, Locations>>>) -> Self {
+        let path_info = DirectoryPathInfo::default();
         let mut new = Self {
             list: vec![],
             action_to_perform: None,
@@ -44,6 +47,7 @@ impl TabData {
             locations,
             can_close: true,
             other_tabs_paths: vec![],
+            path_info,
             search: super::Search {
                 visible: false,
                 case_sensitive: false,
@@ -63,6 +67,10 @@ impl TabData {
             .filter(|p| !p.eq(&&self.current_path))
             .cloned()
             .collect::<Vec<PathBuf>>();
+    }
+
+    pub(crate) fn toggle_top_edit(&mut self) {
+        self.path_info.editable = !self.is_searching() && !self.path_info.editable;
     }
 }
 

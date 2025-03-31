@@ -101,7 +101,6 @@ where
         let id = ui.next_auto_id();
         ui.skip_ahead_auto_ids(1);
         let mut state = AutoCompleteTextEditState::load(ui.ctx(), id).unwrap_or_default();
-
         // only consume up/down presses if the text box is focused. This overwrites default behavior
         // to move to start/end of the string
         let up_pressed = state.focused

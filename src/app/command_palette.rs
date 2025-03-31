@@ -7,7 +7,6 @@ use super::commands::ActionToPerform;
 #[derive(Default)]
 pub struct CommandPalette {
     pub commands: Vec<ValidAction>,
-    pub visible: bool,
 }
 
 pub struct ValidAction {
@@ -32,11 +31,8 @@ impl CommandPalette {
     }
 
     pub fn ui(&self, ctx: &egui::Context) -> Option<ActionToPerform> {
-        if !self.visible {
-            return None;
-        }
         let mut action = None;
-        Modal::new("Settings".into()).show(ctx, |ui| {
+        let modal = Modal::new("Settings".into()).show(ctx, |ui| {
             ui.vertical_centered_justified(|ui| {
                 ui.label("Run Command");
                 ui.separator();
@@ -47,6 +43,10 @@ impl CommandPalette {
                 }
             });
         });
-        action
+        if action.is_none() && modal.should_close() {
+            Some(ActionToPerform::CloseActiveModalWindow)
+        } else {
+            action
+        }
     }
 }

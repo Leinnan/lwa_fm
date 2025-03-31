@@ -2,15 +2,16 @@ use crate::app::settings::ApplicationSettings;
 use crate::helper::KeyWithCommandPressed;
 use crate::locations::Locations;
 use command_palette::CommandPalette;
-use commands::ActionToPerform;
+use commands::{ActionToPerform, ModalWindow};
 use egui::ahash::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, collections::BTreeSet, fs, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, fs, path::PathBuf, rc::Rc};
 
 mod central_panel;
 pub mod command_palette;
 pub mod commands;
 mod dir_handling;
+pub mod directory_path_info;
 mod directory_view_settings;
 mod dock;
 mod settings;
@@ -49,13 +50,9 @@ pub struct App {
     locations: Rc<RefCell<HashMap<String, Locations>>>,
     #[serde(skip)]
     tabs: crate::app::dock::MyTabs,
-    #[serde(skip)]
-    display_edit_top: bool,
-    top_edit: String,
-    possible_options: BTreeSet<String>,
     pub settings: ApplicationSettings,
     #[serde(skip)]
-    display_settings: bool,
+    display_modal: Option<ModalWindow>,
     #[serde(skip)]
     command_palette: CommandPalette,
 }
@@ -98,11 +95,8 @@ impl Default for App {
         Self {
             locations,
             tabs: crate::app::dock::MyTabs::new(&get_starting_path(), clone),
-            display_edit_top: false,
-            possible_options: BTreeSet::new(),
-            top_edit: String::new(),
             settings: ApplicationSettings::default(),
-            display_settings: false,
+            display_modal: None,
             command_palette,
         }
     }
@@ -167,21 +161,31 @@ impl eframe::App for App {
         }
 
         if ctx.key_with_command_pressed(egui::Key::P) {
-            self.display_settings = true;
+            command_request = Some(ActionToPerform::ToggleModalWindow(ModalWindow::Settings));
+        }
+
+        if ctx.key_with_command_pressed(egui::Key::L) {
+            command_request = Some(ActionToPerform::ToggleTopEdit);
         }
 
         if ctx.key_with_command_pressed(egui::Key::R) {
-            self.command_palette.visible = !self.command_palette.visible;
+            command_request = Some(ActionToPerform::ToggleModalWindow(ModalWindow::Commands));
             let current_path = self.tabs.get_current_path();
             self.command_palette.build_for_path(&current_path);
         }
 
-        if self.display_settings {
-            self.display_settings = !self.settings.display(ctx);
-        }
-        if self.command_palette.visible && command_request.is_none() {
-            command_request = self.command_palette.ui(ctx);
-            self.command_palette.visible = command_request.is_none();
+        if let Some(modal) = &self.display_modal {
+            match modal {
+                ModalWindow::Settings => {
+                    command_request = self.settings.display(ctx);
+                }
+                ModalWindow::Commands => {
+                    command_request = self.command_palette.ui(ctx);
+                    if command_request.is_some() {
+                        self.display_modal = None;
+                    }
+                } // ModalWindow::NewDirectory => todo!(),
+            }
         }
 
         TOASTS.write().show(ctx);
@@ -190,8 +194,6 @@ impl eframe::App for App {
         };
         match action {
             ActionToPerform::ChangePath(path) => {
-                use crate::helper::PathFixer;
-                self.top_edit = path.to_fixed_string();
                 self.tabs.update_active_tab(&path);
             }
             ActionToPerform::NewTab(path) => self.tabs.open_in_new_tab(&path),
@@ -205,7 +207,25 @@ impl eframe::App for App {
                     }
                 }
             }
+            ActionToPerform::CloseActiveModalWindow => self.display_modal = None,
             ActionToPerform::RequestFilesRefresh => self.tabs.refresh_list(),
+            ActionToPerform::ToggleModalWindow(modal_window) => {
+                if let Some(modal) = &self.display_modal {
+                    if modal.eq(&modal_window) {
+                        self.display_modal = None;
+                    } else {
+                        self.display_modal = Some(modal_window);
+                    }
+                } else {
+                    self.display_modal = Some(modal_window);
+                }
+            }
+            ActionToPerform::ToggleTopEdit => {
+                let Some(tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
+                tab.toggle_top_edit();
+            }
         }
     }
 }

@@ -4,7 +4,6 @@ use super::{ActionToPerform, App, Sort};
 use crate::{
     app::dir_handling::{get_directories, get_directories_recursive},
     consts::{GIT_HASH, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
-    helper::PathFixer,
 };
 use egui::{Context, Layout, Ui};
 
@@ -16,25 +15,30 @@ impl App {
         show_hidden: bool,
     ) -> Option<ActionToPerform> {
         use crate::widgets::autocomplete_text::AutoCompleteTextEdit;
-        let edit = AutoCompleteTextEdit::new(&mut self.top_edit, &self.possible_options)
-            .max_suggestions(20)
-            .highlight_matches(true);
+        let current_tab = self.tabs.get_current_tab()?;
+        let edit = AutoCompleteTextEdit::new(
+            &mut current_tab.path_info.top_edit,
+            &current_tab.path_info.possible_options,
+        )
+        .max_suggestions(15)
+        .highlight_matches(true);
         let _response = ui.add(edit);
 
         let should_close =
             ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape));
         if should_close {
-            self.display_edit_top = false;
+            current_tab.path_info.editable = false;
         }
 
-        let top_edit_path = std::path::Path::new(&self.top_edit);
+        let top_edit_path = std::path::Path::new(&current_tab.path_info.top_edit);
         if top_edit_path.exists()
-            && !self
+            && !current_tab
+                .path_info
                 .possible_options
                 .first()
-                .is_some_and(|first| first.eq(&self.top_edit))
+                .is_some_and(|first| first.eq(&current_tab.path_info.top_edit))
         {
-            self.possible_options = get_directories(top_edit_path, show_hidden);
+            current_tab.path_info.possible_options = get_directories(top_edit_path, show_hidden);
             return ActionToPerform::ChangePath(top_edit_path.to_path_buf()).into();
         }
         None
@@ -149,11 +153,13 @@ impl App {
                 let is_searching = current_tab.is_searching();
                 let current_path = current_tab.current_path.clone();
                 let parent = current_path.parent();
+                let path_editable = current_tab.path_info.editable;
+                let can_go_up = !path_editable && !is_searching && parent.is_some();
 
                 ui.add_space(TOP_SIDE_MARGIN);
                 ui.with_layout(Layout::left_to_right(eframe::emath::Align::Min), |ui| {
                     ui.add_space(TOP_SIDE_MARGIN);
-                    ui.add_enabled_ui(parent.is_some() && !self.display_edit_top && !is_searching, |ui| {
+                    ui.add_enabled_ui(can_go_up, |ui| {
                         if ui
                             .button("⬆")
                             .on_hover_text("Go to parent directory")
@@ -163,19 +169,16 @@ impl App {
                         }
                     });
                     ui.add_space(TOP_SIDE_MARGIN);
-                    ui.add_enabled_ui(!is_searching, |ui|{
+                    ui.add_enabled_ui(!is_searching, |ui| {
                         if ui.button("✏").clicked() {
-                        self.display_edit_top = !self.display_edit_top;
-                        if self.display_edit_top {
-                            self.top_edit = current_path.to_fixed_string();
-                            self.possible_options = get_directories(parent.unwrap_or(current_path.as_path()), show_hidden);
+                            action = Some(ActionToPerform::ToggleTopEdit);
+                            return;
                         }
-                    }
-                    action = if self.display_edit_top {
-                        self.top_display_editable(ui, show_hidden)
-                    } else {
-                        self.top_display(ui)
-                    };
+                        action = if path_editable {
+                            self.top_display_editable(ui, show_hidden)
+                        } else {
+                            self.top_display(ui)
+                        };
                     });
 
 
