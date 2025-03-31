@@ -167,15 +167,14 @@ impl TabViewer for MyTabViewer {
                     let is_dir = file_type.is_dir();
                     let text = val.file_name().to_string_lossy();
 
-                    let text = if is_dir {
-                        if indexed < 10 {
-                            RichText::new(format!("[{indexed}] {text}"))
-                        } else {
-                            RichText::new(text)
-                        }
+                    let mut text = if indexed < 10 {
+                        RichText::new(format!("[{indexed}] {text}"))
                     } else {
-                        RichText::strong(text.into())
+                        RichText::new(text)
                     };
+                    if !is_dir {
+                        text = text.strong();
+                    }
                     let added_button =
                         ui.add(egui::Button::new(text).fill(egui::Color32::from_white_alpha(0)));
 
