@@ -100,12 +100,20 @@ impl TabViewer for MyTabViewer {
     /// Defines the contents of a given `tab`.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+        let cmd = ui.command_pressed();
         if ui.key_with_command_pressed(egui::Key::F) {
             tab.search.visible = !tab.search.visible;
         }
         if ui.key_with_command_pressed(egui::Key::H) {
             tab.settings.show_hidden = !tab.settings.show_hidden;
             tab.refresh_list();
+        }
+        if ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
+            let Some(parent) = tab.current_path.parent() else {
+                return;
+            };
+            tab.action_to_perform = Some(ActionToPerform::ChangePath(parent.to_path_buf()));
+            return;
         }
         let mut require_refresh = false; //  replace it with flow using https://docs.rs/notify/latest/notify/
 
@@ -145,6 +153,7 @@ impl TabViewer for MyTabViewer {
                 let Ok(meta) = val.metadata() else {
                     return;
                 };
+                let indexed = if cmd { row.index() + 1 } else { 11 };
                 row.col(|ui| {
                     ui.add_space(VERTICAL_SPACING);
                     // ui.allocate_space(egui::vec2(available_width, 20.0));
@@ -159,21 +168,28 @@ impl TabViewer for MyTabViewer {
                     let text = val.file_name().to_string_lossy();
 
                     let text = if is_dir {
-                        RichText::new(text)
+                        if indexed < 10 {
+                            RichText::new(format!("[{indexed}] {text}"))
+                        } else {
+                            RichText::new(text)
+                        }
                     } else {
                         RichText::strong(text.into())
                     };
                     let added_button =
                         ui.add(egui::Button::new(text).fill(egui::Color32::from_white_alpha(0)));
 
-                    if added_button.clicked() {
+                    if added_button.clicked()
+                        || convert_nr_to_egui_key(indexed)
+                            .is_some_and(|k| ui.key_with_command_pressed(k))
+                    {
                         if meta.is_file() {
                             let _ = open::that_detached(val.path());
                         } else {
                             let Ok(path) = std::fs::canonicalize(val.path()) else {
                                 return;
                             };
-                            let action = if ui.command_pressed() {
+                            let action = if ui.shift_pressed() {
                                 ActionToPerform::NewTab(path)
                             } else {
                                 ActionToPerform::ChangePath(path)
@@ -513,29 +529,20 @@ impl MyTabs {
         style.tab.tab_body.stroke = egui::Stroke::NONE;
         style
     }
+}
 
-    // fn after_update(&mut self) {
-    //     let Some(active_tab) = self.get_current_tab() else {
-    //         return;
-    //     };
-    //     if let Some(path_change) = &active_tab.path_change {
-    //         if path_change.new_tab {
-    //             let new_window =
-    //                 TabData::from_path(&path_change.path, Rc::clone(&active_tab.locations));
-
-    //             let root_node = self
-    //                 .dock_state
-    //                 .main_surface_mut()
-    //                 .root_node_mut()
-    //                 .expect("NO ROOT");
-    //             if root_node.is_leaf() {
-    //                 root_node.append_tab(new_window);
-    //             } else {
-    //                 self.dock_state.push_to_focused_leaf(new_window);
-    //             }
-    //         } else {
-    //             active_tab.set_path(&path_change.path.clone());
-    //         }
-    //     }
-    // }
+const fn convert_nr_to_egui_key(nr: usize) -> Option<egui::Key> {
+    match nr {
+        1 => Some(egui::Key::Num1),
+        2 => Some(egui::Key::Num2),
+        3 => Some(egui::Key::Num3),
+        4 => Some(egui::Key::Num4),
+        5 => Some(egui::Key::Num5),
+        6 => Some(egui::Key::Num6),
+        7 => Some(egui::Key::Num7),
+        8 => Some(egui::Key::Num8),
+        9 => Some(egui::Key::Num9),
+        0 => Some(egui::Key::Num0),
+        _ => None,
+    }
 }
