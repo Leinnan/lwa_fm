@@ -6,8 +6,6 @@ use icu::collator::{Collator, CollatorBorrowed};
 use icu::locale::Locale;
 use std::borrow::Cow;
 use std::fs;
-#[cfg(not(windows))]
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::str::FromStr;
 use std::{ffi::OsStr, path::PathBuf};
@@ -288,10 +286,10 @@ impl TabViewer for MyTabViewer {
         let favorites_paths: Vec<Cow<'static, str>> = ui
             .data(|d| d.get_temp("FavoritesPaths".into()))
             .unwrap_or_default();
-        
-            let tab_paths = ui
-                .data::<Option<TabPaths>>(|data| data.get_temp("TabPaths".into()))
-                .unwrap_or_default();
+
+        let tab_paths = ui
+            .data::<Option<TabPaths>>(|data| data.get_temp("TabPaths".into()))
+            .unwrap_or_default();
         if tab.search.visible {
             ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
                 let search_input =
@@ -331,7 +329,7 @@ impl TabViewer for MyTabViewer {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::remainder().at_least(260.0))
             .resizable(false);
-        
+
         table.body(|body| {
             body.rows(text_height, tab.list.len(), |mut row| {
                 let val = &tab.list[row.index()];
