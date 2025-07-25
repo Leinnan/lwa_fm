@@ -13,6 +13,9 @@ lto = true
 opt-level = 2
 
 [dependencies]
+icu = "2.0.0"
+notify = "6.1"
+bevy_device_lang = "0.6"
 fuzzy-matcher = "0.3"
 serde = { version = "1", features = ["derive"] }
 eframe = { version = "0.31", default-features = false, features = [

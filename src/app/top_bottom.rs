@@ -43,10 +43,14 @@ impl App {
         }
         None
     }
-    pub(crate) fn top_display(&mut self, ui: &mut Ui) -> Option<ActionToPerform> {
+    #[allow(clippy::needless_pass_by_ref_mut)]
+    pub(crate) fn top_display(
+        &mut self,
+        ui: &mut Ui,
+        current_path: PathBuf,
+    ) -> Option<ActionToPerform> {
         let mut new_path = None;
         let mut path: String = String::new();
-        let current_path = self.tabs.get_current_path();
         let parts = current_path.iter().count();
         #[allow(unused_variables)] // not used on linux
         for (i, e) in current_path.iter().enumerate() {
@@ -148,11 +152,13 @@ impl App {
         egui::TopBottomPanel::top("top_panel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
-                let Some(current_tab) = self.tabs.get_current_tab() else {return;};
+                let Some(current_tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
                 let show_hidden = current_tab.settings.show_hidden;
                 let is_searching = current_tab.is_searching();
-                let current_path = current_tab.current_path.clone();
-                let parent = current_path.parent();
+                // let current_path = current_tab.current_path.clone();
+                let parent = current_tab.current_path.parent();
                 let path_editable = current_tab.path_info.editable;
                 let can_go_up = !path_editable && !is_searching && parent.is_some();
 
@@ -165,33 +171,49 @@ impl App {
                             .on_hover_text("Go to parent directory")
                             .clicked()
                         {
-                            action = Some(ActionToPerform::ChangePath(parent.expect("It should not be possible to click this when parent is None").into()));
+                            action = Some(ActionToPerform::ChangePath(parent.expect(
+                                "It should not be possible to click this when parent is None",
+                            )));
                         }
                     });
                     ui.add_space(TOP_SIDE_MARGIN);
                     ui.add_enabled_ui(!is_searching, |ui| {
-                        if ui.button("✏").clicked() {
+                        let Some(current_tab) = self.tabs.get_current_tab() else {
+                            return;
+                        };
+                        let current_path = current_tab.current_path.single_path();
+
+                        if current_path.is_some() && ui.button("✏").clicked() {
                             action = Some(ActionToPerform::ToggleTopEdit);
                             return;
                         }
-                        action = if path_editable {
-                            self.top_display_editable(ui, show_hidden)
+                        action = if let Some(current_path) = current_path {
+                            if path_editable {
+                                self.top_display_editable(ui, show_hidden)
+                            } else {
+                                self.top_display(ui, current_path)
+                            }
                         } else {
-                            self.top_display(ui)
+                            ui.label(current_tab.current_path.get_name_from_path());
+                            None
                         };
                     });
 
-
                     let size_left = ui.available_size();
-                    let Some(active_tab) = self.tabs.get_current_tab() else {return;};
+                    let Some(active_tab) = self.tabs.get_current_tab() else {
+                        return;
+                    };
                     let amount = size_left.y * 2.0;
                     let amount = size_left.x - amount;
                     ui.add_space(amount);
 
-                    let button = egui::Button::new("🖳").frame(false)
+                    let button = egui::Button::new("🖳")
+                        .frame(false)
                         .fill(egui::Color32::from_white_alpha(0));
-                    if ui.add(button).on_hover_text("Open in terminal").clicked() {
-                        action = Some(ActionToPerform::OpenInTerminal(active_tab.current_path.clone()));
+                    if let Some(single_path) = active_tab.current_path.single_path() {
+                        if ui.add(button).on_hover_text("Open in terminal").clicked() {
+                            action = Some(ActionToPerform::OpenInTerminal(single_path));
+                        }
                     }
                     ui.toggle_value(&mut active_tab.search.visible, "🔍")
                         .on_hover_text("Search");

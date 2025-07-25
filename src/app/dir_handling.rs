@@ -3,71 +3,119 @@ use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
 };
-use walkdir::DirEntry;
 
-use crate::toast;
+use crate::{
+    app::dock::{build_collator, CurrentPath},
+    toast,
+    watcher::FileSystemEvent,
+};
 
 use super::{dock::TabData, Sort};
 
 impl TabData {
-    pub fn get_name_from_path(path: &Path) -> String {
-        #[cfg(not(windows))]
-        {
-            path.iter()
-                .last()
-                .expect("FAILED")
-                .to_string_lossy()
-                .into_owned()
-        }
-        #[cfg(windows)]
-        {
-            let mut result = path
-                .iter()
-                .last()
-                .expect("FAILED")
-                .to_string_lossy()
-                .into_owned();
-            if result.len() == 1 {
-                result = path.display().to_string();
-            }
-            result
-        }
-    }
-    pub fn set_path(&mut self, path: &PathBuf) {
-        self.name = Self::get_name_from_path(path);
-        self.current_path.clone_from(path);
-        self.path_info.rebuild(path, self.settings.show_hidden);
+    pub fn set_path(&mut self, path: impl Into<CurrentPath>) {
+        let path = path.into();
+        self.path_info.rebuild(&path, self.settings.show_hidden);
+        self.current_path = path;
         if self.is_searching() {
             self.search.value = String::new();
             self.search.visible = false;
         }
+        self.start_watching_directory();
         self.refresh_list();
+    }
+
+    /// Start watching the current directory for changes
+    pub fn start_watching_directory(&mut self) {
+        let Some(ref mut watcher) = self.watcher else {
+            return;
+        };
+        match &self.current_path {
+            CurrentPath::One(path_buf) => {
+                if let Err(e) = watcher.watch_directory(path_buf) {
+                    toast!(Error, "Failed to watch directory: {}", e);
+                }
+            }
+            // CurrentPath::Multiple(_) => {}
+            _ => {
+                watcher.stop_watching();
+            }
+        }
+    }
+
+    #[allow(unused)]
+    /// Stop watching the current directory
+    pub fn stop_watching_directory(&mut self) {
+        if let Some(ref mut watcher) = self.watcher {
+            watcher.stop_watching();
+        }
+    }
+    /// Check for file system events and handle them
+    pub fn check_for_file_system_events(&mut self) {
+        if let Some(ref mut watcher) = self.watcher {
+            let mut should_refresh = false;
+
+            // Process all pending events
+            while let Some(event) = watcher.try_recv_event() {
+                should_refresh = true;
+                match event {
+                    FileSystemEvent::Created(path) => {
+                        if let Some(file_name) = path.file_name() {
+                            toast!(Info, "File created: {}", file_name.to_string_lossy());
+                        }
+                    }
+                    FileSystemEvent::Modified(path) => {
+                        if let Some(file_name) = path.file_name() {
+                            toast!(Info, "File modified: {}", file_name.to_string_lossy());
+                        }
+                    }
+                    FileSystemEvent::Deleted(path) => {
+                        if let Some(file_name) = path.file_name() {
+                            toast!(Warning, "File deleted: {}", file_name.to_string_lossy());
+                        }
+                    }
+                    FileSystemEvent::Renamed { from, to } => {
+                        if let (Some(from_name), Some(to_name)) = (from.file_name(), to.file_name())
+                        {
+                            toast!(
+                                Info,
+                                "File renamed: {} → {}",
+                                from_name.to_string_lossy(),
+                                to_name.to_string_lossy()
+                            );
+                        }
+                    }
+                    FileSystemEvent::Error(err) => {
+                        toast!(Error, "File system error: {}", err);
+                    }
+                }
+            }
+
+            // Refresh the directory listing if any events occurred
+            if should_refresh {
+                self.refresh_list();
+            }
+        }
     }
 
     pub fn refresh_list(&mut self) {
         self.list = self.read_dir();
     }
 
-    fn read_dir(&self) -> Vec<walkdir::DirEntry> {
-        let search = &self.search.value;
+    fn read_dir(&self) -> Vec<super::dock::DirEntry> {
+        let search = self.search.value.as_str();
+        let search_len = search.len();
+        let collator = build_collator(self.search.case_sensitive);
         let use_search = self.is_searching();
-        let locations = self.locations.borrow();
-        let directories = if use_search && self.search.favorites {
-            locations
-                .get("Favorites")
-                .map_or_else(Vec::new, |favorites| {
-                    favorites
-                        .locations
-                        .iter()
-                        .map(|location| &location.path)
-                        .collect()
-                })
-        } else {
-            [&self.current_path].to_vec()
+        // let locations = self.locations.borrow();
+        let directories: &[PathBuf] = match &self.current_path {
+            CurrentPath::None => &[],
+            CurrentPath::One(path_buf) => std::slice::from_ref(path_buf),
+            CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
         };
 
         let depth = if use_search { self.search.depth } else { 1 };
-        let mut dir_entries: Vec<walkdir::DirEntry> = directories
+        let mut dir_entries: Vec<super::dock::DirEntry> = directories
             .iter()
             .flat_map(|d| {
                 walkdir::WalkDir::new(d)
@@ -76,20 +124,33 @@ impl TabData {
                     .into_iter()
                     .flatten()
                     .skip(1)
-                    .filter(|e| {
+                    .filter_map(|e| {
                         let s = e.file_name().to_string_lossy();
                         if !self.settings.show_hidden && (s.starts_with('.') || s.starts_with('$'))
                         {
-                            return false;
+                            return None;
                         }
-                        if self.search.case_sensitive {
-                            s.contains(search)
-                        } else {
-                            s.to_ascii_lowercase()
-                                .contains(&search.to_ascii_lowercase())
+                        if search_len > s.len() {
+                            return None;
+                        } else if !search.is_empty() {
+                            let chars = s.as_bytes();
+                            let mut found = false;
+                            for i in 0..=(s.len() - search_len) {
+                                if collator
+                                    .compare_utf8(search.as_bytes(), &chars[i..i + search_len])
+                                    == Ordering::Equal
+                                {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                return None;
+                            }
                         }
+                        e.try_into().ok()
                     })
-                    .collect::<Vec<walkdir::DirEntry>>()
+                    .collect::<Vec<super::dock::DirEntry>>()
             })
             .collect();
         if self.settings.sorting == Sort::Random {
@@ -104,67 +165,20 @@ impl TabData {
         dir_entries
     }
 
-    fn sort_entries(&self, dir_entries: &mut [DirEntry]) {
+    fn sort_entries(&self, dir_entries: &mut [super::dock::DirEntry]) {
         dir_entries.sort_by(|a, b| {
-            // Extract metadata for both entries and handle errors
-            let metadata_a = a.metadata();
-            let metadata_b = b.metadata();
-
-            let file_type_cmp = a.file_type().is_file().cmp(&b.file_type().is_file());
+            let file_type_cmp = a.is_file().cmp(&b.is_file());
 
             let result = file_type_cmp.then(match &self.settings.sorting {
-                Sort::Random => {
-                    toast!(Info, "Random sort is not supported");
-                    let name_a = a.file_name().to_ascii_lowercase();
-                    let name_b = b.file_name().to_ascii_lowercase();
+                Sort::Name => self.collator.compare(&a.path, &b.path),
+                Sort::Modified => a.modified_at.cmp(&b.modified_at),
+                Sort::Created => a.created_at.cmp(&b.created_at),
+                Sort::Size => a.size.cmp(&b.size),
+                _ => {
+                    let name_a = a.get_path().as_os_str().to_ascii_lowercase();
+                    let name_b = b.get_path().as_os_str().to_ascii_lowercase();
                     name_a.cmp(&name_b)
                 }
-                Sort::Name => {
-                    let name_a = a.file_name().to_ascii_lowercase();
-                    let name_b = b.file_name().to_ascii_lowercase();
-                    name_a.cmp(&name_b)
-                }
-                Sort::Modified => match (metadata_a, metadata_b) {
-                    (Ok(meta_a), Ok(meta_b)) => match (meta_a.modified(), meta_b.modified()) {
-                        (Ok(time_a), Ok(time_b)) => time_a.cmp(&time_b),
-                        _ => Ordering::Equal,
-                    },
-                    _ => Ordering::Equal,
-                },
-                Sort::Created => match (metadata_a, metadata_b) {
-                    (Ok(meta_a), Ok(meta_b)) => match (meta_a.created(), meta_b.created()) {
-                        (Ok(time_a), Ok(time_b)) => time_a.cmp(&time_b),
-                        _ => Ordering::Equal,
-                    },
-                    _ => Ordering::Equal,
-                },
-                #[cfg(windows)]
-                Sort::Size => match (metadata_a, metadata_b) {
-                    (Ok(meta_a), Ok(meta_b)) => {
-                        let size_a = std::os::windows::fs::MetadataExt::file_size(&meta_a);
-                        let size_b = std::os::windows::fs::MetadataExt::file_size(&meta_b);
-                        size_a.cmp(&size_b)
-                    }
-                    _ => Ordering::Equal,
-                },
-                #[cfg(target_os = "linux")]
-                Sort::Size => match (metadata_a, metadata_b) {
-                    (Ok(meta_a), Ok(meta_b)) => {
-                        let size_a = std::os::linux::fs::MetadataExt::st_size(&meta_a);
-                        let size_b = std::os::linux::fs::MetadataExt::st_size(&meta_b);
-                        size_a.cmp(&size_b)
-                    }
-                    _ => Ordering::Equal,
-                },
-                #[cfg(target_os = "macos")]
-                Sort::Size => match (metadata_a, metadata_b) {
-                    (Ok(meta_a), Ok(meta_b)) => {
-                        let size_a = std::os::macos::fs::MetadataExt::st_size(&meta_a);
-                        let size_b = std::os::macos::fs::MetadataExt::st_size(&meta_b);
-                        size_a.cmp(&size_b)
-                    }
-                    _ => Ordering::Equal,
-                },
             });
             if self.settings.invert_sort {
                 file_type_cmp.then(result.reverse())

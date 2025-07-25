@@ -1,11 +1,14 @@
-use crate::app::settings::ApplicationSettings;
+use crate::app::dock::CurrentPath;
 use crate::helper::KeyWithCommandPressed;
 use crate::locations::Locations;
+use crate::{app::settings::ApplicationSettings, locations::Location};
 use command_palette::CommandPalette;
 use commands::{ActionToPerform, ModalWindow};
-use egui::ahash::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, fs, path::PathBuf, rc::Rc};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::str::FromStr;
+use std::{fs, path::PathBuf};
 
 mod central_panel;
 pub mod command_palette;
@@ -18,8 +21,8 @@ mod settings;
 mod side_panel;
 mod top_bottom;
 
-pub static TOASTS: once_cell::sync::Lazy<egui::mutex::RwLock<egui_notify::Toasts>> =
-    once_cell::sync::Lazy::new(|| {
+pub static TOASTS: std::sync::LazyLock<egui::mutex::RwLock<egui_notify::Toasts>> =
+    std::sync::LazyLock::new(|| {
         egui::mutex::RwLock::new(
             egui_notify::Toasts::new().with_anchor(egui_notify::Anchor::TopRight),
         )
@@ -47,7 +50,7 @@ macro_rules! toast{
 #[derive(Deserialize, Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
-    locations: Rc<RefCell<HashMap<String, Locations>>>,
+    locations: BTreeMap<Cow<'static, str>, Locations>,
     #[serde(skip)]
     tabs: crate::app::dock::MyTabs,
     pub settings: ApplicationSettings,
@@ -70,7 +73,6 @@ pub enum Sort {
 #[derive(Deserialize, Serialize, Default, Debug)]
 pub struct Search {
     pub visible: bool,
-    pub favorites: bool,
     pub value: String,
     pub depth: usize,
     pub case_sensitive: bool,
@@ -78,7 +80,7 @@ pub struct Search {
 
 impl Default for App {
     fn default() -> Self {
-        let mut locations = HashMap::new();
+        let mut locations = BTreeMap::new();
         locations.insert("User".into(), Locations::get_user_dirs());
         #[cfg(not(target_os = "macos"))]
         locations.insert("Drives".into(), Locations::get_drives());
@@ -89,12 +91,10 @@ impl Default for App {
                 ..Default::default()
             },
         );
-        let locations = Rc::new(RefCell::new(locations));
-        let clone = Rc::clone(&locations);
         let command_palette = CommandPalette::default();
         Self {
             locations,
-            tabs: crate::app::dock::MyTabs::new(&get_starting_path(), clone),
+            tabs: crate::app::dock::MyTabs::new(&get_starting_path()),
             settings: ApplicationSettings::default(),
             display_modal: None,
             command_palette,
@@ -114,9 +114,8 @@ impl App {
         if let Some(storage) = cc.storage {
             let mut value: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
             {
-                let mut locations = value.locations.borrow_mut();
-                if !locations.contains_key("Favorites") {
-                    locations.insert(
+                if !value.locations.contains_key("Favorites") {
+                    value.locations.insert(
                         "Favorites".into(),
                         Locations {
                             editable: true,
@@ -124,16 +123,15 @@ impl App {
                         },
                     );
                 }
-                if let Some(user) = locations.get_mut("User") {
+                if let Some(user) = value.locations.get_mut("User") {
                     *user = Locations::get_user_dirs();
                 }
                 #[cfg(not(target_os = "macos"))]
-                if let Some(drive) = locations.get_mut("Drives") {
+                if let Some(drive) = value.locations.get_mut("Drives") {
                     *drive = Locations::get_drives();
                 }
             }
-            value.tabs =
-                crate::app::dock::MyTabs::new(&get_starting_path(), Rc::clone(&value.locations));
+            value.tabs = crate::app::dock::MyTabs::new(&get_starting_path());
             return value;
         }
 
@@ -167,11 +165,11 @@ impl eframe::App for App {
         if ctx.key_with_command_pressed(egui::Key::L) {
             command_request = Some(ActionToPerform::ToggleTopEdit);
         }
-
-        if ctx.key_with_command_pressed(egui::Key::R) {
-            command_request = Some(ActionToPerform::ToggleModalWindow(ModalWindow::Commands));
-            let current_path = self.tabs.get_current_path();
-            self.command_palette.build_for_path(&current_path);
+        if let Some(current_path) = self.tabs.get_current_path() {
+            if ctx.key_with_command_pressed(egui::Key::R) {
+                command_request = Some(ActionToPerform::ToggleModalWindow(ModalWindow::Commands));
+                self.command_palette.build_for_path(&current_path);
+            }
         }
 
         if let Some(modal) = &self.display_modal {
@@ -194,7 +192,7 @@ impl eframe::App for App {
         };
         match action {
             ActionToPerform::ChangePath(path) => {
-                self.tabs.update_active_tab(&path);
+                self.tabs.update_active_tab(path);
             }
             ActionToPerform::NewTab(path) => self.tabs.open_in_new_tab(&path),
             ActionToPerform::OpenInTerminal(path_buf) => {
@@ -225,6 +223,92 @@ impl eframe::App for App {
                     return;
                 };
                 tab.toggle_top_edit();
+            }
+            ActionToPerform::AddToFavorites(path) => {
+                let path_buf = PathBuf::from_str(&path).unwrap();
+                if let Some(name) = path_buf.iter().next_back() {
+                    if let Some(fav) = self.locations.get_mut("Favorites") {
+                        fav.locations.push(Location {
+                            name: name.to_string_lossy().to_string(),
+                            path,
+                        });
+                    } else {
+                        self.locations.insert(
+                            "Favorites".into(),
+                            Locations {
+                                editable: true,
+                                ..Default::default()
+                            },
+                        );
+                        if let Some(fav) = self.locations.get_mut("Favorites") {
+                            fav.locations.push(Location {
+                                name: name.to_string_lossy().to_string(),
+                                path,
+                            });
+                        } else {
+                            toast!(Error, "Failed to add favorite");
+                        }
+                    }
+                } else {
+                    toast!(Error, "Could not get name of file");
+                }
+                ctx.data_mut(|d| {
+                    d.insert_persisted(
+                        "FavoritesPaths".into(),
+                        self.locations
+                            .get("Favorites")
+                            .unwrap()
+                            .locations
+                            .iter()
+                            .map(|s| s.path.clone())
+                            .collect::<Vec<Cow<'static, str>>>(),
+                    );
+                });
+            }
+            ActionToPerform::RemoveFromFavorites(path_buf) => {
+                self.locations
+                    .get_mut("Favorites")
+                    .unwrap()
+                    .locations
+                    .retain(|s| s.path != path_buf);
+                ctx.data_mut(|d| {
+                    d.insert_persisted(
+                        "FavoritesPaths".into(),
+                        self.locations
+                            .get("Favorites")
+                            .unwrap()
+                            .locations
+                            .iter()
+                            .map(|s| s.path.clone())
+                            .collect::<Vec<Cow<'static, str>>>(),
+                    );
+                });
+            }
+            ActionToPerform::SearchInFavorites(start) => {
+                let favorites_paths: Vec<Cow<'static, str>> = ctx
+                    .data_mut(|d| d.get_persisted("FavoritesPaths".into()))
+                    .unwrap_or_default();
+                if favorites_paths.is_empty() {
+                    return;
+                }
+                let path = if start {
+                    if let Some(old_path) = self.tabs.get_current_path() {
+                        ctx.data_mut(|d| d.insert_temp("Previous".into(), old_path));
+                    }
+                    CurrentPath::Multiple(
+                        favorites_paths
+                            .iter()
+                            .filter_map(|s| PathBuf::from_str(s).ok())
+                            .collect(),
+                    )
+                } else if let Some(old_path) =
+                    ctx.data::<Option<PathBuf>>(|d| d.get_temp("Previous".into()))
+                {
+                    CurrentPath::One(old_path)
+                } else {
+                    CurrentPath::One(PathBuf::from_str("/").unwrap())
+                };
+                self.tabs.update_active_tab(path);
             }
         }
     }

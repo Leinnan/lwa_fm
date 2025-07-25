@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{borrow::Cow, path::PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalWindow {
@@ -29,4 +29,11 @@ pub enum ActionToPerform {
 
     /// Shows the Path Edit
     ToggleTopEdit,
+
+    /// Add to favorites
+    AddToFavorites(Cow<'static, str>),
+    /// Remove from favorites
+    RemoveFromFavorites(Cow<'static, str>),
+    /// `SearchInFavorites`
+    SearchInFavorites(bool),
 }

@@ -1,4 +1,6 @@
-use egui::{Context, Layout, RichText};
+use std::{path::PathBuf, str::FromStr};
+
+use egui::{Context, Layout, RichText, TextBuffer};
 
 use crate::{consts::TOP_SIDE_MARGIN, helper::KeyWithCommandPressed};
 
@@ -12,19 +14,14 @@ impl App {
             .show(ctx, |ui| {
                 ui.allocate_space([160.0, TOP_SIDE_MARGIN].into());
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut locations = self.locations.borrow_mut();
-                    for id in ["Favorites", "User", "Drives"] {
-                        let Some(collection) = locations.get_mut(id) else {
-                            continue;
-                        };
+                    for (id, collection) in &self.locations {
                         if collection.locations.is_empty() {
                             continue;
                         }
-                        egui::CollapsingHeader::new(id)
+                        egui::CollapsingHeader::new(id.as_str())
                             .default_open(true)
                             .show(ui, |ui| {
-                                let mut id_to_remove = None;
-                                for (i, location) in collection.locations.iter().enumerate() {
+                                for location in &collection.locations {
                                     ui.with_layout(
                                         Layout::left_to_right(eframe::emath::Align::Min),
                                         |ui| {
@@ -37,10 +34,12 @@ impl App {
                                             );
                                             if button.clicked() {
                                                 action = if ui.command_pressed() {
-                                                    ActionToPerform::NewTab(location.path.clone())
+                                                    ActionToPerform::NewTab(
+                                                        PathBuf::from_str(&location.path).unwrap(),
+                                                    )
                                                 } else {
                                                     ActionToPerform::ChangePath(
-                                                        location.path.clone(),
+                                                        PathBuf::from_str(&location.path).unwrap(),
                                                     )
                                                 }
                                                 .into();
@@ -50,7 +49,7 @@ impl App {
                                             button.context_menu(|ui| {
                                                 if ui.button("Open in new tab").clicked() {
                                                     action = Some(ActionToPerform::NewTab(
-                                                        location.path.clone(),
+                                                        PathBuf::from_str(&location.path).unwrap(),
                                                     ));
                                                     ui.close_menu();
                                                     return;
@@ -59,15 +58,15 @@ impl App {
                                                     return;
                                                 }
                                                 if ui.button("Remove from favorites").clicked() {
-                                                    id_to_remove = Some(i);
+                                                    action =
+                                                        Some(ActionToPerform::RemoveFromFavorites(
+                                                            location.path.clone(),
+                                                        ));
                                                     ui.close_menu();
                                                 }
                                             });
                                         },
                                     );
-                                }
-                                if let Some(id) = id_to_remove {
-                                    collection.locations.remove(id);
                                 }
                             });
                         ui.add_space(15.0);

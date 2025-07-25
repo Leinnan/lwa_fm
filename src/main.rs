@@ -8,6 +8,7 @@ mod app;
 mod consts;
 mod helper;
 mod locations;
+mod watcher;
 mod widgets;
 #[cfg(windows)]
 mod windows_tools;
