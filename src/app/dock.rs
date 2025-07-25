@@ -1,11 +1,12 @@
 use egui::text::LayoutJob;
-use egui::{Color32, Layout, TextFormat, Ui};
+use egui::{Color32, Layout, TextBuffer, TextFormat, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
 use icu::collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu::collator::{Collator, CollatorBorrowed};
 use icu::locale::Locale;
 use std::borrow::Cow;
 use std::fs;
+#[cfg(not(windows))]
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::str::FromStr;
@@ -94,7 +95,7 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
 }
 impl DirEntry {
     pub fn get_path(&self) -> &Path {
-        Path::new(OsStr::from_bytes(self.path.as_bytes()))
+        Path::new(self.path.as_str())
     }
     pub fn is_file(&self) -> bool {
         self.entry_type == EntryType::File
@@ -287,6 +288,10 @@ impl TabViewer for MyTabViewer {
         let favorites_paths: Vec<Cow<'static, str>> = ui
             .data(|d| d.get_temp("FavoritesPaths".into()))
             .unwrap_or_default();
+        
+            let tab_paths = ui
+                .data::<Option<TabPaths>>(|data| data.get_temp("TabPaths".into()))
+                .unwrap_or_default();
         if tab.search.visible {
             ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
                 let search_input =
@@ -326,6 +331,7 @@ impl TabViewer for MyTabViewer {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::remainder().at_least(260.0))
             .resizable(false);
+        
         table.body(|body| {
             body.rows(text_height, tab.list.len(), |mut row| {
                 let val = &tab.list[row.index()];
@@ -460,15 +466,12 @@ impl TabViewer for MyTabViewer {
                             }
                             #[cfg(windows)]
                             if ui.button("Show in explorer").clicked() {
-                                crate::windows_tools::display_in_explorer(val.path())
+                                crate::windows_tools::display_in_explorer(val.get_path())
                                     .unwrap_or_else(|_| {
                                         toast!(Error, "Could not open in explorer");
                                     });
                                 ui.close_menu();
                             }
-                            let tab_paths = ui
-                                .data::<Option<TabPaths>>(|data| data.get_temp("TabPaths".into()))
-                                .unwrap_or_default();
                             #[allow(clippy::collapsible_else_if)]
                             if tab_paths.len() > 1 {
                                 ui.separator();
@@ -542,8 +545,7 @@ impl TabViewer for MyTabViewer {
                                 toast!(Error, "Failed to read the clipboard.");
                                 return;
                             };
-                            let path = val.get_path().display().to_string();
-                            clipboard.set_text(path).unwrap_or_else(|_| {
+                            clipboard.set_text(val.path.clone()).unwrap_or_else(|_| {
                                 toast!(Error, "Failed to update the clipboard.");
                             });
                             ui.close_menu();
@@ -553,7 +555,7 @@ impl TabViewer for MyTabViewer {
                         {
                             ui.separator();
                             if ui.button("Properties").clicked() {
-                                crate::windows_tools::open_properties(val.path());
+                                crate::windows_tools::open_properties(val.get_path());
                                 ui.close_menu();
                             }
                         }
@@ -580,12 +582,7 @@ impl TabViewer for MyTabViewer {
                             );
                         });
                     } else {
-                        added_button.on_hover_text(format!(
-                            "{:?}",
-                            // consider caching here
-                            std::fs::canonicalize(val.get_path())
-                                .unwrap_or_else(|_| val.get_path().to_path_buf())
-                        ));
+                        added_button.on_hover_text(val.path.as_str());
                     }
                 });
             });

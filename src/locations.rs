@@ -32,14 +32,11 @@ impl Locations {
         drives.sort_by(|a, b| a.mount_point().cmp(b.mount_point()));
         let locations = drives
             .iter()
-            .map(|drive| Location {
-                name: format!(
+            .map(|drive| Location::from_path(drive.mount_point(), format!(
                     "{} ({})",
                     drive.name().to_str().unwrap_or(""),
                     drive.mount_point().display()
-                ),
-                path: drive.mount_point().to_path_buf().to_string_lossy().into(),
-            })
+                )))
             .collect();
 
         Self {
