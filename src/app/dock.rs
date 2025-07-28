@@ -415,7 +415,7 @@ impl TabViewer for MyTabViewer {
                                     PathBuf::from_str(&val.path).expect("msg"),
                                 )
                                 .into();
-                                ui.close_menu();
+                                ui.close();
                                 return;
                             }
                             if ui.button("Open in new tab").clicked() {
@@ -423,7 +423,7 @@ impl TabViewer for MyTabViewer {
                                     PathBuf::from_str(&val.path).expect("msg"),
                                 )
                                 .into();
-                                ui.close_menu();
+                                ui.close();
                                 return;
                             }
                             #[cfg(windows)]
@@ -436,7 +436,7 @@ impl TabViewer for MyTabViewer {
                             if ui.button(open_name).clicked() {
                                 open::that_detached(val.get_path())
                                     .expect("Failed to open directory in file manager");
-                                ui.close_menu();
+                                ui.close();
                                 return;
                             }
 
@@ -447,19 +447,19 @@ impl TabViewer for MyTabViewer {
                                 tab.action_to_perform =
                                     Some(ActionToPerform::AddToFavorites(val.path.clone()));
 
-                                ui.close_menu();
+                                ui.close();
                                 return;
                             }
 
                             if exist_in_favorites && ui.button("Remove from favorites").clicked() {
                                 tab.action_to_perform =
                                     Some(ActionToPerform::RemoveFromFavorites(val.path.clone()));
-                                ui.close_menu();
+                                ui.close();
                             }
                         } else {
                             if ui.button("Open").clicked() {
                                 let _ = open::that_detached(val.get_path());
-                                ui.close_menu();
+                                ui.close();
                                 return;
                             }
                             #[cfg(windows)]
@@ -468,7 +468,7 @@ impl TabViewer for MyTabViewer {
                                     .unwrap_or_else(|_| {
                                         toast!(Error, "Could not open in explorer");
                                     });
-                                ui.close_menu();
+                                ui.close();
                             }
                             #[allow(clippy::collapsible_else_if)]
                             if tab_paths.len() > 1 {
@@ -524,7 +524,7 @@ impl TabViewer for MyTabViewer {
                                                 );
                                             }
                                             require_refresh = true;
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                     }
                                 });
@@ -535,7 +535,7 @@ impl TabViewer for MyTabViewer {
                             trash::delete(val.get_path()).unwrap_or_else(|_| {
                                 toast!(Error, "Could not move it to trash.");
                             });
-                            ui.close_menu();
+                            ui.close();
                             require_refresh = true;
                         }
                         if ui.button("Copy path to clipboard").clicked() {
@@ -546,7 +546,7 @@ impl TabViewer for MyTabViewer {
                             clipboard.set_text(val.path.clone()).unwrap_or_else(|_| {
                                 toast!(Error, "Failed to update the clipboard.");
                             });
-                            ui.close_menu();
+                            ui.close();
                         }
 
                         #[cfg(windows)]
@@ -554,7 +554,7 @@ impl TabViewer for MyTabViewer {
                             ui.separator();
                             if ui.button("Properties").clicked() {
                                 crate::windows_tools::open_properties(val.get_path());
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });

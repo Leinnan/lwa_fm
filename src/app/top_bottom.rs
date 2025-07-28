@@ -22,7 +22,9 @@ impl App {
         )
         .max_suggestions(15)
         .highlight_matches(true);
-        let _response = ui.add(edit);
+        let size = ui.available_size();
+
+        let _response = ui.add_sized([size.x.max(150.0) - 130.0, 24.0], edit);
 
         let should_close =
             ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape));
@@ -102,11 +104,11 @@ impl App {
                 button.context_menu(|ui| {
                     if ui.button("Open").clicked() {
                         new_path = Some(ActionToPerform::ChangePath(path.clone().into()));
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Open in new tab").clicked() {
                         new_path = Some(ActionToPerform::NewTab(path.clone().into()));
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Copy path to clipboard").clicked() {
                         let Ok(mut clipboard) = arboard::Clipboard::new() else {
@@ -116,7 +118,7 @@ impl App {
                         clipboard.set_text(path.clone()).unwrap_or_else(|_| {
                             crate::toast!(Error, "Failed to update the clipboard.");
                         });
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
             }
@@ -125,7 +127,7 @@ impl App {
                     let p = std::path::Path::new(&path);
                     let dirs = get_directories_recursive(p, false, 1);
                     if dirs.is_empty() {
-                        ui.close_menu();
+                        ui.close();
                     }
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for dir in &dirs {
@@ -137,7 +139,7 @@ impl App {
                                 new_path = Some(ActionToPerform::ChangePath(
                                     PathBuf::from_str(dir).expect("Failed to convert path"),
                                 ));
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });

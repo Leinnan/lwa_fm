@@ -1,7 +1,7 @@
 // CREEDITS: https://github.com/JakeHandsome/egui_autocomplete
 use egui::{
-    text::LayoutJob, Context, FontId, Id, Key, Modifiers, PopupCloseBehavior, TextBuffer, TextEdit,
-    Widget,
+    text::LayoutJob, Context, FontId, Id, Key, Modifiers, Popup, PopupCloseBehavior, TextBuffer,
+    TextEdit, Widget,
 };
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -147,17 +147,16 @@ where
         if let (Some(index), true) = (
             state.selected_index,
             // If accepted by keyboard, close the popup. If the popup is closed with a selected index, take that text
-            accepted_by_keyboard || !ui.memory(|mem| mem.is_popup_open(id)),
+            accepted_by_keyboard || !Popup::is_id_open(ui.ctx(), id),
         ) {
             text_field.replace_with(match_results[index].0.as_ref());
             state.selected_index = None;
         }
-        egui::popup::popup_below_widget(
-            ui,
-            id,
-            &text_response,
-            PopupCloseBehavior::IgnoreClicks,
-            |ui| {
+
+        Popup::menu(&text_response)
+            .id(id)
+            .close_behavior(PopupCloseBehavior::IgnoreClicks)
+            .show(|ui| {
                 for (i, (output, _, match_indices)) in
                     match_results.iter().take(max_suggestions).enumerate()
                 {
@@ -179,18 +178,13 @@ where
                         state.selected_index = Some(i);
                     }
                 }
-            },
-        );
+            });
 
         if !text_field.as_str().is_empty() && text_response.has_focus() && !match_results.is_empty()
         {
-            ui.memory_mut(|mem| mem.open_popup(id));
-        } else {
-            ui.memory_mut(|mem| {
-                if mem.is_popup_open(id) {
-                    mem.close_popup();
-                }
-            });
+            Popup::open_id(ui.ctx(), id);
+        } else if Popup::is_id_open(ui.ctx(), id) {
+            Popup::close_id(ui.ctx(), id);
         }
 
         state.store(ui.ctx(), id);

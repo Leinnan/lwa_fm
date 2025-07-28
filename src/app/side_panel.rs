@@ -51,7 +51,7 @@ impl App {
                                                     action = Some(ActionToPerform::NewTab(
                                                         PathBuf::from_str(&location.path).unwrap(),
                                                     ));
-                                                    ui.close_menu();
+                                                    ui.close();
                                                     return;
                                                 }
                                                 if !collection.editable {
@@ -62,7 +62,7 @@ impl App {
                                                         Some(ActionToPerform::RemoveFromFavorites(
                                                             location.path.clone(),
                                                         ));
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                             });
                                         },
