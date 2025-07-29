@@ -83,7 +83,9 @@ impl App {
                     }
                 };
                 if ui.button(text).clicked() {
-                    new_path = Some(ActionToPerform::ChangePath(path.into()));
+                    new_path = Some(ActionToPerform::ChangePaths(super::dock::CurrentPath::One(
+                        path.into(),
+                    )));
                     return new_path;
                 }
             }
@@ -112,40 +114,12 @@ impl App {
                         ui.close();
                     }
                 });
-                if button_group != ButtonGroupElement::Last {
-                    let dirs = get_directories_recursive(std::path::Path::new(&path), false, 1);
-                    if !dirs.is_empty() {
-                        let button =
-                            ui.add(Button::new(">").corner_radius(ButtonGroupElement::InTheMiddle));
-                        button.context_menu(|ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                for dir in &dirs {
-                                    let dir_display = dir.replace(&path, "");
-                                    if dir_display.is_empty() {
-                                        continue;
-                                    }
-                                    if ui.button(dir_display.as_str()).clicked() {
-                                        new_path = Some(ActionToPerform::ChangePaths(
-                                            PathBuf::from_str(dir)
-                                                .expect("Failed to convert path")
-                                                .into(),
-                                        ));
-                                        ui.close();
-                                    }
-                                }
-                            });
-                        });
-                    }
-                }
             }
-            #[cfg(windows)]
-            if parts - 1 != i {
-                ui.menu_button(std::path::MAIN_SEPARATOR.to_string(), |ui| {
-                    let p = std::path::Path::new(&path);
-                    let dirs = get_directories_recursive(p, false, 1);
-                    if dirs.is_empty() {
-                        ui.close();
-                    }
+            let dirs = get_directories_recursive(std::path::Path::new(&path), false, 1);
+            if !dirs.is_empty() {
+                let button =
+                    ui.add(Button::new(">").corner_radius(ButtonGroupElement::InTheMiddle));
+                button.context_menu(|ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for dir in &dirs {
                             let dir_display = dir.replace(&path, "");
@@ -153,8 +127,10 @@ impl App {
                                 continue;
                             }
                             if ui.button(dir_display.as_str()).clicked() {
-                                new_path = Some(ActionToPerform::ChangePath(
-                                    PathBuf::from_str(dir).expect("Failed to convert path"),
+                                new_path = Some(ActionToPerform::ChangePaths(
+                                    PathBuf::from_str(dir)
+                                        .expect("Failed to convert path")
+                                        .into(),
                                 ));
                                 ui.close();
                             }
@@ -162,6 +138,30 @@ impl App {
                     });
                 });
             }
+            // #[cfg(windows)]
+            // if parts - 1 != i {
+            //     ui.menu_button(std::path::MAIN_SEPARATOR.to_string(), |ui| {
+            //         let p = std::path::Path::new(&path);
+            //         let dirs = get_directories_recursive(p, false, 1);
+            //         if dirs.is_empty() {
+            //             ui.close();
+            //         }
+            //         egui::ScrollArea::vertical().show(ui, |ui| {
+            //             for dir in &dirs {
+            //                 let dir_display = dir.replace(&path, "");
+            //                 if dir_display.is_empty() {
+            //                     continue;
+            //                 }
+            //                 if ui.button(dir_display.as_str()).clicked() {
+            //                     new_path = Some(ActionToPerform::ChangePaths(
+            //                         PathBuf::from_str(dir).expect("Failed to convert path"),
+            //                     ));
+            //                     ui.close();
+            //                 }
+            //             }
+            //         });
+            //     });
+            // }
         }
         new_path
     }

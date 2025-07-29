@@ -116,10 +116,7 @@ impl Locations {
             })
             .collect();
 
-        Self {
-            locations,
-            editable: false,
-        }
+        Self { locations }
     }
 
     pub fn get_user_dirs() -> Self {
