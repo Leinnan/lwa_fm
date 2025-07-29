@@ -1,8 +1,6 @@
-use std::{path::PathBuf, str::FromStr};
+use egui::Context;
 
-use egui::{Context, Layout, RichText, TextBuffer};
-
-use crate::{consts::TOP_SIDE_MARGIN, helper::KeyWithCommandPressed};
+use crate::{consts::TOP_SIDE_MARGIN, helper::DataHolder, locations::Locations};
 
 use super::{ActionToPerform, App};
 
@@ -14,62 +12,15 @@ impl App {
             .show(ctx, |ui| {
                 ui.allocate_space([160.0, TOP_SIDE_MARGIN].into());
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (id, collection) in &self.locations {
-                        if collection.locations.is_empty() {
-                            continue;
-                        }
-                        egui::CollapsingHeader::new(id.as_str())
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                for location in &collection.locations {
-                                    ui.with_layout(
-                                        Layout::left_to_right(eframe::emath::Align::Min),
-                                        |ui| {
-                                            let button = ui.add(
-                                                egui::Button::new(
-                                                    RichText::new(&location.name).strong(),
-                                                )
-                                                .frame(false)
-                                                .fill(egui::Color32::from_white_alpha(0)),
-                                            );
-                                            if button.clicked() {
-                                                action = if ui.command_pressed() {
-                                                    ActionToPerform::NewTab(
-                                                        PathBuf::from_str(&location.path).unwrap(),
-                                                    )
-                                                } else {
-                                                    ActionToPerform::ChangePath(
-                                                        PathBuf::from_str(&location.path).unwrap(),
-                                                    )
-                                                }
-                                                .into();
-                                                return;
-                                            }
-                                            ui.add_space(10.0);
-                                            button.context_menu(|ui| {
-                                                if ui.button("Open in new tab").clicked() {
-                                                    action = Some(ActionToPerform::NewTab(
-                                                        PathBuf::from_str(&location.path).unwrap(),
-                                                    ));
-                                                    ui.close();
-                                                    return;
-                                                }
-                                                if !collection.editable {
-                                                    return;
-                                                }
-                                                if ui.button("Remove from favorites").clicked() {
-                                                    action =
-                                                        Some(ActionToPerform::RemoveFromFavorites(
-                                                            location.path.clone(),
-                                                        ));
-                                                    ui.close();
-                                                }
-                                            });
-                                        },
-                                    );
-                                }
-                            });
-                        ui.add_space(15.0);
+                    if let Some(data) = ui.data_get_persisted::<Locations>() {
+                        action = data.draw_ui("Favorites", ui, true);
+                    }
+                    if action.is_none() {
+                        action = self.user_locations.draw_ui("User", ui, false);
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    if action.is_none() {
+                        action = self.drives_locations.draw_ui("Drives", ui, false);
                     }
                 });
             });

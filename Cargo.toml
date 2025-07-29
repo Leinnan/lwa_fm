@@ -1,6 +1,7 @@
 [package]
 name = "lwa_fm"
 edition = "2021"
+version = "0.0.1"
 homepage = "https://github.com/Leinnan/lwa_fm"
 
 [profile.release]

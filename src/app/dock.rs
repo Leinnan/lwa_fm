@@ -1,5 +1,6 @@
 use egui::text::LayoutJob;
-use egui::{Color32, Layout, TextBuffer, TextFormat, Ui};
+use egui::util::undoer::Undoer;
+use egui::{Color32, Id, TextBuffer, TextFormat, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
 use icu::collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu::collator::{Collator, CollatorBorrowed};
@@ -7,18 +8,19 @@ use icu::locale::Locale;
 use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
-use std::str::FromStr;
 use std::{ffi::OsStr, path::PathBuf};
 
 use egui::Vec2;
 use egui_extras::{Column, TableBuilder};
 
-use crate::helper::KeyWithCommandPressed;
+use crate::app::command_palette::build_for_path;
+use crate::app::{Data, Search};
+use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer};
+use crate::locations::Locations;
+use crate::toast;
 use crate::watcher::DirectoryWatcher;
-use crate::{consts::VERTICAL_SPACING, toast};
 
 use super::commands::ActionToPerform;
-use super::directory_path_info::DirectoryPathInfo;
 use super::directory_view_settings::DirectoryViewSettings;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -106,8 +108,9 @@ impl DirEntry {
 
 pub type TabPaths = Vec<PathBuf>;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Default, Hash)]
 pub enum CurrentPath {
+    #[default]
     None,
     One(PathBuf),
     Multiple(Vec<PathBuf>),
@@ -176,12 +179,43 @@ pub struct TabData {
     pub list: Vec<DirEntry>,
     pub action_to_perform: Option<ActionToPerform>,
     pub current_path: CurrentPath,
-    pub settings: DirectoryViewSettings,
+    pub settings: Data<DirectoryViewSettings>,
     pub can_close: bool,
-    pub search: super::Search,
-    pub path_info: DirectoryPathInfo,
+    pub search: Option<Search>,
     pub collator: CollatorBorrowed<'static>,
     pub watcher: Option<DirectoryWatcher>,
+    undoer: Undoer<CurrentPath>,
+    pub id: u32,
+}
+
+impl TabData {
+    pub fn can_undo(&self) -> bool {
+        self.undoer.has_undo(&self.current_path)
+    }
+    pub fn can_redo(&self) -> bool {
+        self.undoer.has_redo(&self.current_path)
+    }
+    pub fn undo(&mut self) -> Option<ActionToPerform> {
+        self.undoer
+            .undo(&self.current_path)
+            .map(|s| ActionToPerform::ChangePaths(s.to_owned()))
+    }
+    pub fn redo(&mut self) -> Option<ActionToPerform> {
+        self.undoer
+            .redo(&self.current_path)
+            .map(|s| ActionToPerform::ChangePaths(s.to_owned()))
+    }
+    pub fn toggle_search(&mut self, data_source: &impl DataHolder) {
+        if self.search.is_none() {
+            match data_source.data_get_tab::<Search>(self.id) {
+                Some(search) => self.search = Some(search),
+                None => self.search = Some(Search::default()),
+            }
+        } else {
+            data_source.data_set_tab::<Search>(self.id, self.search.clone().unwrap_or_default());
+            self.search = None;
+        }
+    }
 }
 
 pub fn build_collator(case_sensitive: bool) -> CollatorBorrowed<'static> {
@@ -192,50 +226,55 @@ pub fn build_collator(case_sensitive: bool) -> CollatorBorrowed<'static> {
         Some(Strength::Primary)
     };
     options.alternate_handling = Some(AlternateHandling::Shifted);
-    let lang = bevy_device_lang::get_lang().unwrap_or("en".to_string());
-    let prefs = Locale::try_from_str(&lang).unwrap_or(Locale::try_from_str("en").unwrap());
-    Collator::try_new(prefs.into(), options).unwrap()
+    let lang = bevy_device_lang::get_lang().unwrap_or_else(|| "en".to_string());
+    let prefs = Locale::try_from_str(&lang)
+        .unwrap_or_else(|_| Locale::try_from_str("en").expect("Failed to create default locale"));
+    Collator::try_new(prefs.into(), options).expect("Failed to create collator")
+}
+
+pub fn get_id() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 impl TabData {
     pub const fn is_searching(&self) -> bool {
-        !self.search.value.is_empty()
+        match &self.search {
+            Some(Search {
+                value,
+                depth: _,
+                case_sensitive: _,
+            }) => !value.is_empty(),
+            None => false,
+        }
     }
-    pub fn from_path(path: &PathBuf) -> Self {
-        let path_info = DirectoryPathInfo::default();
+    pub fn from_path(path: &Path) -> Self {
+        // let path_info = DirectoryPathInfo::default();
         let mut new = Self {
+            id: get_id(),
             list: vec![],
             collator: build_collator(false),
             action_to_perform: None,
             current_path: CurrentPath::None,
-            settings: DirectoryViewSettings::default(),
-            can_close: true,
-            path_info,
-            search: super::Search {
-                visible: false,
-                case_sensitive: false,
-                depth: 3,
-                value: String::new(),
+            settings: Data {
+                data: DirectoryViewSettings::default(),
+                source: crate::app::DataSource::Local,
             },
+            can_close: true,
+            // path_info,
+            search: None,
             watcher: DirectoryWatcher::new().ok(),
+            undoer: Undoer::default(),
         };
-        new.set_path(CurrentPath::One(path.clone()));
+        new.set_path(CurrentPath::One(path.into()));
         new
     }
     pub fn update(&mut self, is_only_tab: bool) {
         self.can_close = !is_only_tab;
         self.action_to_perform = None;
-        // self.other_tabs_paths = other_tabs
-        //     .iter()
-        //     .filter(|p| !p.eq(&&self.current_path))
-        //     .cloned()
-        //     .collect::<Vec<PathBuf>>();
         // Check for file system events
         self.check_for_file_system_events();
-    }
-
-    pub(crate) const fn toggle_top_edit(&mut self) {
-        self.path_info.editable = !self.is_searching() && !self.path_info.editable;
     }
 }
 
@@ -253,10 +292,18 @@ impl TabViewer for MyTabViewer {
         tab.can_close
     }
 
+    fn id(&mut self, tab: &mut Self::Tab) -> Id {
+        Id::new(tab.id)
+    }
+
     // Returns the current `tab`'s title.
     fn title(&mut self, tab: &mut Self::Tab) -> egui_dock::egui::WidgetText {
         if tab.is_searching() {
-            format!("Searching: {}", &tab.search.value).into()
+            tab.search
+                .as_ref()
+                .map(|s| format!("Searching: {}", &s.value))
+                .unwrap_or_default()
+                .into()
         } else {
             let path = tab.current_path.get_name_from_path();
             path.into()
@@ -267,65 +314,37 @@ impl TabViewer for MyTabViewer {
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         let cmd = ui.command_pressed();
+
+        tab.undoer
+            .feed_state(ui.ctx().input(|input| input.time), &tab.current_path);
         if ui.key_with_command_pressed(egui::Key::F) {
-            tab.search.visible = !tab.search.visible;
+            tab.toggle_search(ui.ctx());
         }
         if ui.key_with_command_pressed(egui::Key::H) {
             tab.settings.show_hidden = !tab.settings.show_hidden;
-            tab.refresh_list();
+            tab.action_to_perform = Some(ActionToPerform::ViewSettingsChanged(
+                super::DataSource::Local,
+            ));
         }
         if ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
             let Some(parent) = tab.current_path.parent() else {
                 return;
             };
-            tab.action_to_perform = Some(ActionToPerform::ChangePath(parent));
+            tab.action_to_perform = Some(ActionToPerform::ChangePaths(parent.into()));
             return;
         }
-        let mut require_refresh = false; //  replace it with flow using https://docs.rs/notify/latest/notify/
-
-        let favorites_paths: Vec<Cow<'static, str>> = ui
-            .data(|d| d.get_temp("FavoritesPaths".into()))
-            .unwrap_or_default();
+        let favorites = ui.data_get_persisted::<Locations>().unwrap_or_default();
 
         let tab_paths = ui
             .data::<Option<TabPaths>>(|data| data.get_temp("TabPaths".into()))
             .unwrap_or_default();
-        if tab.search.visible {
-            ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
-                let search_input =
-                    ui.add(egui::TextEdit::singleline(&mut tab.search.value).hint_text("Search"));
-                require_refresh |= search_input.changed();
-                ui.memory_mut(|memory| {
-                    memory.request_focus(search_input.id);
-                });
-                require_refresh |= ui
-                    .add(egui::Slider::new(&mut tab.search.depth, 1..=7))
-                    .on_hover_text("Search depth")
-                    .changed();
-                require_refresh |= ui
-                    .toggle_value(&mut tab.search.case_sensitive, "🇨")
-                    .on_hover_text("Case sensitive")
-                    .changed();
-                let mut was_favorites = tab.current_path.multiple_paths();
-                let favorites_changed = ui
-                    .toggle_value(&mut was_favorites, "💕")
-                    .on_hover_text("Search favorites")
-                    .changed();
-                if favorites_changed {
-                    tab.action_to_perform = Some(ActionToPerform::SearchInFavorites(was_favorites));
-                    return;
-                }
-
-                require_refresh |= favorites_changed;
-            });
-            ui.add_space(crate::consts::TOP_SIDE_MARGIN);
-        }
         let is_searching = tab.is_searching();
         let multiple_dirs = tab.current_path.multiple_paths();
-        let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 2.0;
+        let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 1.5;
         let table = TableBuilder::new(ui)
             .striped(true)
             .vscroll(false)
+            .id_salt(tab.id)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::remainder().at_least(260.0))
             .resizable(false);
@@ -333,21 +352,8 @@ impl TabViewer for MyTabViewer {
         table.body(|body| {
             body.rows(text_height, tab.list.len(), |mut row| {
                 let val = &tab.list[row.index()];
-                // let Ok(meta) = val.metadata() else {
-                //     return;
-                // };
                 let indexed = if cmd { row.index() + 1 } else { 11 };
                 row.col(|ui| {
-                    ui.add_space(VERTICAL_SPACING);
-                    // ui.allocate_space(egui::vec2(available_width, 20.0));
-                    // let file_type = meta.file_type();
-                    // #[cfg(target_os = "windows")]
-                    // let is_dir = {
-                    //     use std::os::windows::fs::FileTypeExt;
-                    //     file_type.is_dir() || file_type.is_symlink_dir()
-                    // };
-                    // #[cfg(not(target_os = "windows"))]
-                    // let is_dir = file_type.is_dir();
                     let is_dir = val.entry_type == EntryType::Directory;
                     let (dir, file) = val.get_splitted_path();
                     let mut s = LayoutJob::default();
@@ -366,36 +372,32 @@ impl TabViewer for MyTabViewer {
                         s.append(&format!("[{indexed}] "), 0.0, TextFormat::default());
                     }
                     s.append(file, 0.0, file_format);
-                    if is_searching || multiple_dirs {
-                        s.append(
-                            dir,
-                            10.0,
+
+                    let size_text = if is_searching || multiple_dirs {
+                        dir.to_string()
+                    } else if !is_dir {
+                        crate::helper::format_bytes_simple(val.size)
+                    } else {
+                        String::new()
+                    };
+                    let button = egui::Button::new(s)
+                        .fill(egui::Color32::from_white_alpha(0))
+                        .right_text(LayoutJob::simple_format(
+                            size_text,
                             TextFormat {
                                 color: Color32::DARK_GRAY,
                                 ..Default::default()
                             },
-                        );
-                    }
-                    if !is_dir {
-                        let size_text = crate::helper::format_bytes_simple(val.size);
-                        s.append(
-                            &size_text,
-                            10.0,
-                            TextFormat {
-                                color: Color32::DARK_GRAY,
-                                ..Default::default()
-                            },
-                        );
-                    }
-                    let added_button =
-                        ui.add(egui::Button::new(s).fill(egui::Color32::from_white_alpha(0)));
+                        ));
+                    let added_button = ui.add_sized(ui.available_size(), button);
 
                     if added_button.clicked()
                         || convert_nr_to_egui_key(indexed)
                             .is_some_and(|k| ui.key_with_command_pressed(k))
                     {
                         if val.entry_type == EntryType::File {
-                            let _ = open::that_detached(val.get_path());
+                            tab.action_to_perform =
+                                Some(ActionToPerform::SystemOpen(val.path.clone()));
                         } else {
                             let Ok(path) = std::fs::canonicalize(val.get_path()) else {
                                 return;
@@ -403,62 +405,23 @@ impl TabViewer for MyTabViewer {
                             let action = if ui.shift_pressed() {
                                 ActionToPerform::NewTab(path)
                             } else {
-                                ActionToPerform::ChangePath(path)
+                                ActionToPerform::ChangePaths(path.into())
                             };
                             tab.action_to_perform = action.into();
                         }
                     }
                     added_button.context_menu(|ui| {
-                        if is_dir {
+                        let options = build_for_path(&tab.current_path, val.get_path(), &favorites);
+                        for option in options {
+                            if ui.button(option.name.as_str()).clicked() {
+                                tab.action_to_perform = option.action.into();
+                                ui.close();
+                            }
+                        }
+                        if !is_dir {
                             if ui.button("Open").clicked() {
-                                tab.action_to_perform = ActionToPerform::ChangePath(
-                                    PathBuf::from_str(&val.path).expect("msg"),
-                                )
-                                .into();
-                                ui.close();
-                                return;
-                            }
-                            if ui.button("Open in new tab").clicked() {
-                                tab.action_to_perform = ActionToPerform::NewTab(
-                                    PathBuf::from_str(&val.path).expect("msg"),
-                                )
-                                .into();
-                                ui.close();
-                                return;
-                            }
-                            #[cfg(windows)]
-                            let open_name = "Open in Explorer";
-                            #[cfg(target_os = "macos")]
-                            let open_name = "Open in Finder";
-                            #[cfg(target_os = "linux")]
-                            let open_name = "Open in File Manager";
-
-                            if ui.button(open_name).clicked() {
-                                open::that_detached(val.get_path())
-                                    .expect("Failed to open directory in file manager");
-                                ui.close();
-                                return;
-                            }
-
-                            let exist_in_favorites =
-                                favorites_paths.iter().any(|f| f.eq(&val.path));
-
-                            if !exist_in_favorites && ui.button("Add to favorites").clicked() {
                                 tab.action_to_perform =
-                                    Some(ActionToPerform::AddToFavorites(val.path.clone()));
-
-                                ui.close();
-                                return;
-                            }
-
-                            if exist_in_favorites && ui.button("Remove from favorites").clicked() {
-                                tab.action_to_perform =
-                                    Some(ActionToPerform::RemoveFromFavorites(val.path.clone()));
-                                ui.close();
-                            }
-                        } else {
-                            if ui.button("Open").clicked() {
-                                let _ = open::that_detached(val.get_path());
+                                    Some(ActionToPerform::SystemOpen(val.path.clone()));
                                 ui.close();
                                 return;
                             }
@@ -470,19 +433,17 @@ impl TabViewer for MyTabViewer {
                                     });
                                 ui.close();
                             }
+                            let val_dir = PathBuf::from(val.get_splitted_path().0);
+                            let matching_dirs = tab_paths.iter().filter(|s| !val_dir.eq(*s));
                             #[allow(clippy::collapsible_else_if)]
-                            if tab_paths.len() > 1 {
+                            if matching_dirs.clone().count() > 0 {
                                 ui.separator();
                                 ui.menu_button("Move to", |ui| {
-                                    for other in &tab_paths {
-                                        if other == val.get_path() {
-                                            continue;
-                                        }
+                                    for other in matching_dirs {
                                         let other = PathBuf::from(
                                             std::fs::canonicalize(other)
                                                 .unwrap_or_else(|_| val.get_path().to_path_buf())
-                                                .to_string_lossy()
-                                                .replace("\\\\?\\", ""),
+                                                .to_fixed_string(),
                                         );
 
                                         if ui
@@ -523,7 +484,6 @@ impl TabViewer for MyTabViewer {
                                                     filename.to_string_lossy()
                                                 );
                                             }
-                                            require_refresh = true;
                                             ui.close();
                                         }
                                     }
@@ -536,7 +496,7 @@ impl TabViewer for MyTabViewer {
                                 toast!(Error, "Could not move it to trash.");
                             });
                             ui.close();
-                            require_refresh = true;
+                            tab.action_to_perform = Some(ActionToPerform::RequestFilesRefresh);
                         }
                         if ui.button("Copy path to clipboard").clicked() {
                             let Ok(mut clipboard) = arboard::Clipboard::new() else {
@@ -585,9 +545,6 @@ impl TabViewer for MyTabViewer {
                 });
             });
         });
-        if require_refresh {
-            tab.refresh_list();
-        }
     }
 }
 
@@ -599,16 +556,18 @@ pub struct MyTabs {
 
 impl MyTabs {
     pub fn get_current_path(&mut self) -> Option<PathBuf> {
-        let Some(active_tab) = self.get_current_tab() else {
-            return None;
-        };
+        let active_tab = self.get_current_tab()?;
         active_tab.current_path.single_path()
     }
-    pub fn new(path: &PathBuf) -> Self {
+    pub fn new(path: &Path) -> Self {
         // Create a `DockState` with an initial tab "tab1" in the main `Surface`'s root node.
         let tabs = vec![TabData::from_path(path)];
         let dock_state = DockState::new(tabs);
         Self { dock_state }
+    }
+
+    pub fn get_current_index(&mut self) -> Option<u32> {
+        self.get_current_tab().map(|tab| tab.id)
     }
 
     pub fn get_current_tab(&mut self) -> Option<&mut TabData> {
@@ -626,11 +585,9 @@ impl MyTabs {
         Some(active_tab)
     }
 
-    pub fn update_active_tab(&mut self, path: impl Into<CurrentPath>) {
-        let Some(active_tab) = self.get_current_tab() else {
-            return;
-        };
-        active_tab.set_path(path.into());
+    pub fn update_active_tab(&mut self, path: impl Into<CurrentPath>) -> Option<&CurrentPath> {
+        let active_tab = self.get_current_tab()?;
+        Some(active_tab.set_path(path.into()))
     }
 
     pub fn ui(&mut self, ui: &mut Ui) -> Option<ActionToPerform> {
@@ -652,7 +609,7 @@ impl MyTabs {
         }
     }
 
-    pub fn open_in_new_tab(&mut self, path: &PathBuf) {
+    pub fn open_in_new_tab(&mut self, path: &Path) {
         let is_not_focused = self.dock_state.focused_leaf().is_none();
         if is_not_focused {
             self.dock_state
@@ -669,13 +626,6 @@ impl MyTabs {
         } else {
             self.dock_state.push_to_focused_leaf(new_window);
         }
-    }
-
-    pub(crate) fn refresh_list(&mut self) {
-        let Some(active_tab) = self.get_current_tab() else {
-            return;
-        };
-        active_tab.refresh_list();
     }
 
     fn get_tabs_paths(&self) -> Vec<PathBuf> {

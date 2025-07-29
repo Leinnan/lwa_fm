@@ -1,14 +1,161 @@
 #![allow(clippy::cast_possible_wrap)]
+use std::any::Any;
+use std::hash::Hash;
 use std::io;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-use egui::{Context, InputState, Ui};
+use egui::util::id_type_map::{SerializableAny, TypeId};
+use egui::{Context, Id, InputState, Ui};
+
+use crate::app::dock::CurrentPath;
+
+pub trait DataHolder {
+    fn data_get_tab<T: 'static + Clone + Default + Any + Send + Sync>(
+        &self,
+        index: u32,
+    ) -> Option<T>;
+    fn data_has_tab<T: 'static + Clone + Default + Any + Send + Sync>(&self, index: u32) -> bool {
+        self.data_get_tab::<T>(index).is_some()
+    }
+    fn data_set_tab<T: 'static + Clone + Default + Any + Send + Sync>(&self, index: u32, value: T);
+    fn data_remove_tab<T: 'static + Clone + Default + Any + Send + Sync>(&self, index: u32);
+    fn data_get_persisted<T: 'static + Clone + Default + Any + Send + Sync + SerializableAny>(
+        &self,
+    ) -> Option<T>;
+    fn data_set_persisted<T: 'static + Clone + Default + Any + Send + Sync + SerializableAny>(
+        &self,
+        value: T,
+    );
+    fn data_get_path<T: 'static + Clone + Default + Any + SerializableAny + Send + Sync>(
+        &self,
+        path: &CurrentPath,
+    ) -> Option<T>;
+    fn data_set_path<T: 'static + Clone + Default + Any + SerializableAny + Send + Sync>(
+        &self,
+        path: &CurrentPath,
+        value: T,
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TabData {
+    pub type_id: TypeId,
+    pub index: u32,
+}
+
+impl TabData {
+    pub fn id<T: 'static + Clone + Default + Any + Send + Sync>(index: u32) -> Id {
+        Id::new(Self {
+            type_id: TypeId::of::<T>(),
+            index,
+        })
+    }
+}
+
+fn path_hash<T: 'static>(path: &CurrentPath) -> Id {
+    Id::new(path).with(TypeId::of::<T>())
+}
+
+impl DataHolder for Context {
+    fn data_get_tab<T: 'static + Clone + Default + Any + Send + Sync>(
+        &self,
+        index: u32,
+    ) -> Option<T> {
+        self.data(|data| data.get_temp::<T>(TabData::id::<T>(index)))
+    }
+
+    fn data_set_tab<T: 'static + Clone + Default + Any + Send + Sync>(&self, index: u32, value: T) {
+        self.data_mut(|data| {
+            data.insert_temp::<T>(TabData::id::<T>(index), value);
+        });
+    }
+
+    fn data_remove_tab<T: 'static + Clone + Default + Any + Send + Sync>(&self, index: u32) {
+        self.data_mut(|data| data.remove::<T>(TabData::id::<T>(index)));
+    }
+
+    fn data_get_persisted<T: 'static + Clone + Default + Any + Send + Sync + SerializableAny>(
+        &self,
+    ) -> Option<T> {
+        self.data_mut(|data| data.get_persisted::<T>(Id::new(TypeId::of::<T>())))
+    }
+
+    fn data_set_persisted<T: 'static + Clone + Default + Any + Send + Sync + SerializableAny>(
+        &self,
+        value: T,
+    ) {
+        self.data_mut(|data| data.insert_persisted(Id::new(TypeId::of::<T>()), value));
+    }
+
+    fn data_get_path<T: 'static + Clone + Default + Any + SerializableAny + Send + Sync>(
+        &self,
+        path: &CurrentPath,
+    ) -> Option<T> {
+        self.data_mut(|data| data.get_persisted::<T>(path_hash::<T>(path)))
+    }
+
+    fn data_set_path<T: Clone + Default + Any + SerializableAny + Send + Sync>(
+        &self,
+        path: &CurrentPath,
+        value: T,
+    ) {
+        self.data_mut(|data| data.insert_persisted::<T>(path_hash::<T>(path), value));
+    }
+}
+impl DataHolder for Ui {
+    fn data_get_tab<T: Clone + Default + Any + Send + Sync>(&self, index: u32) -> Option<T> {
+        self.data(|data| data.get_temp::<T>(TabData::id::<T>(index)))
+    }
+
+    fn data_set_tab<T: Clone + Default + Any + Send + Sync>(&self, index: u32, value: T) {
+        self.data_mut(|data| {
+            data.insert_temp::<T>(TabData::id::<T>(index), value);
+        });
+    }
+
+    fn data_remove_tab<T: Clone + Default + Any + Send + Sync>(&self, index: u32) {
+        self.data_mut(|data| data.remove::<T>(TabData::id::<T>(index)));
+    }
+
+    fn data_get_persisted<T: Clone + Default + Any + Send + Sync + SerializableAny>(
+        &self,
+    ) -> Option<T> {
+        self.data_mut(|data| data.get_persisted::<T>(Id::new(TypeId::of::<T>())))
+    }
+    fn data_set_persisted<T: Clone + Default + Any + Send + Sync + SerializableAny>(
+        &self,
+        value: T,
+    ) {
+        self.data_mut(|data| data.insert_persisted(Id::new(TypeId::of::<T>()), value));
+    }
+
+    fn data_get_path<T: 'static + Clone + Default + Any + SerializableAny + Send + Sync>(
+        &self,
+        path: &CurrentPath,
+    ) -> Option<T> {
+        self.data_mut(|data| data.get_persisted::<T>(path_hash::<T>(path)))
+    }
+
+    fn data_set_path<T: Clone + Default + Any + SerializableAny + Send + Sync>(
+        &self,
+        path: &CurrentPath,
+        value: T,
+    ) {
+        self.data_mut(|data| data.insert_persisted::<T>(path_hash::<T>(path), value));
+    }
+}
 
 pub trait PathFixer {
     fn to_fixed_string(&self) -> String;
 }
 
 impl PathFixer for std::path::PathBuf {
+    fn to_fixed_string(&self) -> String {
+        self.display().to_string().replace("\\\\?\\", "")
+    }
+}
+impl PathFixer for Path {
     fn to_fixed_string(&self) -> String {
         self.display().to_string().replace("\\\\?\\", "")
     }

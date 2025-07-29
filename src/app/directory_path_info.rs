@@ -1,22 +1,18 @@
 use super::dir_handling::get_directories;
-use crate::{app::dock::CurrentPath, helper::PathFixer};
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet, path::Path};
 
 #[derive(Debug, Clone, Default)]
 pub struct DirectoryPathInfo {
-    pub editable: bool,
-    pub top_edit: String,
-    pub possible_options: BTreeSet<String>,
+    pub text_input: String,
+    pub possible_options: BTreeSet<Cow<'static, str>>,
 }
 
 impl DirectoryPathInfo {
-    pub fn rebuild(&mut self, path: &CurrentPath, show_hidden: bool) {
-        if let CurrentPath::One(path_buf) = path {
-            self.top_edit = path_buf.to_fixed_string();
-            self.possible_options = get_directories(path_buf, show_hidden);
-        } else {
-            self.top_edit = String::new();
-            self.possible_options = BTreeSet::new();
+    pub fn build(path: &Path, show_hidden: bool) -> Self {
+        let possible_options = get_directories(path, show_hidden);
+        Self {
+            text_input: path.to_string_lossy().to_string(),
+            possible_options,
         }
     }
 }

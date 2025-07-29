@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -13,16 +14,12 @@ use crate::{
 use super::{dock::TabData, Sort};
 
 impl TabData {
-    pub fn set_path(&mut self, path: impl Into<CurrentPath>) {
+    pub fn set_path(&mut self, path: impl Into<CurrentPath>) -> &CurrentPath {
         let path = path.into();
-        self.path_info.rebuild(&path, self.settings.show_hidden);
         self.current_path = path;
-        if self.is_searching() {
-            self.search.value = String::new();
-            self.search.visible = false;
-        }
         self.start_watching_directory();
         self.refresh_list();
+        &self.current_path
     }
 
     /// Start watching the current directory for changes
@@ -103,9 +100,17 @@ impl TabData {
     }
 
     fn read_dir(&self) -> Vec<super::dock::DirEntry> {
-        let search = self.search.value.as_str();
+        let case_sensitive = self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.case_sensitive);
+        let search = self
+            .search
+            .as_ref()
+            .map(|search| search.value.as_str())
+            .unwrap_or_default();
         let search_len = search.len();
-        let collator = build_collator(self.search.case_sensitive);
+        let collator = build_collator(case_sensitive);
         let use_search = self.is_searching();
         // let locations = self.locations.borrow();
         let directories: &[PathBuf] = match &self.current_path {
@@ -114,7 +119,11 @@ impl TabData {
             CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
         };
 
-        let depth = if use_search { self.search.depth } else { 1 };
+        let depth = if use_search {
+            self.search.as_ref().map_or(1, |search| search.depth)
+        } else {
+            1
+        };
         let mut dir_entries: Vec<super::dock::DirEntry> = directories
             .iter()
             .flat_map(|d| {
@@ -174,7 +183,7 @@ impl TabData {
                 Sort::Modified => a.modified_at.cmp(&b.modified_at),
                 Sort::Created => a.created_at.cmp(&b.created_at),
                 Sort::Size => a.size.cmp(&b.size),
-                _ => {
+                Sort::Random => {
                     let name_a = a.get_path().as_os_str().to_ascii_lowercase();
                     let name_b = b.get_path().as_os_str().to_ascii_lowercase();
                     name_a.cmp(&name_b)
@@ -189,11 +198,15 @@ impl TabData {
     }
 }
 
-pub fn get_directories(path: &Path, show_hidden: bool) -> BTreeSet<String> {
+pub fn get_directories(path: &Path, show_hidden: bool) -> BTreeSet<Cow<'static, str>> {
     get_directories_recursive(path, show_hidden, 2)
 }
 
-pub fn get_directories_recursive(path: &Path, show_hidden: bool, depth: usize) -> BTreeSet<String> {
+pub fn get_directories_recursive(
+    path: &Path,
+    show_hidden: bool,
+    depth: usize,
+) -> BTreeSet<Cow<'static, str>> {
     let directories = walkdir::WalkDir::new(path)
         .max_depth(depth)
         .into_iter()
@@ -223,7 +236,7 @@ pub fn get_directories_recursive(path: &Path, show_hidden: bool, depth: usize) -
             }
             true
         })
-        .map(|e| format!("{}", e.path().display()))
+        .map(|e| format!("{}", e.path().display()).into())
         .collect::<BTreeSet<_>>();
     directories
 }
