@@ -7,7 +7,7 @@ use std::{
 
 use icu::collator::CollatorBorrowed;
 use rayon::{
-    iter::{IntoParallelRefIterator, ParallelBridge, ParallelIterator},
+    iter::{ParallelBridge, ParallelExtend, ParallelIterator},
     slice::ParallelSliceMut,
 };
 
@@ -108,14 +108,14 @@ impl TabData {
     }
 
     pub fn refresh_list(&mut self) {
-        self.list = if self.is_searching() {
-            self.read_dir_filter()
+        if self.is_searching() {
+            self.read_dir_filter();
         } else {
-            self.read_dir()
+            self.read_dir();
         };
     }
 
-    fn read_dir_filter(&self) -> Vec<super::dock::DirEntry> {
+    fn read_dir_filter(&mut self) {
         let case_sensitive = self
             .search
             .as_ref()
@@ -134,7 +134,7 @@ impl TabData {
         };
 
         let depth = self.search.as_ref().map_or(1, |search| search.depth);
-        directories
+        self.list = directories
             .iter()
             .flat_map(|d| {
                 walkdir::WalkDir::new(d)
@@ -168,76 +168,43 @@ impl TabData {
                     })
                     .collect::<Vec<super::dock::DirEntry>>()
             })
-            .collect()
+            .collect();
     }
 
-    fn read_dir(&self) -> Vec<super::dock::DirEntry> {
+    fn read_dir(&mut self) {
         let directories: &[PathBuf] = match &self.current_path {
             CurrentPath::None => &[],
             CurrentPath::One(path_buf) => std::slice::from_ref(path_buf),
             CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
         };
-        // let function = if self.show_hidden {
-        //     |e: walkdir::DirEntry| {
-        //         let result: Option<super::dock::DirEntry> = e.try_into().ok();
-        //         result
-        //     }
-        // } else {
-        //     |e: walkdir::DirEntry| {
-        //         let s = e.file_name().as_encoded_bytes()[0];
-        //         if s.eq(&b'.') || s.eq(&b'$') {
-        //             return None;
-        //         }
-        //         let result: Option<super::dock::DirEntry> = e.try_into().ok();
-        //         result
-        //     }
-        // };
-        let function2 = if self.show_hidden {
-            |d: &PathBuf| {
+
+        self.list.clear();
+
+        if self.show_hidden {
+            for d in directories {
                 let Ok(paths) = std::fs::read_dir(d) else {
-                    return Vec::new();
+                    continue;
                 };
-                paths
-                    .par_bridge()
-                    .filter_map(|e| {
-                        let e = e.ok()?;
-                        e.try_into().ok()
-                    })
-                    .collect::<Vec<super::dock::DirEntry>>()
+                self.list.par_extend(paths.par_bridge().filter_map(|e| {
+                    let e = e.ok()?;
+                    e.try_into().ok()
+                }));
             }
         } else {
-            |d: &PathBuf| {
+            for d in directories {
                 let Ok(paths) = std::fs::read_dir(d) else {
-                    return Vec::new();
+                    continue;
                 };
-                paths
-                    .par_bridge()
-                    .filter_map(|e| {
-                        let e = e.ok()?;
-                        let s = e.file_name().as_encoded_bytes()[0];
-                        if s.eq(&b'.') || s.eq(&b'$') {
-                            return None;
-                        }
-                        e.try_into().ok()
-                    })
-                    .collect::<Vec<super::dock::DirEntry>>()
+                self.list.par_extend(paths.par_bridge().filter_map(|e| {
+                    let e = e.ok()?;
+                    let s = e.file_name().as_encoded_bytes()[0];
+                    if s.eq(&b'.') || s.eq(&b'$') {
+                        return None;
+                    }
+                    e.try_into().ok()
+                }));
             }
-        };
-        directories
-            .par_iter()
-            .flat_map(function2)
-            // .flat_map(|d| {
-            //     walkdir::WalkDir::new(d)
-            //         .follow_links(true)
-            //         .max_depth(1)
-            //         .into_iter()
-            //         .flatten()
-            //         .skip(1)
-            //         .par_bridge()
-            //         .filter_map(function)
-            //         .collect::<Vec<super::dock::DirEntry>>()
-            // })
-            .collect()
+        }
     }
 
     pub fn sort_entries(&mut self, sort_settings: &DirectoryViewSettings) {
