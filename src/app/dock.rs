@@ -51,9 +51,9 @@ impl From<SystemTime> for TimestampSeconds {
         // Unix timestamp in seconds (valid until year 2262)
         let timestamp_seconds: u64 = value
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
-        TimestampSeconds(timestamp_seconds)
+        Self(timestamp_seconds)
     }
 }
 
@@ -163,7 +163,7 @@ impl DirEntry {
         Path::new(self.path.as_str())
     }
 
-    #[inline(always)]
+    #[inline]
     pub const fn is_file(&self) -> bool {
         matches!(self.entry_type, EntryType::File)
     }
@@ -701,7 +701,7 @@ impl MyTabs {
             .show_inside(ui, &mut MyTabViewer);
         if let Some(active_tab) = self.get_current_tab() {
             if active_tab.action_to_perform.is_some() {
-                action = active_tab.action_to_perform.clone();
+                action.clone_from(&active_tab.action_to_perform);
             }
         }
         action

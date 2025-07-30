@@ -358,7 +358,7 @@ impl eframe::App for App {
         }
         if let Some(current_tab) = self.tabs.get_current_tab() {
             if command_request.is_none() && current_tab.action_to_perform.is_some() {
-                command_request = current_tab.action_to_perform.clone();
+                command_request.clone_from(&current_tab.action_to_perform);
             }
         }
         if let Some(current_path) = self.tabs.get_current_path() {
