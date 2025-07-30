@@ -9,7 +9,9 @@ use egui::util::id_type_map::{SerializableAny, TypeId};
 use egui::{Context, Id, InputState, Ui};
 
 use crate::app::dock::CurrentPath;
+use crate::app::Data;
 
+#[allow(dead_code)]
 pub trait DataHolder {
     fn data_get_tab<T: 'static + Clone + Default + Any + Send + Sync>(
         &self,
@@ -36,6 +38,13 @@ pub trait DataHolder {
         path: &CurrentPath,
         value: T,
     );
+
+    fn data_get_path_or_persisted<
+        T: 'static + Clone + Default + Any + SerializableAny + Send + Sync,
+    >(
+        &self,
+        path: &CurrentPath,
+    ) -> Data<T>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -102,6 +111,23 @@ impl DataHolder for Context {
     ) {
         self.data_mut(|data| data.insert_persisted::<T>(path_hash::<T>(path), value));
     }
+
+    fn data_get_path_or_persisted<
+        T: 'static + Clone + Default + Any + SerializableAny + Send + Sync,
+    >(
+        &self,
+        path: &CurrentPath,
+    ) -> Data<T> {
+        self.data_mut(|data| {
+            if let Some(data) = data.get_persisted::<T>(path_hash::<T>(path)) {
+                return Data::from_local(data);
+            }
+            if let Some(data) = data.get_persisted::<T>(Id::new(TypeId::of::<T>())) {
+                return Data::from_settings(data);
+            }
+            Data::default()
+        })
+    }
 }
 impl DataHolder for Ui {
     fn data_get_tab<T: Clone + Default + Any + Send + Sync>(&self, index: u32) -> Option<T> {
@@ -143,6 +169,23 @@ impl DataHolder for Ui {
         value: T,
     ) {
         self.data_mut(|data| data.insert_persisted::<T>(path_hash::<T>(path), value));
+    }
+
+    fn data_get_path_or_persisted<
+        T: 'static + Clone + Default + Any + SerializableAny + Send + Sync,
+    >(
+        &self,
+        path: &CurrentPath,
+    ) -> Data<T> {
+        self.data_mut(|data| {
+            if let Some(data) = data.get_persisted::<T>(path_hash::<T>(path)) {
+                return Data::from_local(data);
+            }
+            if let Some(data) = data.get_persisted::<T>(Id::new(TypeId::of::<T>())) {
+                return Data::from_settings(data);
+            }
+            Data::default()
+        })
     }
 }
 

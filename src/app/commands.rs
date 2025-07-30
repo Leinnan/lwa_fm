@@ -31,7 +31,8 @@ pub enum ActionToPerform {
 
     /// Request a refresh of the currently displayed files.
     RequestFilesRefresh,
-
+    /// Request a sort of the currently displayed files.
+    FilesSort,
     /// Toggles the modal window.
     ToggleModalWindow(ModalWindow),
     /// Closes the active modal window.
@@ -76,6 +77,7 @@ impl From<&ActionToPerform> for Cow<'static, str> {
                 }
             }
             ActionToPerform::FilterChanged => Cow::Borrowed("Filter changed"),
+            ActionToPerform::FilesSort => Cow::Borrowed("Sort files"),
             ActionToPerform::ViewSettingsChanged(data_source) => {
                 if data_source == &DataSource::Local {
                     Cow::Borrowed("Local view settings changed")

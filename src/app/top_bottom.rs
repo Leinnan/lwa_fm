@@ -5,7 +5,11 @@ use std::{
 
 use super::{ActionToPerform, App, Sort};
 use crate::{
-    app::{dir_handling::get_directories_recursive, directory_path_info::DirectoryPathInfo},
+    app::{
+        dir_handling::get_directories_recursive,
+        directory_path_info::DirectoryPathInfo,
+        directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
+    },
     consts::{GIT_HASH_INFO, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
     helper::DataHolder,
     locations::Locations,
@@ -373,7 +377,7 @@ impl App {
     }
 
     pub(crate) fn bottom_panel(&mut self, ctx: &Context) -> Option<ActionToPerform> {
-        let mut search_changed = false;
+        let mut sort_changed = false;
         let mut action = None;
         egui::TopBottomPanel::bottom("bottomPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
@@ -401,66 +405,62 @@ impl App {
                         {
                             ui.ctx().open_url(OpenUrl::new_tab(HOMEPAGE));
                         }
-                        // egui::widgets::global_theme_preference_switch(ui);
+                        egui::widgets::global_theme_preference_switch(ui);
                         let Some(active_tab) = self.tabs.get_current_tab() else {
                             return;
                         };
-                        let old_value = active_tab.settings.sorting;
+                        let mut settings: DirectoryViewSettings =
+                            ui.data_get_path_or_persisted(&active_tab.current_path).data;
+                        let old_value = settings.sorting;
+                        let mut display_hidden_changed: bool = false;
 
                         egui::ComboBox::from_label("")
-                            .selected_text(format!("↕ {:?}", active_tab.settings.sorting))
+                            .selected_text(format!("↕ {:?}", settings.sorting))
                             .show_ui(ui, |ui| {
                                 ui.label("Sort by");
                                 ui.separator();
+                                ui.selectable_value(&mut settings.sorting, Sort::Name, "Name");
                                 ui.selectable_value(
-                                    &mut active_tab.settings.sorting,
-                                    Sort::Name,
-                                    "Name",
-                                );
-                                ui.selectable_value(
-                                    &mut active_tab.settings.sorting,
+                                    &mut settings.sorting,
                                     Sort::Created,
                                     "Created",
                                 );
                                 ui.selectable_value(
-                                    &mut active_tab.settings.sorting,
+                                    &mut settings.sorting,
                                     Sort::Modified,
                                     "Modified",
                                 );
-                                ui.selectable_value(
-                                    &mut active_tab.settings.sorting,
-                                    Sort::Size,
-                                    "Size",
-                                );
-                                ui.selectable_value(
-                                    &mut active_tab.settings.sorting,
-                                    Sort::Random,
-                                    "Random",
-                                );
+                                ui.selectable_value(&mut settings.sorting, Sort::Size, "Size");
+                                ui.selectable_value(&mut settings.sorting, Sort::Random, "Random");
                                 ui.separator();
 
-                                search_changed |= ui
-                                    .toggle_value(
-                                        &mut active_tab.settings.invert_sort,
-                                        "Inverted Sorting",
-                                    )
+                                sort_changed |= ui
+                                    .toggle_value(&mut settings.invert_sort, "Inverted Sorting")
                                     .changed();
-
-                                search_changed |= ui
-                                    .toggle_value(
-                                        &mut active_tab.settings.show_hidden,
-                                        "Display hidden files",
+                                let mut show_hidden = ui
+                                    .data_get_path_or_persisted::<DirectoryShowHidden>(
+                                        &active_tab.current_path,
                                     )
+                                    .data;
+                                display_hidden_changed = ui
+                                    .toggle_value(&mut show_hidden.0, "Display hidden files")
                                     .changed();
+                                sort_changed |= display_hidden_changed;
+                                if display_hidden_changed {
+                                    action = Some(ActionToPerform::RequestFilesRefresh);
+                                    ui.data_set_path(&active_tab.current_path, show_hidden);
+                                }
                             });
-                        search_changed |= old_value != active_tab.settings.sorting;
+                        sort_changed |= old_value != settings.sorting;
+                        if !display_hidden_changed && sort_changed {
+                            ui.data_set_path(&active_tab.current_path, settings);
+                        }
                         ui.spacing_mut().item_spacing = spacing;
                     });
                 });
             });
 
-        if action.is_none() && search_changed {
-            dbg!(search_changed);
+        if action.is_none() && sort_changed {
             action = Some(ActionToPerform::ViewSettingsChanged(
                 crate::app::DataSource::Local,
             ));

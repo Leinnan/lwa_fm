@@ -1,4 +1,5 @@
 use crate::app::directory_path_info::DirectoryPathInfo;
+use crate::app::directory_view_settings::DirectoryViewSettings;
 use crate::app::dock::CurrentPath;
 use crate::helper::{DataHolder, KeyWithCommandPressed};
 use crate::locations::Locations;
@@ -84,9 +85,10 @@ pub struct Search {
 
 #[derive(Deserialize, Serialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DataSource {
-    #[default]
     Settings,
     Local,
+    #[default]
+    Generated,
 }
 
 #[derive(Deserialize, Serialize, Default, Debug, Clone)]
@@ -95,21 +97,36 @@ pub struct Data<T> {
     pub source: DataSource,
 }
 
+#[allow(dead_code)]
 impl<T> Data<T> {
+    /// Returns true if the data is from the local source.
+    pub const fn is_local(&self) -> bool {
+        matches!(self.source, DataSource::Local)
+    }
+    /// Returns true if the data is from the global source.
+    pub const fn is_global(&self) -> bool {
+        matches!(self.source, DataSource::Settings)
+    }
+    /// Creates a new data instance with the local source.
     pub const fn from_local(data: T) -> Self {
         Self {
             data,
             source: DataSource::Local,
         }
     }
+    /// Creates a new data instance with the global source.
     pub const fn from_settings(data: T) -> Self {
         Self {
             data,
             source: DataSource::Settings,
         }
     }
-    pub const fn is_local(&self) -> bool {
-        matches!(self.source, DataSource::Local)
+    /// Creates a new data instance with the generated source.
+    pub const fn generated(data: T) -> Self {
+        Self {
+            data,
+            source: DataSource::Generated,
+        }
     }
 }
 
@@ -173,20 +190,16 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn handle_action(&mut self, ctx: &egui::Context, action: ActionToPerform) {
-        let index = self.tabs.get_current_index().unwrap_or_default();
+        // let action_name = format!("{:?}", action);
+        // eprintln!("start {}", &action_name);
+        // let start_time = std::time::Instant::now();
         match action {
             ActionToPerform::ChangePaths(path) => {
-                self.tabs.update_active_tab(path);
-
                 let Some(tab) = self.tabs.get_current_tab() else {
                     return;
                 };
-                tab.settings = match ctx.data_get_path(&tab.current_path) {
-                    Some(s) => Data::from_local(s),
-                    None => Data::from_settings(self.settings.directory_view_settings.clone()),
-                };
-
-                if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(index) {
+                tab.set_path(path);
+                if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
                     let new_data = match tab.current_path.single_path() {
                         Some(p) => {
                             if Path::new(&data.text_input).eq(p.as_path()) {
@@ -198,10 +211,11 @@ impl App {
                         None => None,
                     };
                     match new_data {
-                        Some(s) => ctx.data_set_tab(index, s),
-                        None => ctx.data_remove_tab::<DirectoryPathInfo>(index),
+                        Some(s) => ctx.data_set_tab(tab.id, s),
+                        None => ctx.data_remove_tab::<DirectoryPathInfo>(tab.id),
                     }
                 }
+                self.handle_action(ctx, ActionToPerform::RequestFilesRefresh);
             }
             ActionToPerform::NewTab(path) => self.tabs.open_in_new_tab(&path),
             ActionToPerform::OpenInTerminal(path_buf) => {
@@ -222,11 +236,17 @@ impl App {
                 let Some(tab) = self.tabs.get_current_tab() else {
                     return;
                 };
-                if !tab.settings.is_local() {
-                    tab.settings =
-                        Data::from_settings(self.settings.directory_view_settings.clone());
-                }
+                tab.update_settings(ctx);
                 tab.refresh_list();
+                self.handle_action(ctx, ActionToPerform::FilesSort);
+            }
+            ActionToPerform::FilesSort | ActionToPerform::ViewSettingsChanged(_) => {
+                let Some(tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
+                let settings =
+                    ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
+                tab.sort_entries(&settings.data);
             }
             ActionToPerform::ToggleModalWindow(modal_window) => {
                 if let Some(modal) = &self.display_modal {
@@ -241,6 +261,7 @@ impl App {
             }
             ActionToPerform::ToggleTopEdit => {
                 let current_path = self.tabs.get_current_path();
+                let index = self.tabs.get_current_index().unwrap_or_default();
 
                 match ctx.data_get_tab::<DirectoryPathInfo>(index) {
                     Some(_) => ctx.data_remove_tab::<DirectoryPathInfo>(index),
@@ -297,18 +318,15 @@ impl App {
             ActionToPerform::FilterChanged => {
                 self.handle_action(ctx, ActionToPerform::RequestFilesRefresh);
             }
-            ActionToPerform::ViewSettingsChanged(data_source) => {
-                if let Some(tab) = self.tabs.get_current_tab() {
-                    if tab.settings.is_local() && data_source == DataSource::Local {
-                        ctx.data_set_path(&tab.current_path, tab.settings.clone());
-                    }
-                }
-                self.handle_action(ctx, ActionToPerform::RequestFilesRefresh);
-            }
+            // ActionToPerform::ViewSettingsChanged(_) => {
+            //     self.handle_action(ctx, ActionToPerform::FilesSort);
+            // }
             ActionToPerform::SystemOpen(cow) => {
                 let _ = open::that_detached(cow.as_str());
             }
         }
+        // let duration = start_time.elapsed();
+        // eprintln!("handle_action {} took: {:?}", action_name, duration);
     }
 }
 
@@ -337,6 +355,11 @@ impl eframe::App for App {
 
         if ctx.key_with_command_pressed(egui::Key::L) {
             command_request = Some(ActionToPerform::ToggleTopEdit);
+        }
+        if let Some(current_tab) = self.tabs.get_current_tab() {
+            if command_request.is_none() && current_tab.action_to_perform.is_some() {
+                command_request = current_tab.action_to_perform.clone();
+            }
         }
         if let Some(current_path) = self.tabs.get_current_path() {
             let favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();

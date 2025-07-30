@@ -5,23 +5,26 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
 use icu::collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu::collator::{Collator, CollatorBorrowed};
 use icu::locale::Locale;
+// use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
+use std::time::SystemTime;
 use std::{ffi::OsStr, path::PathBuf};
 
 use egui::Vec2;
 use egui_extras::{Column, TableBuilder};
 
 use crate::app::command_palette::build_for_path;
-use crate::app::{Data, Search};
+// use crate::app::dir_handling::COLLATER;
+use crate::app::directory_view_settings::DirectoryShowHidden;
+use crate::app::Search;
 use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer};
 use crate::locations::Locations;
 use crate::toast;
 use crate::watcher::DirectoryWatcher;
 
 use super::commands::ActionToPerform;
-use super::directory_view_settings::DirectoryViewSettings;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EntryType {
@@ -33,10 +36,76 @@ pub enum EntryType {
 pub struct DirEntry {
     pub path: Cow<'static, str>,
     pub entry_type: EntryType,
-    pub created_at: u128,
-    pub modified_at: u128,
+    pub created_at: TimestampSeconds,
+    pub modified_at: TimestampSeconds,
     pub size: u64,
     file_name_index: usize,
+    // pub sort_key: SmallVec<[u8; 40]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct TimestampSeconds(u64);
+
+impl From<SystemTime> for TimestampSeconds {
+    fn from(value: SystemTime) -> Self {
+        // Unix timestamp in seconds (valid until year 2262)
+        let timestamp_seconds: u64 = value
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        TimestampSeconds(timestamp_seconds)
+    }
+}
+
+impl TryFrom<std::fs::DirEntry> for DirEntry {
+    type Error = ();
+
+    fn try_from(value: std::fs::DirEntry) -> Result<Self, Self::Error> {
+        let Ok(meta) = value.metadata() else {
+            return Err(());
+        };
+        let file_type = meta.file_type();
+        #[cfg(target_os = "windows")]
+        let is_dir = {
+            use std::os::windows::fs::FileTypeExt;
+            file_type.is_dir() || file_type.is_symlink_dir()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let is_dir = file_type.is_dir();
+        let entry_type = if is_dir {
+            EntryType::Directory
+        } else {
+            EntryType::File
+        };
+        // let mut sort_key = SmallVec::<[u8; 40]>::new();
+        // let _ =
+        //     COLLATER.write_sort_key_utf8_to(value.file_name().as_encoded_bytes(), &mut sort_key);
+        let path: Cow<'static, str> = Cow::Owned(value.path().to_string_lossy().to_string());
+        let file_name_index = path.len() - value.file_name().len();
+        let created_at = meta
+            .created()
+            .map(TimestampSeconds::from)
+            .unwrap_or_default();
+        let modified_at = meta
+            .modified()
+            .map(TimestampSeconds::from)
+            .unwrap_or_default();
+        #[cfg(windows)]
+        let size = std::os::windows::fs::MetadataExt::file_size(&meta);
+        #[cfg(target_os = "linux")]
+        let size = std::os::linux::fs::MetadataExt::st_size(&meta);
+        #[cfg(target_os = "macos")]
+        let size = std::os::macos::fs::MetadataExt::st_size(&meta);
+        Ok(Self {
+            path,
+            entry_type,
+            created_at,
+            modified_at,
+            size,
+            file_name_index,
+            // sort_key,
+        })
+    }
 }
 
 impl TryFrom<walkdir::DirEntry> for DirEntry {
@@ -61,21 +130,16 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
         };
         let path: Cow<'static, str> = Cow::Owned(value.path().to_string_lossy().to_string());
         let file_name_index = path.len() - value.file_name().len();
+        // let mut sort_key = SmallVec::<[u8; 40]>::new();
+        // let _ =
+        //     COLLATER.write_sort_key_utf8_to(value.file_name().as_encoded_bytes(), &mut sort_key);
         let created_at = meta
             .created()
-            .map(|time| {
-                time.duration_since(std::time::SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            })
+            .map(TimestampSeconds::from)
             .unwrap_or_default();
         let modified_at = meta
             .modified()
-            .map(|time| {
-                time.duration_since(std::time::SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            })
+            .map(TimestampSeconds::from)
             .unwrap_or_default();
         #[cfg(windows)]
         let size = std::os::windows::fs::MetadataExt::file_size(&meta);
@@ -90,6 +154,7 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
             modified_at,
             size,
             file_name_index,
+            // sort_key,
         })
     }
 }
@@ -97,8 +162,10 @@ impl DirEntry {
     pub fn get_path(&self) -> &Path {
         Path::new(self.path.as_str())
     }
-    pub fn is_file(&self) -> bool {
-        self.entry_type == EntryType::File
+
+    #[inline(always)]
+    pub const fn is_file(&self) -> bool {
+        matches!(self.entry_type, EntryType::File)
     }
 
     pub fn get_splitted_path(&self) -> (&str, &str) {
@@ -179,10 +246,9 @@ pub struct TabData {
     pub list: Vec<DirEntry>,
     pub action_to_perform: Option<ActionToPerform>,
     pub current_path: CurrentPath,
-    pub settings: Data<DirectoryViewSettings>,
     pub can_close: bool,
+    pub show_hidden: bool,
     pub search: Option<Search>,
-    pub collator: CollatorBorrowed<'static>,
     pub watcher: Option<DirectoryWatcher>,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
@@ -217,7 +283,8 @@ impl TabData {
                 else {
                     return;
                 };
-                self.set_path(path);
+                self.action_to_perform = Some(ActionToPerform::ChangePaths(path));
+                // self.set_path(path, Some(data_source));
             }
         } else {
             self.search = Some(
@@ -261,31 +328,26 @@ impl TabData {
         }
     }
     pub fn from_path(path: &Path) -> Self {
-        // let path_info = DirectoryPathInfo::default();
-        let mut new = Self {
+        Self {
             id: get_id(),
             list: vec![],
-            collator: build_collator(false),
-            action_to_perform: None,
+            action_to_perform: Some(ActionToPerform::ChangePaths(CurrentPath::One(path.into()))),
             current_path: CurrentPath::None,
-            settings: Data {
-                data: DirectoryViewSettings::default(),
-                source: crate::app::DataSource::Local,
-            },
             can_close: true,
-            // path_info,
+            show_hidden: false,
             search: None,
             watcher: DirectoryWatcher::new().ok(),
             undoer: Undoer::default(),
-        };
-        new.set_path(CurrentPath::One(path.into()));
-        new
+        }
     }
-    pub fn update(&mut self, is_only_tab: bool) {
+    pub fn update(&mut self, is_only_tab: bool) -> Option<ActionToPerform> {
         self.can_close = !is_only_tab;
+        if self.check_for_file_system_events() {
+            self.action_to_perform = Some(ActionToPerform::RequestFilesRefresh);
+        }
+        let action = self.action_to_perform.clone();
         self.action_to_perform = None;
-        // Check for file system events
-        self.check_for_file_system_events();
+        action
     }
 }
 
@@ -332,7 +394,10 @@ impl TabViewer for MyTabViewer {
             tab.toggle_search(ui.ctx());
         }
         if ui.key_with_command_pressed(egui::Key::H) {
-            tab.settings.show_hidden = !tab.settings.show_hidden;
+            let mut show_hidden =
+                ui.data_get_path_or_persisted::<DirectoryShowHidden>(&tab.current_path);
+            show_hidden.0 = !show_hidden.0;
+            ui.data_set_path(&tab.current_path, show_hidden.data);
             tab.action_to_perform = Some(ActionToPerform::ViewSettingsChanged(
                 super::DataSource::Local,
             ));
@@ -617,18 +682,17 @@ impl MyTabs {
         Some(active_tab)
     }
 
-    pub fn update_active_tab(&mut self, path: impl Into<CurrentPath>) -> Option<&CurrentPath> {
-        let active_tab = self.get_current_tab()?;
-        Some(active_tab.set_path(path.into()))
-    }
-
     pub fn ui(&mut self, ui: &mut Ui) -> Option<ActionToPerform> {
         let tabs = self.get_tabs_paths();
         let tabs_len = self.dock_state.iter_all_tabs().count();
 
         ui.data_mut(|data| data.insert_temp("TabPaths".into(), tabs));
+        let mut action = None;
         for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
-            item.update(tabs_len == 1);
+            let item_action = item.update(tabs_len == 1);
+            if item_action.is_some() {
+                action = item_action;
+            }
         }
         DockArea::new(&mut self.dock_state)
             .show_leaf_close_all_buttons(false)
@@ -636,10 +700,11 @@ impl MyTabs {
             .style(Self::get_dock_style(ui.style().as_ref(), tabs_len))
             .show_inside(ui, &mut MyTabViewer);
         if let Some(active_tab) = self.get_current_tab() {
-            active_tab.action_to_perform.clone()
-        } else {
-            None
+            if active_tab.action_to_perform.is_some() {
+                action = active_tab.action_to_perform.clone();
+            }
         }
+        action
     }
 
     pub fn open_in_new_tab(&mut self, path: &Path) {
