@@ -227,8 +227,9 @@ impl App {
                                     let mut search_visible = is_searching;
                                     ui.toggle_value(&mut search_visible, "🔍")
                                         .on_hover_text("Search");
+                                    let mut search_changed = is_searching != search_visible;
                                     if let Some(search) = &mut current_tab.search {
-                                        let mut search_changed = ui
+                                        search_changed |= ui
                                             .toggle_value(&mut search.case_sensitive, "🇨")
                                             .on_hover_text("Case sensitive")
                                             .changed();
@@ -250,9 +251,7 @@ impl App {
                                         let favorites = ui
                                             .data_get_persisted::<Locations>()
                                             .unwrap_or_default();
-                                        if search_changed {
-                                            action = Some(ActionToPerform::FilterChanged);
-                                        } else if !favorites.locations.is_empty() {
+                                        if !favorites.locations.is_empty() {
                                             ui.toggle_value(&mut was_favorites, "💕")
                                                 .on_hover_text("Search favorites");
                                             if was_favorites
@@ -281,12 +280,15 @@ impl App {
                                     if search_visible != is_searching {
                                         current_tab.toggle_search(ui.ctx());
                                     }
+                                    if search_changed && action.is_none() {
+                                        action = Some(ActionToPerform::FilterChanged);
+                                    }
                                     ui.spacing_mut().item_spacing = spacing;
                                 })
                             });
 
                             ui.add_space(TOP_SIDE_MARGIN);
-                            if action.is_none() && !is_searching {
+                            if !is_searching {
                                 let Some(current_tab) = self.tabs.get_current_tab() else {
                                     return;
                                 };
@@ -359,7 +361,7 @@ impl App {
                                         })
                                     },
                                 );
-                                if response.response.double_clicked() {
+                                if action.is_none() && response.response.double_clicked() {
                                     action = Some(ActionToPerform::ToggleTopEdit);
                                 }
                             }

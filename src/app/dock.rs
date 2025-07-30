@@ -206,14 +206,25 @@ impl TabData {
             .map(|s| ActionToPerform::ChangePaths(s.to_owned()))
     }
     pub fn toggle_search(&mut self, data_source: &impl DataHolder) {
-        if self.search.is_none() {
-            match data_source.data_get_tab::<Search>(self.id) {
-                Some(search) => self.search = Some(search),
-                None => self.search = Some(Search::default()),
+        if let Some(search) = &self.search {
+            data_source.data_set_tab::<Search>(self.id, search.clone());
+            self.search = None;
+            if self.current_path.multiple_paths() {
+                let Some(path) = self
+                    .undoer
+                    .undo(&self.current_path)
+                    .map(std::borrow::ToOwned::to_owned)
+                else {
+                    return;
+                };
+                self.set_path(path);
             }
         } else {
-            data_source.data_set_tab::<Search>(self.id, self.search.clone().unwrap_or_default());
-            self.search = None;
+            self.search = Some(
+                data_source
+                    .data_get_tab::<Search>(self.id)
+                    .unwrap_or_default(),
+            );
         }
     }
 }
@@ -371,7 +382,28 @@ impl TabViewer for MyTabViewer {
                     if indexed < 10 {
                         s.append(&format!("[{indexed}] "), 0.0, TextFormat::default());
                     }
-                    s.append(file, 0.0, file_format);
+                    let available_width = ui.available_width() - 120.0;
+                    let text_width = ui.fonts(|f| {
+                        f.layout_job(LayoutJob::simple_format(
+                            file.to_string(),
+                            file_format.clone(),
+                        ))
+                        .size()
+                        .x
+                    });
+                    let display_file = if text_width > available_width {
+                        let chars = (((available_width - 50.0) / text_width) * (file.len() as f32))
+                            as usize;
+                        format!(
+                            "{}…",
+                            file.chars()
+                                .take(chars.saturating_sub(1))
+                                .collect::<String>()
+                        )
+                    } else {
+                        file.to_string()
+                    };
+                    s.append(&display_file, 0.0, file_format);
 
                     let size_text = if is_searching || multiple_dirs {
                         dir.to_string()
@@ -592,7 +624,8 @@ impl MyTabs {
 
     pub fn ui(&mut self, ui: &mut Ui) -> Option<ActionToPerform> {
         let tabs = self.get_tabs_paths();
-        let tabs_len = tabs.len();
+        let tabs_len = self.dock_state.iter_all_tabs().count();
+
         ui.data_mut(|data| data.insert_temp("TabPaths".into(), tabs));
         for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
             item.update(tabs_len == 1);
