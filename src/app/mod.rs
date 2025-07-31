@@ -276,7 +276,6 @@ impl App {
                 }
             }
             ActionToPerform::AddToFavorites(path) => {
-                let path_buf = PathBuf::from_str(&path).unwrap();
                 let mut favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
                 if favorites
                     .locations
