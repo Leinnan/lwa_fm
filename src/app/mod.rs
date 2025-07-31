@@ -278,6 +278,14 @@ impl App {
             ActionToPerform::AddToFavorites(path) => {
                 let path_buf = PathBuf::from_str(&path).unwrap();
                 let mut favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
+                if favorites
+                    .locations
+                    .iter()
+                    .any(|location| location.path == path)
+                {
+                    return;
+                }
+                let path_buf = PathBuf::from_str(&path).unwrap();
                 let Some(name) = path_buf.iter().next_back() else {
                     toast!(Error, "Could not get name of file");
                     return;
