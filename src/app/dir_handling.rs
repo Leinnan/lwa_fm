@@ -112,7 +112,7 @@ impl TabData {
             self.read_dir_filter();
         } else {
             self.read_dir();
-        };
+        }
     }
 
     fn read_dir_filter(&mut self) {
