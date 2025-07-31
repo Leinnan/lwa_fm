@@ -388,8 +388,10 @@ impl TabViewer for MyTabViewer {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         let cmd = ui.command_pressed();
 
-        tab.undoer
-            .feed_state(ui.ctx().input(|input| input.time), &tab.current_path);
+        if !matches!(&tab.current_path, CurrentPath::None) {
+            tab.undoer
+                .feed_state(ui.ctx().input(|input| input.time), &tab.current_path);
+        }
         if ui.key_with_command_pressed(egui::Key::F) {
             tab.toggle_search(ui.ctx());
         }
