@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])
             .with_icon(
-                eframe::icon_data::from_png_bytes(include_bytes!("../static/icon.png"))
+                eframe::icon_data::from_png_bytes(include_bytes!("../static/base_icon.png"))
                     .unwrap_or_default(),
             )
             .with_min_inner_size([300.0, 220.0]),

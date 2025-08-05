@@ -15,3 +15,8 @@ Cargo.lock
 
 .idea
 .DS_Store
+static/icon.iconset
+static/icon.icns
+static/resources
+*.pkg
+*.app

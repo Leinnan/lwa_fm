@@ -190,9 +190,9 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn handle_action(&mut self, ctx: &egui::Context, action: ActionToPerform) {
-        // let action_name = format!("{:?}", action);
-        // eprintln!("start {}", &action_name);
-        // let start_time = std::time::Instant::now();
+        let action_name = format!("{action:?}");
+        eprintln!("start {}", &action_name);
+        let start_time = std::time::Instant::now();
         match action {
             ActionToPerform::ChangePaths(path) => {
                 let Some(tab) = self.tabs.get_current_tab() else {
@@ -332,8 +332,8 @@ impl App {
                 let _ = open::that_detached(cow.as_str());
             }
         }
-        // let duration = start_time.elapsed();
-        // eprintln!("handle_action {} took: {:?}", action_name, duration);
+        let duration = start_time.elapsed();
+        eprintln!("handle_action {action_name} took: {duration:?}");
     }
 }
 

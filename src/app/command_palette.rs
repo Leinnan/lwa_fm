@@ -44,13 +44,13 @@ pub fn build_for_path(
                 name: "Open in new tab".into(),
             });
         }
-
-        #[cfg(windows)]
-        let open_name = "Open in Explorer";
-        #[cfg(target_os = "macos")]
-        let open_name = "Open in Finder";
-        #[cfg(target_os = "linux")]
-        let open_name = "Open in File Manager";
+        let open_name = if cfg!(windows) {
+            "Open in Explorer"
+        } else if cfg!(target_os = "macos") {
+            "Open in Finder"
+        } else {
+            "Open in File Manager"
+        };
 
         commands.push(ValidAction {
             action: ActionToPerform::SystemOpen(path.to_string_lossy().to_string().into()),

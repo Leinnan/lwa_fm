@@ -75,10 +75,9 @@ style = { level = "warn", priority = 9 }
 unwrap_used = { level = "deny", priority = 10 }
 
 [package.metadata.bundle]
-name = "LWA File Manager"
-image = ["32x32.png", "128x128.png", "128x128@2x.png", "icon.icns"]
-resources = ["res/*"]
-identifier = "com.mevlyshkin.lwa_fm"
-osx_url_schemes = ["com.mevlyshkin.lwa_fm"]
+name = "DirFleet"
+resources = ["static/resources/*"]
+identifier = "io.github.leinnan.dirfleet"
+osx_url_schemes = ["io.github.leinnan.dirfleet"]
 short_description = "File Manager"
 long_description = "File Manager built with egui in Rust"
