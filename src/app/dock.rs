@@ -1,24 +1,26 @@
 use egui::text::LayoutJob;
 use egui::util::undoer::Undoer;
-use egui::{Color32, Id, TextBuffer, TextFormat, Ui};
+use egui::{Color32, FontId, Id, Layout, Sense, TextBuffer, TextFormat, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
 use icu::collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu::collator::{Collator, CollatorBorrowed};
 use icu::locale::Locale;
+use serde::{Deserialize, Serialize};
 // use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 use std::{ffi::OsStr, path::PathBuf};
+use std::{fs, u32, usize};
 
 use egui::Vec2;
 use egui_extras::{Column, TableBuilder};
 
 use crate::app::command_palette::build_for_path;
+use crate::app::commands::{ModalWindow, TabAction};
 // use crate::app::dir_handling::COLLATER;
-use crate::app::directory_view_settings::DirectoryShowHidden;
-use crate::app::Search;
+use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
+use crate::app::{Search, Sort};
 use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer};
 use crate::locations::Locations;
 use crate::toast;
@@ -173,8 +175,6 @@ impl DirEntry {
     }
 }
 
-pub type TabPaths = Vec<PathBuf>;
-
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Default, Hash)]
 pub enum CurrentPath {
     #[default]
@@ -244,15 +244,25 @@ impl CurrentPath {
 #[derive(Debug)]
 pub struct TabData {
     pub list: Vec<DirEntry>,
-    pub action_to_perform: Option<ActionToPerform>,
     pub current_path: CurrentPath,
-    pub can_close: bool,
     pub show_hidden: bool,
     pub search: Option<Search>,
     pub watcher: Option<DirectoryWatcher>,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+struct PopupOpened(pub Id, pub usize);
+
+impl Default for PopupOpened {
+    fn default() -> Self {
+        Self(Id::new(0), usize::MAX)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub struct Selected(pub Vec<usize>);
 
 impl TabData {
     pub fn can_undo(&self) -> bool {
@@ -262,14 +272,20 @@ impl TabData {
         self.undoer.has_redo(&self.current_path)
     }
     pub fn undo(&mut self) -> Option<ActionToPerform> {
-        self.undoer
-            .undo(&self.current_path)
-            .map(|s| ActionToPerform::ChangePaths(s.to_owned()))
+        self.undoer.undo(&self.current_path).map(|s| {
+            ActionToPerform::TabAction(
+                super::commands::TabTarget::TabWithId(self.id),
+                TabAction::ChangePaths(s.to_owned()),
+            )
+        })
     }
     pub fn redo(&mut self) -> Option<ActionToPerform> {
-        self.undoer
-            .redo(&self.current_path)
-            .map(|s| ActionToPerform::ChangePaths(s.to_owned()))
+        self.undoer.redo(&self.current_path).map(|s| {
+            ActionToPerform::TabAction(
+                super::commands::TabTarget::TabWithId(self.id),
+                TabAction::ChangePaths(s.to_owned()),
+            )
+        })
     }
     pub fn toggle_search(&mut self, data_source: &impl DataHolder) {
         if let Some(search) = &self.search {
@@ -283,7 +299,7 @@ impl TabData {
                 else {
                     return;
                 };
-                self.action_to_perform = Some(ActionToPerform::ChangePaths(path));
+                TabAction::ChangePaths(path).schedule_tab(self.id);
                 // self.set_path(path, Some(data_source));
             }
         } else {
@@ -328,30 +344,25 @@ impl TabData {
         }
     }
     pub fn from_path(path: &Path) -> Self {
-        Self {
+        let new = Self {
             id: get_id(),
             list: vec![],
-            action_to_perform: Some(ActionToPerform::ChangePaths(CurrentPath::One(path.into()))),
             current_path: CurrentPath::None,
-            can_close: true,
             show_hidden: false,
             search: None,
             watcher: DirectoryWatcher::new().ok(),
             undoer: Undoer::default(),
-        }
-    }
-    pub fn update(&mut self, is_only_tab: bool) -> Option<ActionToPerform> {
-        self.can_close = !is_only_tab;
-        if self.check_for_file_system_events() {
-            self.action_to_perform = Some(ActionToPerform::RequestFilesRefresh);
-        }
-        let action = self.action_to_perform.clone();
-        self.action_to_perform = None;
-        action
+        };
+        TabAction::ChangePaths(CurrentPath::One(path.into())).schedule_tab(new.id);
+        new
     }
 }
 
-pub struct MyTabViewer;
+pub struct MyTabViewer {
+    closeable: bool,
+    tab_paths: Vec<PathBuf>,
+    active_tab: Option<u32>,
+}
 
 impl TabViewer for MyTabViewer {
     // This associated type is used to attach some data to each tab.
@@ -361,8 +372,8 @@ impl TabViewer for MyTabViewer {
         false
     }
 
-    fn closeable(&mut self, tab: &mut Self::Tab) -> bool {
-        tab.can_close
+    fn closeable(&mut self, _: &mut Self::Tab) -> bool {
+        self.closeable
     }
 
     fn id(&mut self, tab: &mut Self::Tab) -> Id {
@@ -382,12 +393,14 @@ impl TabViewer for MyTabViewer {
             path.into()
         }
     }
+    fn scroll_bars(&self, _tab: &Self::Tab) -> [bool; 2] {
+        [false, false]
+    }
 
     /// Defines the contents of a given `tab`.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         let cmd = ui.command_pressed();
-
         if !matches!(&tab.current_path, CurrentPath::None) {
             tab.undoer
                 .feed_state(ui.ctx().input(|input| input.time), &tab.current_path);
@@ -400,250 +413,455 @@ impl TabViewer for MyTabViewer {
                 ui.data_get_path_or_persisted::<DirectoryShowHidden>(&tab.current_path);
             show_hidden.0 = !show_hidden.0;
             ui.data_set_path(&tab.current_path, show_hidden.data);
-            tab.action_to_perform = Some(ActionToPerform::ViewSettingsChanged(
-                super::DataSource::Local,
-            ));
+            ActionToPerform::ViewSettingsChanged(super::DataSource::Local).schedule();
         }
         if ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
             let Some(parent) = tab.current_path.parent() else {
                 return;
             };
-            tab.action_to_perform = Some(ActionToPerform::ChangePaths(parent.into()));
+            TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
             return;
         }
         let favorites = ui.data_get_persisted::<Locations>().unwrap_or_default();
 
-        let tab_paths = ui
-            .data::<Option<TabPaths>>(|data| data.get_temp("TabPaths".into()))
-            .unwrap_or_default();
         let is_searching = tab.is_searching();
+        let tab_id = tab.id;
         let multiple_dirs = tab.current_path.multiple_paths();
         let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 1.5;
-        let table = TableBuilder::new(ui)
+
+        let tab_popup_id = Id::new(tab_id).with(1500);
+        let mut selected_tabs = ui
+            .data_get_path::<Selected>(&tab.current_path)
+            .unwrap_or_default();
+        let opened_popup = ui
+            .ctx()
+            .data_get_tab::<PopupOpened>(tab_id)
+            .and_then(|d| {
+                if egui::Popup::is_id_open(ui.ctx(), d.0) {
+                    Some(d.1)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(usize::MAX);
+        let mut table = TableBuilder::new(ui)
             .striped(true)
-            .vscroll(false)
-            .id_salt(tab.id)
+            .vscroll(true)
+            .id_salt(Id::new(tab.id).with(&tab.current_path))
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::remainder().at_least(260.0))
-            .resizable(false);
+            .column(Column::auto().at_most(150.0).at_least(100.0))
+            .column(Column::auto().at_most(150.0).at_least(100.0))
+            .sense(egui::Sense::click());
 
-        table.body(|body| {
-            body.rows(text_height, tab.list.len(), |mut row| {
-                let val = &tab.list[row.index()];
-                let indexed = if cmd { row.index() + 1 } else { 11 };
-                row.col(|ui| {
-                    let is_dir = val.entry_type == EntryType::Directory;
-                    let (dir, file) = val.get_splitted_path();
-                    let mut s = LayoutJob::default();
-                    let file_format = if is_dir {
-                        TextFormat {
-                            color: Color32::LIGHT_GRAY,
-                            ..Default::default()
-                        }
-                    } else {
-                        TextFormat {
-                            color: Color32::GRAY,
-                            ..Default::default()
-                        }
-                    };
-                    if indexed < 10 {
-                        s.append(&format!("[{indexed}] "), 0.0, TextFormat::default());
+        if let Some(v) = selected_tabs.0.first() {
+            if *v < tab.list.len() {
+                table = table.scroll_to_row(*v, None);
+            }
+        }
+        let mut new_sort = None;
+
+        table
+            .header(text_height, |mut row| {
+                row.col(|col| {
+                    let res = col
+                        .vertical_centered_justified(|ui| {
+                            ui.add(
+                                egui::Label::new("Name")
+                                    .wrap_mode(egui::TextWrapMode::Truncate)
+                                    .selectable(false)
+                                    .sense(Sense::click()),
+                            )
+                        })
+                        .inner;
+                    if res.clicked() {
+                        new_sort = Some(Sort::Name);
                     }
-                    let available_width = ui.available_width() - 120.0;
-                    let text_width = ui.fonts(|f| {
-                        f.layout_job(LayoutJob::simple_format(
-                            file.to_string(),
-                            file_format.clone(),
-                        ))
-                        .size()
-                        .x
+                });
+                row.col(|col| {
+                    let res = col
+                        .vertical_centered_justified(|ui| {
+                            ui.add(
+                                egui::Label::new("Modified")
+                                    .wrap_mode(egui::TextWrapMode::Truncate)
+                                    .selectable(false)
+                                    .sense(Sense::click()),
+                            )
+                        })
+                        .inner;
+                    if res.clicked() {
+                        new_sort = Some(Sort::Modified);
+                    }
+                });
+                row.col(|col| {
+                    let res = col
+                        .vertical_centered_justified(|ui| {
+                            ui.add(
+                                egui::Label::new("Size")
+                                    .wrap_mode(egui::TextWrapMode::Truncate)
+                                    .selectable(false)
+                                    .sense(Sense::click()),
+                            )
+                        })
+                        .inner;
+                    if res.clicked() {
+                        new_sort = Some(Sort::Size);
+                    }
+                });
+            })
+            .body(|body| {
+                body.rows(text_height, tab.list.len(), |mut row| {
+                    let val = &tab.list[row.index()];
+                    let is_dir = val.entry_type == EntryType::Directory;
+                    let indexed = row.index() + 1;
+
+                    if row.index() == opened_popup {
+                        row.set_hovered(true);
+                    } else if selected_tabs.0.contains(&row.index()) {
+                        row.set_selected(true);
+                    }
+                    row.col(|ui| {
+                        let color = if is_dir {
+                            Color32::LIGHT_GRAY
+                        } else {
+                            Color32::GRAY
+                        };
+                        if cmd {
+                            if indexed < 10 {
+                                ui.add_sized(
+                                    [25.0, ui.available_height()],
+                                    egui::Label::new(LayoutJob::simple_format(
+                                        format!("[{indexed}]"),
+                                        TextFormat {
+                                            color: Color32::DARK_GRAY,
+                                            ..Default::default()
+                                        },
+                                    )),
+                                );
+                            } else {
+                                ui.add_sized([25.0, ui.available_height()], egui::Label::new(""));
+                            }
+                        }
+                        let (dir, file) = val.get_splitted_path();
+                        if is_searching && multiple_dirs {
+                            ui.add(
+                                egui::Label::new(LayoutJob::simple_singleline(
+                                    dir.into(),
+                                    FontId::default(),
+                                    Color32::DARK_GRAY,
+                                ))
+                                .wrap_mode(egui::TextWrapMode::Truncate)
+                                .selectable(false)
+                                .sense(Sense::empty()),
+                            );
+                        }
+
+                        let added_button = ui.add(
+                            egui::Label::new(LayoutJob::simple_singleline(
+                                file.into(),
+                                FontId::default(),
+                                color,
+                            ))
+                            .wrap_mode(egui::TextWrapMode::Truncate)
+                            .selectable(false)
+                            .sense(Sense::empty()),
+                        );
+
+                        let ext = val
+                            .get_path()
+                            .extension()
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        if ext.eq(&OsStr::new("png"))
+                            || ext.eq(&OsStr::new("jpg"))
+                            || ext.eq(&OsStr::new("jpeg"))
+                        {
+                            added_button.on_hover_ui(|ui| {
+                                let path = std::fs::canonicalize(val.get_path())
+                                    .unwrap_or_else(|_| val.get_path().to_path_buf())
+                                    .to_string_lossy()
+                                    .replace("\\\\?\\", "");
+                                let path = format!("file://{path}");
+                                ui.add(
+                                    egui::Image::new(path)
+                                        .maintain_aspect_ratio(true)
+                                        .max_size(Vec2::new(300.0, 300.0)),
+                                );
+                            });
+                        } else {
+                            added_button.on_hover_text(val.path.as_str());
+                        }
                     });
-                    let display_file = if text_width > available_width {
-                        let chars = (((available_width - 50.0) / text_width) * (file.len() as f32))
-                            as usize;
-                        format!(
-                            "{}…",
-                            file.chars()
-                                .take(chars.saturating_sub(1))
-                                .collect::<String>()
-                        )
-                    } else {
-                        file.to_string()
-                    };
-                    s.append(&display_file, 0.0, file_format);
 
-                    let size_text = if is_searching || multiple_dirs {
-                        dir.to_string()
-                    } else if !is_dir {
-                        crate::helper::format_bytes_simple(val.size)
-                    } else {
-                        String::new()
-                    };
-                    let button = egui::Button::new(s)
-                        .fill(egui::Color32::from_white_alpha(0))
-                        .right_text(LayoutJob::simple_format(
-                            size_text,
-                            TextFormat {
-                                color: Color32::DARK_GRAY,
-                                ..Default::default()
-                            },
-                        ));
-                    let added_button = ui.add_sized(ui.available_size(), button);
-
-                    if added_button.clicked()
+                    if row.response().double_clicked()
                         || convert_nr_to_egui_key(indexed)
-                            .is_some_and(|k| ui.key_with_command_pressed(k))
+                            .is_some_and(|k| row.response().ctx.key_with_command_pressed(k))
                     {
                         if val.entry_type == EntryType::File {
-                            tab.action_to_perform =
-                                Some(ActionToPerform::SystemOpen(val.path.clone()));
+                            ActionToPerform::SystemOpen(val.path.clone()).schedule();
                         } else {
                             let Ok(path) = std::fs::canonicalize(val.get_path()) else {
                                 return;
                             };
-                            let action = if ui.shift_pressed() {
-                                ActionToPerform::NewTab(path)
+                            if row.response().ctx.shift_pressed() {
+                                ActionToPerform::NewTab(path).schedule();
                             } else {
-                                ActionToPerform::ChangePaths(path.into())
-                            };
-                            tab.action_to_perform = action.into();
+                                TabAction::ChangePaths(path.into()).schedule_tab(tab_id);
+                            }
                         }
+                    } else if row.response().clicked() {
+                        selected_tabs.0.clear();
+                        selected_tabs.0.push(row.index());
+                        row.response()
+                            .ctx
+                            .data_set_path(&tab.current_path, selected_tabs.clone());
                     }
-                    added_button.context_menu(|ui| {
-                        let options = build_for_path(&tab.current_path, val.get_path(), &favorites);
-                        for option in options {
-                            if ui.button(option.name.as_str()).clicked() {
-                                tab.action_to_perform = option.action.into();
-                                ui.close();
-                            }
-                        }
-                        if !is_dir {
-                            if ui.button("Open").clicked() {
-                                tab.action_to_perform =
-                                    Some(ActionToPerform::SystemOpen(val.path.clone()));
-                                ui.close();
-                                return;
-                            }
-                            #[cfg(windows)]
-                            if ui.button("Show in explorer").clicked() {
-                                crate::windows_tools::display_in_explorer(val.get_path())
-                                    .unwrap_or_else(|_| {
-                                        toast!(Error, "Could not open in explorer");
-                                    });
-                                ui.close();
-                            }
-                            let val_dir = PathBuf::from(val.get_splitted_path().0);
-                            let matching_dirs = tab_paths.iter().filter(|s| !val_dir.eq(*s));
-                            #[allow(clippy::collapsible_else_if)]
-                            if matching_dirs.clone().count() > 0 {
-                                ui.separator();
-                                ui.menu_button("Move to", |ui| {
-                                    for other in matching_dirs {
-                                        let other = PathBuf::from(
-                                            std::fs::canonicalize(other)
-                                                .unwrap_or_else(|_| val.get_path().to_path_buf())
-                                                .to_fixed_string(),
-                                        );
-
-                                        if ui
-                                            .button(format!(
-                                                "{}",
-                                                &other
-                                                    .file_name()
-                                                    .expect("Failed")
-                                                    .to_string_lossy()
-                                            ))
-                                            .on_hover_text(other.display().to_string())
-                                            .clicked()
-                                        {
-                                            let path = val.get_path();
-
-                                            let filename = path.file_name().expect("NO FILENAME");
-                                            let target_path = other.join(filename);
-                                            println!("{}", &target_path.display());
-                                            let move_result = fs::rename(path, &target_path);
-                                            let mut success = move_result.is_ok();
-                                            let _ = move_result.inspect_err(|e| {
-                                                e.raw_os_error().inspect(|nr| {
-                                                    // OSError: [WinError 17] The system cannot move the file to a different disk drive
-                                                    if *nr == 17 {
-                                                        let copy_success =
-                                                            fs::copy(path, target_path.clone())
-                                                                .is_ok();
-                                                        if copy_success {
-                                                            success = fs::remove_file(path).is_ok();
-                                                        }
-                                                    }
-                                                });
-                                            });
-                                            if !success {
-                                                toast!(
-                                                    Error,
-                                                    "Failed to move file {}",
-                                                    filename.to_string_lossy()
-                                                );
+                    row.col(|ui| {
+                        let time = {
+                            let datetime = std::time::UNIX_EPOCH
+                                + std::time::Duration::from_secs(val.modified_at.0);
+                            let system_time: std::time::SystemTime = datetime;
+                            match system_time.elapsed() {
+                                Ok(elapsed) => {
+                                    let days = elapsed.as_secs() / 86400;
+                                    if days > 0 {
+                                        format!("{days} days ago")
+                                    } else {
+                                        let hours = elapsed.as_secs() / 3600;
+                                        if hours > 0 {
+                                            format!("{hours} hours ago")
+                                        } else {
+                                            let minutes = elapsed.as_secs() / 60;
+                                            if minutes > 0 {
+                                                format!("{minutes} min ago")
+                                            } else {
+                                                "Just now".to_string()
                                             }
-                                            ui.close();
                                         }
                                     }
-                                });
+                                }
+                                Err(_) => "Future".to_string(),
                             }
-                        }
-                        ui.separator();
-                        if ui.button("Move to Trash").clicked() {
-                            trash::delete(val.get_path()).unwrap_or_else(|_| {
-                                toast!(Error, "Could not move it to trash.");
-                            });
-                            ui.close();
-                            tab.action_to_perform = Some(ActionToPerform::RequestFilesRefresh);
-                        }
-                        if ui.button("Copy path to clipboard").clicked() {
-                            let Ok(mut clipboard) = arboard::Clipboard::new() else {
-                                toast!(Error, "Failed to read the clipboard.");
-                                return;
-                            };
-                            clipboard.set_text(val.path.clone()).unwrap_or_else(|_| {
-                                toast!(Error, "Failed to update the clipboard.");
-                            });
-                            ui.close();
-                        }
-
-                        #[cfg(windows)]
-                        {
-                            ui.separator();
-                            if ui.button("Properties").clicked() {
-                                crate::windows_tools::open_properties(val.get_path());
-                                ui.close();
-                            }
-                        }
-                    });
-                    let ext = val
-                        .get_path()
-                        .extension()
-                        .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    if ext.eq(&OsStr::new("png"))
-                        || ext.eq(&OsStr::new("jpg"))
-                        || ext.eq(&OsStr::new("jpeg"))
-                    {
-                        added_button.on_hover_ui(|ui| {
-                            let path = std::fs::canonicalize(val.get_path())
-                                .unwrap_or_else(|_| val.get_path().to_path_buf())
-                                .to_string_lossy()
-                                .replace("\\\\?\\", "");
-                            let path = format!("file://{path}");
+                        };
+                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add(
-                                egui::Image::new(path)
-                                    .maintain_aspect_ratio(true)
-                                    .max_size(Vec2::new(300.0, 300.0)),
+                                egui::Label::new(LayoutJob::simple_singleline(
+                                    time,
+                                    FontId::default(),
+                                    Color32::DARK_GRAY,
+                                ))
+                                .wrap_mode(egui::TextWrapMode::Truncate)
+                                .selectable(false)
+                                .sense(Sense::empty()),
                             );
                         });
-                    } else {
-                        added_button.on_hover_text(val.path.as_str());
-                    }
+                    });
+                    row.col(|ui| {
+                        let size_text = if is_dir {
+                            ui.add_space(1.0);
+                            return;
+                        } else {
+                            crate::helper::format_bytes_simple(val.size)
+                        };
+                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::Label::new(LayoutJob::simple_singleline(
+                                    size_text,
+                                    FontId::default(),
+                                    Color32::DARK_GRAY,
+                                ))
+                                .wrap_mode(egui::TextWrapMode::Truncate)
+                                .selectable(false)
+                                .sense(Sense::empty()),
+                            );
+                        });
+                    });
+                    let id = tab_popup_id.with(row.index());
+                    egui::Popup::context_menu(&row.response())
+                        .id(id)
+                        .show(|ui| {
+                            ui.data_set_tab::<PopupOpened>(tab_id, PopupOpened(id, row.index()));
+                            let options =
+                                build_for_path(&tab.current_path, val.get_path(), &favorites);
+                            for option in options {
+                                if ui.button(option.name.as_str()).clicked() {
+                                    option.action.clone().schedule();
+                                    ui.close();
+                                }
+                            }
+                            if !is_dir {
+                                if ui.button("Open").clicked() {
+                                    ActionToPerform::SystemOpen(val.path.clone()).schedule();
+                                    ui.close();
+                                    return;
+                                }
+                                #[cfg(windows)]
+                                if ui.button("Show in explorer").clicked() {
+                                    crate::windows_tools::display_in_explorer(val.get_path())
+                                        .unwrap_or_else(|_| {
+                                            toast!(Error, "Could not open in explorer");
+                                        });
+                                    ui.close();
+                                }
+                                let val_dir = PathBuf::from(val.get_splitted_path().0);
+                                let matching_dirs =
+                                    self.tab_paths.iter().filter(|s| !val_dir.eq(*s));
+                                #[allow(clippy::collapsible_else_if)]
+                                if matching_dirs.clone().count() > 0 {
+                                    ui.separator();
+                                    ui.menu_button("Move to", |ui| {
+                                        for other in matching_dirs {
+                                            let other = PathBuf::from(
+                                                std::fs::canonicalize(other)
+                                                    .unwrap_or_else(|_| {
+                                                        val.get_path().to_path_buf()
+                                                    })
+                                                    .to_fixed_string(),
+                                            );
+
+                                            if ui
+                                                .button(format!(
+                                                    "{}",
+                                                    &other
+                                                        .file_name()
+                                                        .expect("Failed")
+                                                        .to_string_lossy()
+                                                ))
+                                                .on_hover_text(other.display().to_string())
+                                                .clicked()
+                                            {
+                                                let path = val.get_path();
+
+                                                let filename =
+                                                    path.file_name().expect("NO FILENAME");
+                                                let target_path = other.join(filename);
+                                                println!("{}", &target_path.display());
+                                                let move_result = fs::rename(path, &target_path);
+                                                let mut success = move_result.is_ok();
+                                                let _ = move_result.inspect_err(|e| {
+                                                    e.raw_os_error().inspect(|nr| {
+                                                        // OSError: [WinError 17] The system cannot move the file to a different disk drive
+                                                        if *nr == 17 {
+                                                            let copy_success =
+                                                                fs::copy(path, target_path.clone())
+                                                                    .is_ok();
+                                                            if copy_success {
+                                                                success =
+                                                                    fs::remove_file(path).is_ok();
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                                if !success {
+                                                    toast!(
+                                                        Error,
+                                                        "Failed to move file {}",
+                                                        filename.to_string_lossy()
+                                                    );
+                                                }
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Move to Trash").clicked() {
+                                trash::delete(val.get_path()).unwrap_or_else(|_| {
+                                    toast!(Error, "Could not move it to trash.");
+                                });
+                                ui.close();
+                                TabAction::RequestFilesRefresh.schedule_active_tab();
+                            }
+                            if ui.button("Copy path to clipboard").clicked() {
+                                let Ok(mut clipboard) = arboard::Clipboard::new() else {
+                                    toast!(Error, "Failed to read the clipboard.");
+                                    return;
+                                };
+                                clipboard.set_text(val.path.clone()).unwrap_or_else(|_| {
+                                    toast!(Error, "Failed to update the clipboard.");
+                                });
+                                ui.close();
+                            }
+                            if ui.button("Rename").clicked() {
+                                ui.data_mut(|w| {
+                                    w.insert_temp(egui::Id::new(ModalWindow::Rename), val.clone());
+                                });
+                                ActionToPerform::ToggleModalWindow(ModalWindow::Rename).schedule();
+                                ui.close();
+                            }
+
+                            #[cfg(windows)]
+                            {
+                                ui.separator();
+                                if ui.button("Properties").clicked() {
+                                    crate::windows_tools::open_properties(val.get_path());
+                                    ui.close();
+                                }
+                            }
+                        });
                 });
             });
+        if let Some(new_sort) = new_sort {
+            let mut settings: DirectoryViewSettings =
+                ui.data_get_path_or_persisted(&tab.current_path).data;
+            settings.change_sort(new_sort);
+            ui.data_set_path(&tab.current_path, settings);
+
+            ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Local).schedule();
+        }
+        let input_key = ui.input(|i| {
+            if i.key_pressed(egui::Key::ArrowDown) {
+                Some(egui::Key::ArrowDown)
+            } else if i.key_pressed(egui::Key::ArrowUp) {
+                Some(egui::Key::ArrowUp)
+            } else if i.key_pressed(egui::Key::ArrowLeft) {
+                Some(egui::Key::ArrowLeft)
+            } else if i.key_pressed(egui::Key::Enter) {
+                Some(egui::Key::Enter)
+            } else if i.key_pressed(egui::Key::ArrowRight) {
+                Some(egui::Key::ArrowRight)
+            } else {
+                None
+            }
         });
+        if !self.active_tab.is_some_and(|a| a.eq(&tab.id)) {
+            return;
+        }
+        if let Some(change) = input_key {
+            let new_value = match selected_tabs.0.first() {
+                Some(i) => match change {
+                    egui::Key::ArrowDown => {
+                        i.saturating_add(1).min(tab.list.len().saturating_sub(1))
+                    }
+                    egui::Key::ArrowUp => i.saturating_sub(1),
+                    egui::Key::ArrowLeft => {
+                        if let Some(parent) = tab.current_path.parent() {
+                            TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
+                        }
+                        return;
+                    }
+                    egui::Key::Enter | egui::Key::ArrowRight => {
+                        let Some(entry) = tab.list.get(*i) else {
+                            return;
+                        };
+                        if entry.is_file() {
+                            ActionToPerform::SystemOpen(entry.path.clone()).schedule();
+                        } else {
+                            TabAction::ChangePaths(entry.get_path().to_path_buf().into())
+                                .schedule_tab(tab_id);
+                            return;
+                        }
+                        *i
+                    }
+                    _ => return,
+                },
+                None => 0,
+            };
+            selected_tabs.0.clear();
+            selected_tabs.0.push(new_value);
+            ui.data_set_path(&tab.current_path, selected_tabs.clone());
+        }
     }
 }
 
@@ -669,6 +887,13 @@ impl MyTabs {
         self.get_current_tab().map(|tab| tab.id)
     }
 
+    pub fn get_tab_by_id(&mut self, id: u32) -> Option<&mut TabData> {
+        self.dock_state
+            .iter_all_tabs_mut()
+            .find(|(_, tab)| tab.id == id)
+            .map(|(_, tab)| tab)
+    }
+
     pub fn get_current_tab(&mut self) -> Option<&mut TabData> {
         let length = self.dock_state.iter_all_tabs_mut().count();
         if length == 1 {
@@ -684,29 +909,28 @@ impl MyTabs {
         Some(active_tab)
     }
 
-    pub fn ui(&mut self, ui: &mut Ui) -> Option<ActionToPerform> {
+    pub fn ui(&mut self, ui: &mut Ui) {
         let tabs = self.get_tabs_paths();
         let tabs_len = self.dock_state.iter_all_tabs().count();
+        let active_tab = self.get_current_index();
 
-        ui.data_mut(|data| data.insert_temp("TabPaths".into(), tabs));
-        let mut action = None;
         for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
-            let item_action = item.update(tabs_len == 1);
-            if item_action.is_some() {
-                action = item_action;
+            if item.check_for_file_system_events() {
+                TabAction::RequestFilesRefresh.schedule_tab(item.id);
             }
         }
+        let mut my_tab_viewer = MyTabViewer {
+            closeable: tabs_len > 1,
+            tab_paths: tabs,
+            active_tab,
+        };
         DockArea::new(&mut self.dock_state)
             .show_leaf_close_all_buttons(false)
             .show_leaf_collapse_buttons(false)
+            .show_add_popup(true)
+            .show_add_buttons(true)
             .style(Self::get_dock_style(ui.style().as_ref(), tabs_len))
-            .show_inside(ui, &mut MyTabViewer);
-        if let Some(active_tab) = self.get_current_tab() {
-            if active_tab.action_to_perform.is_some() {
-                action.clone_from(&active_tab.action_to_perform);
-            }
-        }
-        action
+            .show_inside(ui, &mut my_tab_viewer);
     }
 
     pub fn open_in_new_tab(&mut self, path: &Path) {

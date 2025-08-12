@@ -30,13 +30,19 @@ pub fn build_for_path(
         {
             if let Some(parent) = path.parent() {
                 commands.push(ValidAction {
-                    action: ActionToPerform::ChangePaths(parent.to_path_buf().into()),
+                    action: ActionToPerform::TabAction(
+                        crate::app::commands::TabTarget::ActiveTab,
+                        crate::app::commands::TabAction::ChangePaths(parent.to_path_buf().into()),
+                    ),
                     name: "Go Up".into(),
                 });
             }
         } else {
             commands.push(ValidAction {
-                action: ActionToPerform::ChangePaths(path.to_path_buf().into()),
+                action: ActionToPerform::TabAction(
+                    crate::app::commands::TabTarget::ActiveTab,
+                    crate::app::commands::TabAction::ChangePaths(path.to_path_buf().into()),
+                ),
                 name: "Open".into(),
             });
             commands.push(ValidAction {
@@ -95,7 +101,7 @@ impl CommandPalette {
         self.commands = build_for_path(current_path, path, favorites);
     }
 
-    pub fn ui(&self, ctx: &egui::Context) -> Option<ActionToPerform> {
+    pub fn ui(&self, ctx: &egui::Context) {
         let mut action = None;
         let modal = Modal::new("Commands".into())
             .frame(egui::Frame::canvas(&ctx.style()))
@@ -110,10 +116,16 @@ impl CommandPalette {
                     }
                 });
             });
-        if action.is_none() && modal.should_close() {
-            Some(ActionToPerform::CloseActiveModalWindow)
-        } else {
-            action
+        match action {
+            Some(s) => {
+                s.schedule();
+                ActionToPerform::CloseActiveModalWindow.schedule();
+            }
+            None => {
+                if modal.should_close() {
+                    ActionToPerform::CloseActiveModalWindow.schedule();
+                }
+            }
         }
     }
 }

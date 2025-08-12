@@ -24,15 +24,14 @@ const fn empty_icon(_ui: &mut egui::Ui, _openness: f32, _response: &egui::Respon
 }
 
 impl Locations {
-    pub fn draw_ui(&self, id: &str, ui: &mut Ui, removable: bool) -> Option<ActionToPerform> {
+    pub fn draw_ui(&self, id: &str, ui: &mut Ui, removable: bool) {
         if self.locations.is_empty() {
-            return None;
+            return;
         }
-        let mut action = None;
         egui::CollapsingHeader::new(RichText::new(id).weak().size(21.0))
             .icon(empty_icon)
             .default_open(true)
-            .show(ui, |ui| {
+            .show_unindented(ui, |ui| {
                 ui.with_layout(
                     Layout::top_down(Align::Min).with_cross_justify(true),
                     |ui| {
@@ -43,31 +42,27 @@ impl Locations {
                                     .fill(egui::Color32::from_white_alpha(0)),
                             );
                             if button.clicked() {
-                                action = if ui.command_pressed() {
-                                    ActionToPerform::NewTab(
-                                        PathBuf::from_str(&location.path).unwrap(),
-                                    )
-                                } else {
-                                    ActionToPerform::ChangePaths(
-                                        PathBuf::from_str(&location.path).unwrap().into(),
-                                    )
+                                if let Some(action) = ActionToPerform::path_from_str(
+                                    &location.path,
+                                    ui.command_pressed(),
+                                ) {
+                                    action.schedule();
                                 }
-                                .into();
                                 return;
                             }
                             button.context_menu(|ui| {
                                 if ui.button("Open in new tab").clicked() {
-                                    action = Some(ActionToPerform::NewTab(
+                                    ActionToPerform::NewTab(
                                         PathBuf::from_str(&location.path).unwrap(),
-                                    ));
+                                    )
+                                    .schedule();
                                     ui.close();
                                     return;
                                 }
 
                                 if removable && ui.button("Remove from favorites").clicked() {
-                                    action = Some(ActionToPerform::RemoveFromFavorites(
-                                        location.path.clone(),
-                                    ));
+                                    ActionToPerform::RemoveFromFavorites(location.path.clone())
+                                        .schedule();
                                     ui.close();
                                 }
                             });
@@ -75,7 +70,6 @@ impl Locations {
                     },
                 );
             });
-        action
     }
 }
 

@@ -6,6 +6,7 @@ use std::{
 use super::{ActionToPerform, App, Sort};
 use crate::{
     app::{
+        commands::TabAction,
         dir_handling::get_directories_recursive,
         directory_path_info::DirectoryPathInfo,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
@@ -19,14 +20,12 @@ use egui::{style::HandleShape, Button, Context, Layout, OpenUrl, Ui, Vec2};
 
 #[allow(clippy::too_many_lines)]
 impl App {
-    pub(crate) fn top_display_editable(
-        index: u32,
-        current_path: &Path,
-        ui: &mut Ui,
-    ) -> Option<ActionToPerform> {
+    pub(crate) fn top_display_editable(index: u32, current_path: &Path, ui: &mut Ui) {
         use crate::widgets::autocomplete_text::AutoCompleteTextEdit;
         let size = ui.available_size();
-        let mut directory_info = ui.data_get_tab::<DirectoryPathInfo>(index)?;
+        let Some(mut directory_info) = ui.data_get_tab::<DirectoryPathInfo>(index) else {
+            return;
+        };
 
         let _ = ui.add_sized(
             [size.x.max(500.0) - 130.0, 24.0],
@@ -39,23 +38,24 @@ impl App {
             .highlight_matches(true),
         );
 
-        let mut action = None;
         let should_close =
             ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape));
         if should_close {
-            action = Some(ActionToPerform::ToggleTopEdit);
+            ActionToPerform::ToggleTopEdit.schedule();
         } else {
             let path = Path::new(&directory_info.text_input);
             if path.exists() && path.is_dir() && !path.eq(current_path) {
-                action = ActionToPerform::path_from_str(directory_info.text_input.clone(), false);
+                if let Some(action) =
+                    ActionToPerform::path_from_str(directory_info.text_input.clone(), false)
+                {
+                    action.schedule();
+                }
             }
         }
         ui.data_set_tab(index, directory_info);
-        action
     }
     #[allow(clippy::needless_pass_by_ref_mut)]
-    pub(crate) fn top_display(current_path: &Path, ui: &mut Ui) -> Option<ActionToPerform> {
-        let mut new_path = None;
+    pub(crate) fn top_display(tab_index: u32, current_path: &Path, ui: &mut Ui) {
         let mut path: String = String::new();
         let parts = current_path.iter().count();
 
@@ -87,10 +87,8 @@ impl App {
                     }
                 };
                 if ui.button(text).clicked() {
-                    new_path = Some(ActionToPerform::ChangePaths(super::dock::CurrentPath::One(
-                        path.into(),
-                    )));
-                    return new_path;
+                    ActionToPerform::ChangePaths(super::dock::CurrentPath::One(path.into()))
+                        .schedule_tab(tab_index);
                 }
             }
             #[cfg(not(windows))]
@@ -105,16 +103,23 @@ impl App {
                 path += part;
                 let button = ui.add(Button::new(part).corner_radius(button_group));
                 if button.clicked() {
-                    new_path = ActionToPerform::path_from_str(&path, ui.command_pressed());
-                    return new_path;
+                    if let Some(action) =
+                        ActionToPerform::path_from_str(&path, ui.command_pressed())
+                    {
+                        action.schedule();
+                    }
                 }
                 button.context_menu(|ui| {
                     if ui.button("Open").clicked() {
-                        new_path = ActionToPerform::path_from_str(&path, false);
+                        if let Some(action) = ActionToPerform::path_from_str(&path, false) {
+                            action.schedule();
+                        }
                         ui.close();
                     }
                     if ui.button("Open in new tab").clicked() {
-                        new_path = ActionToPerform::path_from_str(&path, true);
+                        if let Some(action) = ActionToPerform::path_from_str(&path, true) {
+                            action.schedule();
+                        }
                         ui.close();
                     }
                 });
@@ -131,11 +136,12 @@ impl App {
                                 continue;
                             }
                             if ui.button(dir_display.as_str()).clicked() {
-                                new_path = Some(ActionToPerform::ChangePaths(
+                                TabAction::ChangePaths(
                                     PathBuf::from_str(dir)
                                         .expect("Failed to convert path")
                                         .into(),
-                                ));
+                                )
+                                .schedule_tab(tab_index);
                                 ui.close();
                             }
                         }
@@ -167,12 +173,12 @@ impl App {
             //     });
             // }
         }
-        new_path
     }
 
-    fn undo_redo_up(&mut self, ui: &mut Ui) -> Option<ActionToPerform> {
-        let current_tab = self.tabs.get_current_tab()?;
-        let mut action = None;
+    fn undo_redo_up(&mut self, ui: &mut Ui) {
+        let Some(current_tab) = self.tabs.get_current_tab() else {
+            return;
+        };
         ui.btn_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
                 let spacing = ui.spacing().item_spacing;
@@ -181,35 +187,35 @@ impl App {
                 ui.add_enabled_ui(current_tab.can_undo(), |ui| {
                     let button = Button::new("⮪").corner_radius(ButtonGroupElement::First);
                     if ui.add(button).on_hover_text("Go back").clicked() {
-                        action = current_tab.undo();
+                        if let Some(action) = current_tab.undo() {
+                            action.schedule();
+                        }
                     }
                 });
                 ui.add_enabled_ui(current_tab.can_redo(), |ui| {
                     let button = Button::new("⮫").corner_radius(ButtonGroupElement::Last);
                     if ui.add(button).on_hover_text("Redo").clicked() {
-                        action = current_tab.redo();
+                        if let Some(action) = current_tab.redo() {
+                            action.schedule();
+                        }
                     }
                 });
                 ui.spacing_mut().item_spacing = spacing;
             });
         });
-        action
     }
 
-    pub(crate) fn top_panel(&mut self, ctx: &Context) -> Option<ActionToPerform> {
+    pub(crate) fn top_panel(&mut self, ctx: &Context) {
         let is_searching = self
             .tabs
             .get_current_tab()
             .is_some_and(|tab| tab.search.is_some());
         let index = self.tabs.get_current_index().unwrap_or_default();
-        let mut action = None;
         egui::TopBottomPanel::top("top_panel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
                 ui.with_layout(Layout::left_to_right(egui::Align::Min), |ui| {
-                    ui.add_enabled_ui(!is_searching, |ui| {
-                        action = self.undo_redo_up(ui);
-                    });
+                    ui.add_enabled_ui(!is_searching, |ui| self.undo_redo_up(ui));
                     ui.add_space(TOP_SIDE_MARGIN);
                     let available_space = ui.available_size();
 
@@ -261,9 +267,8 @@ impl App {
                                             if was_favorites
                                                 != current_tab.current_path.multiple_paths()
                                             {
-                                                action = Some(ActionToPerform::SearchInFavorites(
-                                                    was_favorites,
-                                                ));
+                                                TabAction::SearchInFavorites(was_favorites)
+                                                    .schedule_tab(current_tab.id);
                                             }
                                         }
                                     } else if let Some(single_path) =
@@ -276,16 +281,15 @@ impl App {
                                             .on_hover_text("Open in terminal")
                                             .clicked()
                                         {
-                                            action =
-                                                Some(ActionToPerform::OpenInTerminal(single_path));
+                                            ActionToPerform::OpenInTerminal(single_path).schedule();
                                         }
                                     }
 
                                     if search_visible != is_searching {
                                         current_tab.toggle_search(ui.ctx());
                                     }
-                                    if search_changed && action.is_none() {
-                                        action = Some(ActionToPerform::FilterChanged);
+                                    if search_changed {
+                                        TabAction::FilterChanged.schedule_tab(current_tab.id);
                                     }
                                     ui.spacing_mut().item_spacing = spacing;
                                 })
@@ -319,44 +323,38 @@ impl App {
                                                         .on_hover_text("Go to parent directory")
                                                         .clicked()
                                                     {
-                                                        action = current_tab
-                                                            .current_path
-                                                            .parent()
-                                                            .map(|s| {
-                                                                ActionToPerform::ChangePaths(
-                                                                    s.into(),
-                                                                )
-                                                            });
+                                                        if let Some(parent) =
+                                                            current_tab.current_path.parent()
+                                                        {
+                                                            TabAction::ChangePaths(parent.into())
+                                                                .schedule_tab(index);
+                                                        }
                                                     }
                                                 },
                                             );
                                             let response = ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Min),
                                                 |ui| {
-                                                    if action.is_none()
-                                                        && ui
-                                                            .add(Button::new("✏").corner_radius(
-                                                                ButtonGroupElement::Last,
-                                                            ))
-                                                            .clicked()
+                                                    if ui
+                                                        .add(Button::new("✏").corner_radius(
+                                                            ButtonGroupElement::Last,
+                                                        ))
+                                                        .clicked()
                                                     {
-                                                        action =
-                                                            Some(ActionToPerform::ToggleTopEdit);
+                                                        ActionToPerform::ToggleTopEdit.schedule();
                                                     }
-                                                    if action.is_none() {
-                                                        ui.with_layout(
-                                                            Layout::left_to_right(egui::Align::Min),
-                                                            |ui| {
-                                                                action = if is_editing {
-                                                                    Self::top_display_editable(
-                                                                        index, &path, ui,
-                                                                    )
-                                                                } else {
-                                                                    Self::top_display(&path, ui)
-                                                                };
-                                                            },
-                                                        );
-                                                    }
+                                                    ui.with_layout(
+                                                        Layout::left_to_right(egui::Align::Min),
+                                                        |ui| {
+                                                            if is_editing {
+                                                                Self::top_display_editable(
+                                                                    index, &path, ui,
+                                                                );
+                                                            } else {
+                                                                Self::top_display(index, &path, ui);
+                                                            }
+                                                        },
+                                                    );
                                                 },
                                             );
 
@@ -365,20 +363,18 @@ impl App {
                                         })
                                     },
                                 );
-                                if action.is_none() && response.response.double_clicked() {
-                                    action = Some(ActionToPerform::ToggleTopEdit);
+                                if response.response.double_clicked() {
+                                    ActionToPerform::ToggleTopEdit.schedule();
                                 }
                             }
                         },
                     );
                 });
             });
-        action
     }
 
-    pub(crate) fn bottom_panel(&mut self, ctx: &Context) -> Option<ActionToPerform> {
+    pub(crate) fn bottom_panel(&mut self, ctx: &Context) {
         let mut sort_changed = false;
-        let mut action = None;
         egui::TopBottomPanel::bottom("bottomPanel")
             .frame(egui::Frame::canvas(&ctx.style()))
             .show(ctx, |ui| {
@@ -390,9 +386,10 @@ impl App {
                             .add(egui::Button::new("🔧").corner_radius(ButtonGroupElement::Last))
                             .clicked()
                         {
-                            action = Some(ActionToPerform::ToggleModalWindow(
+                            ActionToPerform::ToggleModalWindow(
                                 crate::app::commands::ModalWindow::Settings,
-                            ));
+                            )
+                            .schedule();
                         }
                         if ui
                             .add(
@@ -447,7 +444,7 @@ impl App {
                                     .changed();
                                 sort_changed |= display_hidden_changed;
                                 if display_hidden_changed {
-                                    action = Some(ActionToPerform::RequestFilesRefresh);
+                                    TabAction::RequestFilesRefresh.schedule_tab(active_tab.id);
                                     ui.data_set_path(&active_tab.current_path, show_hidden);
                                 }
                             });
@@ -460,11 +457,8 @@ impl App {
                 });
             });
 
-        if action.is_none() && sort_changed {
-            action = Some(ActionToPerform::ViewSettingsChanged(
-                crate::app::DataSource::Local,
-            ));
+        if sort_changed {
+            ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Local).schedule();
         }
-        action
     }
 }

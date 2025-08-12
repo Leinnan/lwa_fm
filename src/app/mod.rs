@@ -1,6 +1,7 @@
+use crate::app::commands::{TabAction, COMMANDS_QUEUE};
 use crate::app::directory_path_info::DirectoryPathInfo;
 use crate::app::directory_view_settings::DirectoryViewSettings;
-use crate::app::dock::CurrentPath;
+use crate::app::dock::{CurrentPath, DirEntry};
 use crate::helper::{DataHolder, KeyWithCommandPressed};
 use crate::locations::Locations;
 use crate::{app::settings::ApplicationSettings, locations::Location};
@@ -31,7 +32,6 @@ pub static TOASTS: std::sync::LazyLock<egui::mutex::RwLock<egui_notify::Toasts>>
             egui_notify::Toasts::new().with_anchor(egui_notify::Anchor::TopRight),
         )
     });
-
 #[macro_export]
 macro_rules! toast{
         (Basic, $($format:expr),+) => {
@@ -194,28 +194,89 @@ impl App {
         eprintln!("start {}", &action_name);
         let start_time = std::time::Instant::now();
         match action {
-            ActionToPerform::ChangePaths(path) => {
-                let Some(tab) = self.tabs.get_current_tab() else {
-                    return;
+            ActionToPerform::TabAction(target, action) => {
+                let tab_id = match target {
+                    commands::TabTarget::ActiveTab => self.tabs.get_current_index(),
+                    commands::TabTarget::TabWithId(id) => Some(id),
                 };
-                tab.set_path(path);
-                if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
-                    let new_data = match tab.current_path.single_path() {
-                        Some(p) => {
-                            if Path::new(&data.text_input).eq(p.as_path()) {
-                                Some(DirectoryPathInfo::build(p.as_path(), false))
-                            } else {
-                                None
+                match action {
+                    commands::TabAction::ChangePaths(path) => {
+                        let Some(tab) = tab_id.and_then(|id| self.tabs.get_tab_by_id(id)) else {
+                            return;
+                        };
+                        tab.set_path(path);
+                        if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
+                            let new_data = match tab.current_path.single_path() {
+                                Some(p) => {
+                                    if Path::new(&data.text_input).eq(p.as_path()) {
+                                        Some(DirectoryPathInfo::build(p.as_path(), false))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                None => None,
+                            };
+                            match new_data {
+                                Some(s) => ctx.data_set_tab(tab.id, s),
+                                None => ctx.data_remove_tab::<DirectoryPathInfo>(tab.id),
                             }
                         }
-                        None => None,
-                    };
-                    match new_data {
-                        Some(s) => ctx.data_set_tab(tab.id, s),
-                        None => ctx.data_remove_tab::<DirectoryPathInfo>(tab.id),
+                        self.handle_action(
+                            ctx,
+                            ActionToPerform::TabAction(target, TabAction::RequestFilesRefresh),
+                        );
+                    }
+                    commands::TabAction::RequestFilesRefresh
+                    | commands::TabAction::FilterChanged => {
+                        let Some(tab) = tab_id.and_then(|id| self.tabs.get_tab_by_id(id)) else {
+                            return;
+                        };
+                        tab.update_settings(ctx);
+                        tab.refresh_list();
+                        self.handle_action(
+                            ctx,
+                            ActionToPerform::TabAction(target, TabAction::FilesSort),
+                        );
+                    }
+                    commands::TabAction::FilesSort => {
+                        let Some(tab) = tab_id.and_then(|id| self.tabs.get_tab_by_id(id)) else {
+                            return;
+                        };
+                        let settings = ctx
+                            .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
+                        tab.sort_entries(&settings.data);
+                    }
+                    commands::TabAction::SearchInFavorites(start) => {
+                        let favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
+                        if favorites.locations.is_empty() {
+                            return;
+                        }
+                        if start {
+                            self.handle_action(
+                                ctx,
+                                ActionToPerform::TabAction(
+                                    target,
+                                    TabAction::ChangePaths(CurrentPath::Multiple(
+                                        favorites.paths(),
+                                    )),
+                                ),
+                            );
+                        } else {
+                            let Some(tab) = tab_id.and_then(|id| self.tabs.get_tab_by_id(id))
+                            else {
+                                return;
+                            };
+                            if !tab.can_undo() {
+                                return;
+                            }
+
+                            let Some(previous_path_action) = tab.undo() else {
+                                return;
+                            };
+                            self.handle_action(ctx, previous_path_action);
+                        }
                     }
                 }
-                self.handle_action(ctx, ActionToPerform::RequestFilesRefresh);
             }
             ActionToPerform::NewTab(path) => self.tabs.open_in_new_tab(&path),
             ActionToPerform::OpenInTerminal(path_buf) => {
@@ -230,23 +291,10 @@ impl App {
             }
             ActionToPerform::CloseActiveModalWindow => {
                 self.display_modal = None;
-                self.handle_action(ctx, ActionToPerform::RequestFilesRefresh);
+                TabAction::RequestFilesRefresh.schedule_active_tab();
             }
-            ActionToPerform::RequestFilesRefresh => {
-                let Some(tab) = self.tabs.get_current_tab() else {
-                    return;
-                };
-                tab.update_settings(ctx);
-                tab.refresh_list();
-                self.handle_action(ctx, ActionToPerform::FilesSort);
-            }
-            ActionToPerform::FilesSort | ActionToPerform::ViewSettingsChanged(_) => {
-                let Some(tab) = self.tabs.get_current_tab() else {
-                    return;
-                };
-                let settings =
-                    ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
-                tab.sort_entries(&settings.data);
+            ActionToPerform::ViewSettingsChanged(_) => {
+                TabAction::FilesSort.schedule_active_tab();
             }
             ActionToPerform::ToggleModalWindow(modal_window) => {
                 if let Some(modal) = &self.display_modal {
@@ -300,34 +348,6 @@ impl App {
                 favorites.locations.retain(|s| s.path != path_buf);
                 ctx.data_set_persisted(favorites);
             }
-            ActionToPerform::SearchInFavorites(start) => {
-                let favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
-                if favorites.locations.is_empty() {
-                    return;
-                }
-                let path = if start {
-                    ActionToPerform::ChangePaths(CurrentPath::Multiple(favorites.paths()))
-                } else {
-                    let Some(tab) = self.tabs.get_current_tab() else {
-                        return;
-                    };
-                    if !tab.can_undo() {
-                        return;
-                    }
-
-                    let Some(previous_path_action) = tab.undo() else {
-                        return;
-                    };
-                    previous_path_action
-                };
-                self.handle_action(ctx, path);
-            }
-            ActionToPerform::FilterChanged => {
-                self.handle_action(ctx, ActionToPerform::RequestFilesRefresh);
-            }
-            // ActionToPerform::ViewSettingsChanged(_) => {
-            //     self.handle_action(ctx, ActionToPerform::FilesSort);
-            // }
             ActionToPerform::SystemOpen(cow) => {
                 let _ = open::that_detached(cow.as_str());
             }
@@ -345,33 +365,22 @@ impl eframe::App for App {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut command_request = self.top_panel(ctx);
-        if command_request.is_none() {
-            command_request = self.bottom_panel(ctx);
-        }
-        if command_request.is_none() {
-            command_request = self.left_side_panel(ctx);
-        }
-        if command_request.is_none() {
-            command_request = self.central_panel(ctx);
-        }
+        self.top_panel(ctx);
+        self.bottom_panel(ctx);
+        self.left_side_panel(ctx);
+        self.central_panel(ctx);
 
         if ctx.key_with_command_pressed(egui::Key::P) {
-            command_request = Some(ActionToPerform::ToggleModalWindow(ModalWindow::Settings));
+            ActionToPerform::ToggleModalWindow(ModalWindow::Settings).schedule();
         }
 
         if ctx.key_with_command_pressed(egui::Key::L) {
-            command_request = Some(ActionToPerform::ToggleTopEdit);
-        }
-        if let Some(current_tab) = self.tabs.get_current_tab() {
-            if command_request.is_none() && current_tab.action_to_perform.is_some() {
-                command_request.clone_from(&current_tab.action_to_perform);
-            }
+            ActionToPerform::ToggleTopEdit.schedule();
         }
         if let Some(current_path) = self.tabs.get_current_path() {
             let favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
             if ctx.key_with_command_pressed(egui::Key::R) {
-                command_request = Some(ActionToPerform::ToggleModalWindow(ModalWindow::Commands));
+                ActionToPerform::ToggleModalWindow(ModalWindow::Commands).schedule();
                 self.command_palette.build_for_path(
                     &CurrentPath::One(current_path.clone()),
                     &current_path,
@@ -383,22 +392,69 @@ impl eframe::App for App {
         if let Some(modal) = &self.display_modal {
             match modal {
                 ModalWindow::Settings => {
-                    command_request = self.settings.display(ctx);
+                    self.settings.display(ctx);
                 }
                 ModalWindow::Commands => {
-                    command_request = self.command_palette.ui(ctx);
-                    if command_request.is_some() {
-                        self.display_modal = None;
-                    }
+                    self.command_palette.ui(ctx);
                 } // ModalWindow::NewDirectory => todo!(),
+                ModalWindow::Rename => {
+                    let modal_response =
+                        egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(ctx, |ui| {
+                            ui.label("Old name");
+                            let (old, mut name) = ui.data_mut(|d| {
+                                let old =
+                                    d.get_temp::<DirEntry>(egui::Id::new(ModalWindow::Rename));
+                                let new = d
+                                    .get_temp::<String>(
+                                        egui::Id::new(ModalWindow::Rename).with("new"),
+                                    )
+                                    .unwrap_or(
+                                        old.as_ref()
+                                            .map(|d| d.get_splitted_path().1.to_string())
+                                            .unwrap_or_default(),
+                                    );
+                                (old, new)
+                            });
+                            let Some(old) = old else {
+                                return;
+                            };
+                            let mut old_file_name = old.get_splitted_path().1.to_string();
+                            ui.add_enabled(false, egui::TextEdit::singleline(&mut old_file_name));
+                            ui.label("New name");
+                            ui.text_edit_singleline(&mut name);
+                            let valid = !Path::new(&name).try_exists().is_ok_and(|f| f);
+                            if ui.add_enabled(valid, egui::Button::new("Rename")).clicked() {
+                                let _ = fs::rename(
+                                    old.get_path(),
+                                    Path::new(old.get_splitted_path().0).join(name),
+                                );
+                                ui.data_mut(|w| {
+                                    w.remove_temp::<String>(
+                                        egui::Id::new(ModalWindow::Rename).with("new"),
+                                    )
+                                });
+                                ui.close();
+                            } else {
+                                ui.data_mut(|w| {
+                                    w.insert_temp(
+                                        egui::Id::new(ModalWindow::Rename).with("new"),
+                                        name.clone(),
+                                    );
+                                });
+                            }
+                        });
+
+                    if modal_response.should_close() {
+                        ActionToPerform::CloseActiveModalWindow.schedule();
+                    }
+                }
             }
         }
 
         TOASTS.write().show(ctx);
-        let Some(action) = command_request else {
-            return;
-        };
-        self.handle_action(ctx, action);
+        while let Some(action) = COMMANDS_QUEUE.pop() {
+            self.handle_action(ctx, action);
+        }
     }
 }
 

@@ -54,9 +54,8 @@ impl ApplicationSettings {
 
     /// Display the settings modal.
     /// returns true if the modal was closed.
-    pub(crate) fn display(&mut self, ctx: &egui::Context) -> Option<ActionToPerform> {
+    pub(crate) fn display(&mut self, ctx: &egui::Context) {
         let mut close = false;
-        let mut action = None;
         let modal = Modal::new("Settings".into()).show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.heading("Settings");
@@ -124,9 +123,8 @@ impl ApplicationSettings {
                         });
                         if changed {
                             ui.data_set_persisted(view_settings);
-                            action = Some(ActionToPerform::ViewSettingsChanged(
-                                crate::app::DataSource::Settings,
-                            ));
+                            ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Settings)
+                                .schedule();
                         }
                     });
                 ui.add_space(10.0);
@@ -136,8 +134,7 @@ impl ApplicationSettings {
         });
 
         if modal.should_close() || close {
-            action = Some(ActionToPerform::CloseActiveModalWindow);
+            ActionToPerform::CloseActiveModalWindow.schedule();
         }
-        action
     }
 }
