@@ -1,6 +1,5 @@
 use crate::app::{dock::CurrentPath, DataSource};
 use crossbeam::queue::SegQueue;
-use once_cell::sync::Lazy;
 use std::{borrow::Cow, fmt::Display, path::PathBuf, str::FromStr};
 
 pub static COMMANDS_QUEUE: std::sync::LazyLock<SegQueue<ActionToPerform>> =

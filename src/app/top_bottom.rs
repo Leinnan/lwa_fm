@@ -12,7 +12,7 @@ use crate::{
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
     },
     consts::{GIT_HASH_INFO, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
-    helper::DataHolder,
+    helper::{DataHolder, KeyWithCommandPressed},
     locations::Locations,
     widgets::{ButtonGroupElement, UiBuilderExt},
 };
@@ -58,6 +58,7 @@ impl App {
     pub(crate) fn top_display(tab_index: u32, current_path: &Path, ui: &mut Ui) {
         let mut path: String = String::new();
         let parts = current_path.iter().count();
+        let command_pressed = ui.command_pressed();
 
         #[allow(unused_variables)] // not used on linux
         for (i, e) in current_path.iter().enumerate() {
@@ -80,15 +81,18 @@ impl App {
                     }
                     1 => &path,
                     _ => {
-                        let s = e.to_str()?;
+                        let Some(s) = e.to_str() else {
+                            return;
+                        };
                         path += s;
                         path.push(std::path::MAIN_SEPARATOR);
                         s
                     }
                 };
                 if ui.button(text).clicked() {
-                    ActionToPerform::ChangePaths(super::dock::CurrentPath::One(path.into()))
-                        .schedule_tab(tab_index);
+                    if let Some(action) = ActionToPerform::path_from_str(&path, command_pressed) {
+                        action.schedule();
+                    }
                 }
             }
             #[cfg(not(windows))]
@@ -103,9 +107,7 @@ impl App {
                 path += part;
                 let button = ui.add(Button::new(part).corner_radius(button_group));
                 if button.clicked() {
-                    if let Some(action) =
-                        ActionToPerform::path_from_str(&path, ui.command_pressed())
-                    {
+                    if let Some(action) = ActionToPerform::path_from_str(&path, command_pressed) {
                         action.schedule();
                     }
                 }
@@ -125,7 +127,7 @@ impl App {
                 });
             }
             let dirs = get_directories_recursive(std::path::Path::new(&path), false, 1);
-            if !dirs.is_empty() {
+            if dirs.len() > 1 {
                 let button =
                     ui.add(Button::new(">").corner_radius(ButtonGroupElement::InTheMiddle));
                 button.context_menu(|ui| {
