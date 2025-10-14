@@ -8,8 +8,8 @@ use std::process::{Child, Command, Stdio};
 use egui::util::id_type_map::{SerializableAny, TypeId};
 use egui::{Context, Id, InputState, Ui};
 
-use crate::app::dock::CurrentPath;
 use crate::app::Data;
+use crate::app::dock::CurrentPath;
 
 #[allow(dead_code)]
 pub trait DataHolder {

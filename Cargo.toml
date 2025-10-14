@@ -1,6 +1,6 @@
 [package]
 name = "lwa_fm"
-edition = "2021"
+edition = "2024"
 version = "0.0.1"
 homepage = "https://github.com/Leinnan/lwa_fm"
 
@@ -20,15 +20,15 @@ smallvec = "1.15"
 bevy_device_lang = "0.6"
 fuzzy-matcher = "0.3"
 serde = { version = "1", features = ["derive"] }
-eframe = { version = "0.32", default-features = false, features = [
+eframe = { version = "0.33", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     "default_fonts", # Embed the default egui fonts.
     "glow",          # Use the glow rendering backend. Alternative: "wgpu".
     "persistence",   # Enable restoring app state when restarting the app.
     "wayland",       # To support Linux (and CI)
 ] }
-egui = "0.32"
-egui_extras = { version = "0.32", features = ["all_loaders"] }
+egui = "0.33"
+egui_extras = { version = "0.33", features = ["all_loaders"] }
 open = "5.3"
 walkdir = "2"
 sysinfo = "0.33"
@@ -36,7 +36,7 @@ directories = "6"
 image = { version = "0.25", features = ["jpeg", "png"] }
 rand = "0.8"
 anyhow = "1"
-egui-notify = "0.20"
+egui-notify = "0.21"
 once_cell = "1"
 crossbeam = "0.8"
 egui_dock = "0.17"
@@ -82,3 +82,6 @@ identifier = "io.github.leinnan.dirfleet"
 osx_url_schemes = ["io.github.leinnan.dirfleet"]
 short_description = "File Manager"
 long_description = "File Manager built with egui in Rust"
+
+[patch.crates-io]
+egui_dock = {git = "https://github.com/Avarel/egui_dock.git", branch = "egui_0.33"}

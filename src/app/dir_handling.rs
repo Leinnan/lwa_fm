@@ -14,7 +14,7 @@ use rayon::{
 use crate::{
     app::{
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
-        dock::{build_collator, CurrentPath},
+        dock::{CurrentPath, build_collator},
     },
     helper::DataHolder,
     toast,
@@ -23,7 +23,7 @@ use crate::{
 pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
     std::sync::LazyLock::new(|| build_collator(false));
 
-use super::{dock::TabData, Sort};
+use super::{Sort, dock::TabData};
 
 impl TabData {
     pub fn set_path(&mut self, path: impl Into<CurrentPath>) -> &CurrentPath {
@@ -283,7 +283,7 @@ pub fn get_directories_recursive(
     show_hidden: bool,
     depth: usize,
 ) -> BTreeSet<Cow<'static, str>> {
-    let directories = walkdir::WalkDir::new(path)
+    walkdir::WalkDir::new(path)
         .max_depth(depth)
         .into_iter()
         .filter_map(Result::ok)
@@ -301,18 +301,16 @@ pub fn get_directories_recursive(
             let mut current_path: Option<&Path> = e.path().parent();
 
             while let Some(parent) = current_path {
-                if let Some(parent_name) = parent.file_name().and_then(|name| name.to_str()) {
-                    if (parent_name.starts_with('.') || parent_name.starts_with('$'))
-                        && !parent.eq(path)
-                    {
-                        return false;
-                    }
+                if let Some(parent_name) = parent.file_name().and_then(|name| name.to_str())
+                    && (parent_name.starts_with('.') || parent_name.starts_with('$'))
+                    && !parent.eq(path)
+                {
+                    return false;
                 }
                 current_path = parent.parent(); // Move to the next parent
             }
             true
         })
         .map(|e| format!("{}", e.path().display()).into())
-        .collect::<BTreeSet<_>>();
-    directories
+        .collect::<BTreeSet<_>>()
 }

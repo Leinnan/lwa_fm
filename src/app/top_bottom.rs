@@ -16,7 +16,7 @@ use crate::{
     locations::Locations,
     widgets::{ButtonGroupElement, UiBuilderExt},
 };
-use egui::{style::HandleShape, Button, Context, Layout, OpenUrl, Ui, Vec2};
+use egui::{Button, Context, Layout, OpenUrl, Ui, Vec2, style::HandleShape};
 
 #[allow(clippy::too_many_lines)]
 impl App {
@@ -44,12 +44,13 @@ impl App {
             ActionToPerform::ToggleTopEdit.schedule();
         } else {
             let path = Path::new(&directory_info.text_input);
-            if path.exists() && path.is_dir() && !path.eq(current_path) {
-                if let Some(action) =
+            if path.exists()
+                && path.is_dir()
+                && !path.eq(current_path)
+                && let Some(action) =
                     ActionToPerform::path_from_str(directory_info.text_input.clone(), false)
-                {
-                    action.schedule();
-                }
+            {
+                action.schedule();
             }
         }
         ui.data_set_tab(index, directory_info);
@@ -106,10 +107,11 @@ impl App {
                 }
                 path += part;
                 let button = ui.add(Button::new(part).corner_radius(button_group));
-                if button.clicked() {
-                    if let Some(action) = ActionToPerform::path_from_str(&path, command_pressed) {
-                        action.schedule();
-                    }
+                if button.clicked()
+                    && let Some(action) =
+                        ActionToPerform::path_from_str(&path, ui.command_pressed())
+                {
+                    action.schedule();
                 }
                 button.context_menu(|ui| {
                     if ui.button("Open").clicked() {
@@ -188,18 +190,18 @@ impl App {
 
                 ui.add_enabled_ui(current_tab.can_undo(), |ui| {
                     let button = Button::new("⮪").corner_radius(ButtonGroupElement::First);
-                    if ui.add(button).on_hover_text("Go back").clicked() {
-                        if let Some(action) = current_tab.undo() {
-                            action.schedule();
-                        }
+                    if ui.add(button).on_hover_text("Go back").clicked()
+                        && let Some(action) = current_tab.undo()
+                    {
+                        action.schedule();
                     }
                 });
                 ui.add_enabled_ui(current_tab.can_redo(), |ui| {
                     let button = Button::new("⮫").corner_radius(ButtonGroupElement::Last);
-                    if ui.add(button).on_hover_text("Redo").clicked() {
-                        if let Some(action) = current_tab.redo() {
-                            action.schedule();
-                        }
+                    if ui.add(button).on_hover_text("Redo").clicked()
+                        && let Some(action) = current_tab.redo()
+                    {
+                        action.schedule();
                     }
                 });
                 ui.spacing_mut().item_spacing = spacing;
@@ -324,13 +326,11 @@ impl App {
                                                         .add(button)
                                                         .on_hover_text("Go to parent directory")
                                                         .clicked()
-                                                    {
-                                                        if let Some(parent) =
+                                                        && let Some(parent) =
                                                             current_tab.current_path.parent()
-                                                        {
-                                                            TabAction::ChangePaths(parent.into())
-                                                                .schedule_tab(index);
-                                                        }
+                                                    {
+                                                        TabAction::ChangePaths(parent.into())
+                                                            .schedule_tab(index);
                                                     }
                                                 },
                                             );

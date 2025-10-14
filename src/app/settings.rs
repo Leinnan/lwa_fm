@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::{
-        directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         Sort,
+        directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
     },
     helper::DataHolder,
 };

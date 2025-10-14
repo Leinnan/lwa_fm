@@ -1,4 +1,4 @@
-use crate::app::{dock::CurrentPath, DataSource};
+use crate::app::{DataSource, dock::CurrentPath};
 use crossbeam::queue::SegQueue;
 use std::{borrow::Cow, fmt::Display, path::PathBuf, str::FromStr};
 

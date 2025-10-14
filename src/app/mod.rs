@@ -1,4 +1,4 @@
-use crate::app::commands::{TabAction, COMMANDS_QUEUE};
+use crate::app::commands::{COMMANDS_QUEUE, TabAction};
 use crate::app::directory_path_info::DirectoryPathInfo;
 use crate::app::directory_view_settings::DirectoryViewSettings;
 use crate::app::dock::{CurrentPath, DirEntry};
@@ -408,11 +408,11 @@ impl eframe::App for App {
                                     .get_temp::<String>(
                                         egui::Id::new(ModalWindow::Rename).with("new"),
                                     )
-                                    .unwrap_or(
+                                    .unwrap_or_else(|| {
                                         old.as_ref()
                                             .map(|d| d.get_splitted_path().1.to_string())
-                                            .unwrap_or_default(),
-                                    );
+                                            .unwrap_or_default()
+                                    });
                                 (old, new)
                             });
                             let Some(old) = old else {
@@ -494,7 +494,7 @@ fn setup_custom_fonts(ctx: &egui::Context) {
         ctx.set_fonts(fonts);
     }
 
-    ctx.style_mut(|style| {
+    ctx.all_styles_mut(|style| {
         for font_id in style.text_styles.values_mut() {
             font_id.size *= 1.4;
         }

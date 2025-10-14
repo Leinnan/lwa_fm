@@ -2,11 +2,11 @@ use crate::helper::DetachedSpawn;
 use anyhow::Context;
 use std::{ffi::OsStr, iter::once, os::windows::ffi::OsStrExt};
 use windows::{
-    core::PCWSTR,
     Win32::{
         Foundation::{HINSTANCE, HWND},
-        UI::Shell::{ShellExecuteExW, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW},
+        UI::Shell::{SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, ShellExecuteExW},
     },
+    core::PCWSTR,
 };
 
 pub fn display_in_explorer(path: impl AsRef<OsStr>) -> anyhow::Result<()> {

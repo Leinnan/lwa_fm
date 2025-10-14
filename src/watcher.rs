@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use notify::{
-    event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode},
     Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode},
 };
 
 #[derive(Debug, Clone)]

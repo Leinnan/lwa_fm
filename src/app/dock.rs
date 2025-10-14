@@ -8,10 +8,10 @@ use icu::locale::Locale;
 use serde::{Deserialize, Serialize};
 // use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 use std::{ffi::OsStr, path::PathBuf};
-use std::{fs, u32, usize};
 
 use egui::Vec2;
 use egui_extras::{Column, TableBuilder};
@@ -454,10 +454,10 @@ impl TabViewer for MyTabViewer {
             .column(Column::auto().at_most(150.0).at_least(100.0))
             .sense(egui::Sense::click());
 
-        if let Some(v) = selected_tabs.0.first() {
-            if *v < tab.list.len() {
-                table = table.scroll_to_row(*v, None);
-            }
+        if let Some(v) = selected_tabs.0.first()
+            && *v < tab.list.len()
+        {
+            table = table.scroll_to_row(*v, None);
         }
         let mut new_sort = None;
 
@@ -621,8 +621,9 @@ impl TabViewer for MyTabViewer {
                             let datetime = std::time::UNIX_EPOCH
                                 + std::time::Duration::from_secs(val.modified_at.0);
                             let system_time: std::time::SystemTime = datetime;
-                            match system_time.elapsed() {
-                                Ok(elapsed) => {
+                            system_time.elapsed().map_or_else(
+                                |_| "Future".to_string(),
+                                |elapsed| {
                                     let days = elapsed.as_secs() / 86400;
                                     if days > 0 {
                                         format!("{days} days ago")
@@ -639,9 +640,8 @@ impl TabViewer for MyTabViewer {
                                             }
                                         }
                                     }
-                                }
-                                Err(_) => "Future".to_string(),
-                            }
+                                },
+                            )
                         };
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.add(

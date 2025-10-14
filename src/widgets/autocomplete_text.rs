@@ -1,11 +1,11 @@
 // CREEDITS: https://github.com/JakeHandsome/egui_autocomplete
 use egui::{
-    text::LayoutJob, Context, FontId, Id, Key, Modifiers, Popup, PopupCloseBehavior, TextBuffer,
-    TextEdit, Widget,
+    Context, FontId, Id, Key, Modifiers, Popup, PopupCloseBehavior, TextBuffer, TextEdit, Widget,
+    text::LayoutJob,
 };
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use std::cmp::{min, Reverse};
+use fuzzy_matcher::skim::SkimMatcherV2;
+use std::cmp::{Reverse, min};
 
 /// Trait that can be used to modify the `TextEdit`
 type SetTextEditProperties = dyn FnOnce(TextEdit) -> TextEdit;
