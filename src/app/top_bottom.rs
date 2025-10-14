@@ -59,6 +59,7 @@ impl App {
     pub(crate) fn top_display(tab_index: u32, current_path: &Path, ui: &mut Ui) {
         let mut path: String = String::new();
         let parts = current_path.iter().count();
+        #[allow(unused_variables)]
         let command_pressed = ui.command_pressed();
 
         #[allow(unused_variables)] // not used on linux
