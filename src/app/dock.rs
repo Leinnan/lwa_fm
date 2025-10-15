@@ -262,7 +262,10 @@ impl Default for PopupOpened {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
-pub struct Selected(pub Vec<usize>);
+pub struct Selected {
+    pub selected_fields: Vec<usize>,
+    pub just_changed: bool,
+}
 
 impl TabData {
     pub fn can_undo(&self) -> bool {
@@ -422,6 +425,7 @@ impl TabViewer for MyTabViewer {
             TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
             return;
         }
+        let shift_pressed = ui.input(|i| i.shift_pressed());
         let favorites = ui.data_get_persisted::<Locations>().unwrap_or_default();
 
         let is_searching = tab.is_searching();
@@ -444,6 +448,13 @@ impl TabViewer for MyTabViewer {
                 }
             })
             .unwrap_or(usize::MAX);
+        let just_changed = if selected_tabs.just_changed {
+            selected_tabs.just_changed = false;
+            ui.data_set_path(&tab.current_path, selected_tabs.clone());
+            true
+        } else {
+            false
+        };
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .vscroll(true)
@@ -454,10 +465,13 @@ impl TabViewer for MyTabViewer {
             .column(Column::auto().at_most(150.0).at_least(100.0))
             .sense(egui::Sense::click());
 
-        if let Some(v) = selected_tabs.0.first()
-            && *v < tab.list.len()
-        {
-            table = table.scroll_to_row(*v, None);
+        if just_changed {
+            if let Some(v) = selected_tabs.selected_fields.last()
+                && *v < tab.list.len()
+            {
+                eprintln!("{:?}", selected_tabs.just_changed);
+                table = table.scroll_to_row(*v, None);
+            }
         }
         let mut new_sort = None;
 
@@ -517,7 +531,7 @@ impl TabViewer for MyTabViewer {
 
                     if row.index() == opened_popup {
                         row.set_hovered(true);
-                    } else if selected_tabs.0.contains(&row.index()) {
+                    } else if selected_tabs.selected_fields.contains(&row.index()) {
                         row.set_selected(true);
                     }
                     row.col(|ui| {
@@ -610,8 +624,11 @@ impl TabViewer for MyTabViewer {
                             }
                         }
                     } else if row.response().clicked() {
-                        selected_tabs.0.clear();
-                        selected_tabs.0.push(row.index());
+                        if !shift_pressed {
+                            selected_tabs.selected_fields.clear();
+                        }
+                        selected_tabs.selected_fields.push(row.index());
+                        selected_tabs.just_changed = true;
                         row.response()
                             .ctx
                             .data_set_path(&tab.current_path, selected_tabs.clone());
@@ -829,7 +846,7 @@ impl TabViewer for MyTabViewer {
             return;
         }
         if let Some(change) = input_key {
-            let new_value = match selected_tabs.0.first() {
+            let new_value = match selected_tabs.selected_fields.last() {
                 Some(i) => match change {
                     egui::Key::ArrowDown => {
                         i.saturating_add(1).min(tab.list.len().saturating_sub(1))
@@ -858,8 +875,11 @@ impl TabViewer for MyTabViewer {
                 },
                 None => 0,
             };
-            selected_tabs.0.clear();
-            selected_tabs.0.push(new_value);
+            if !shift_pressed {
+                selected_tabs.selected_fields.clear();
+            }
+            selected_tabs.selected_fields.push(new_value);
+            selected_tabs.just_changed = true;
             ui.data_set_path(&tab.current_path, selected_tabs.clone());
         }
     }
