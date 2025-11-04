@@ -71,12 +71,10 @@ impl DirectoryWatcher {
     }
 
     pub fn watch_directory<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("dir_handling::watch_directory");
+        // self.stop_watching();
         let path = path.as_ref().to_path_buf();
-
-        // Stop watching the current path if there is one
-        if let Some(current) = &self.current_path {
-            let _ = self.watcher.unwatch(current);
-        }
 
         // Start watching the new path
         self.watcher
@@ -87,7 +85,10 @@ impl DirectoryWatcher {
         Ok(())
     }
 
+    #[inline]
     pub fn stop_watching(&mut self) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("dir_handling::watch_directory::unwatch");
         if let Some(path) = &self.current_path {
             let _ = self.watcher.unwatch(path);
             self.current_path = None;

@@ -6,14 +6,20 @@ use eframe::egui;
 
 mod app;
 mod consts;
+pub mod data;
 mod helper;
 mod locations;
+#[cfg(feature = "profiling")]
+mod profiler;
 mod watcher;
 mod widgets;
 #[cfg(windows)]
 mod windows_tools;
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(feature = "profiling")]
+    profiler::start_puffin_server(); // NOTE: you may only want to call this if the users specifies some flag or clicks a button!
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])

@@ -1,4 +1,5 @@
 use std::{
+    ops::Deref,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -10,6 +11,7 @@ use crate::{
         dir_handling::get_directories_recursive,
         directory_path_info::DirectoryPathInfo,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
+        dock::TabData,
     },
     consts::{GIT_HASH_INFO, HOMEPAGE, TOP_SIDE_MARGIN, VERSION},
     helper::{DataHolder, KeyWithCommandPressed},
@@ -18,9 +20,81 @@ use crate::{
 };
 use egui::{Button, Context, Layout, OpenUrl, Ui, Vec2, style::HandleShape};
 
+#[derive(Debug, Clone, Default)]
+pub struct TopDisplayPath(Vec<TopDisplayPathPart>);
+
+impl Deref for TopDisplayPath {
+    type Target = Vec<TopDisplayPathPart>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TopDisplayPathPart {
+    pub text: String,
+    pub path: String,
+    pub has_subdirectories: bool,
+}
+
+impl TopDisplayPath {
+    pub fn build(&mut self, current_path: &Path, show_hidden: bool) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_function!("TopDisplayPath::build");
+        self.0.clear();
+        let mut path: String = String::new();
+
+        #[allow(unused_variables)] // not used on linux
+        for (i, e) in current_path.iter().enumerate() {
+            #[cfg(windows)]
+            let text = match &i {
+                0 => {
+                    let Some(s) = e.to_str() else {
+                        continue;
+                    };
+                    let last_two_chars: String = s.chars().rev().take(2).collect();
+                    path += &last_two_chars.chars().rev().collect::<String>();
+                    path.push(std::path::MAIN_SEPARATOR);
+                    continue;
+                }
+                1 => path.clone(),
+                _ => {
+                    let Some(s) = e.to_str() else {
+                        return;
+                    };
+                    path += s;
+                    path.push(std::path::MAIN_SEPARATOR);
+                    s.to_string()
+                }
+            };
+            #[cfg(not(windows))]
+            let text = {
+                let Some(part) = e.to_str() else {
+                    continue;
+                };
+                if !part.starts_with('/') && !path.ends_with('/') {
+                    path += "/";
+                }
+                path += part;
+                part.to_string()
+            };
+            let has_subdirectories =
+                crate::app::dir_handling::has_subdirectories(Path::new(&path), show_hidden);
+            self.0.push(TopDisplayPathPart {
+                text,
+                path: path.clone(),
+                has_subdirectories,
+            });
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 impl App {
     pub(crate) fn top_display_editable(index: u32, current_path: &Path, ui: &mut Ui) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_function!("App::top_display_editable");
         use crate::widgets::autocomplete_text::AutoCompleteTextEdit;
         let size = ui.available_size();
         let Some(mut directory_info) = ui.data_get_tab::<DirectoryPathInfo>(index) else {
@@ -56,87 +130,53 @@ impl App {
         ui.data_set_tab(index, directory_info);
     }
     #[allow(clippy::needless_pass_by_ref_mut)]
-    pub(crate) fn top_display(tab_index: u32, current_path: &Path, ui: &mut Ui) {
-        let mut path: String = String::new();
-        let parts = current_path.iter().count();
+    pub(crate) fn top_display(tab: &TabData, ui: &mut Ui) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("top_display");
+        let tab_index = tab.id;
+        let parts = tab.top_display_path.len();
         #[allow(unused_variables)]
         let command_pressed = ui.command_pressed();
 
         #[allow(unused_variables)] // not used on linux
-        for (i, e) in current_path.iter().enumerate() {
+        for (i, part) in tab.top_display_path.iter().enumerate() {
             let button_group = if i == parts - 1 {
                 ButtonGroupElement::Last
             } else {
                 ButtonGroupElement::InTheMiddle
             };
-            #[cfg(windows)]
+
+            let button = ui.add(Button::new(&part.text).corner_radius(button_group));
+            if button.clicked()
+                && let Some(action) =
+                    ActionToPerform::path_from_str(&part.path, ui.command_pressed())
             {
-                let text = match &i {
-                    0 => {
-                        let Some(s) = e.to_str() else {
-                            continue;
-                        };
-                        let last_two_chars: String = s.chars().rev().take(2).collect();
-                        path += &last_two_chars.chars().rev().collect::<String>();
-                        path.push(std::path::MAIN_SEPARATOR);
-                        continue;
-                    }
-                    1 => &path,
-                    _ => {
-                        let Some(s) = e.to_str() else {
-                            return;
-                        };
-                        path += s;
-                        path.push(std::path::MAIN_SEPARATOR);
-                        s
-                    }
-                };
-                if ui.button(text).clicked() {
-                    if let Some(action) = ActionToPerform::path_from_str(&path, command_pressed) {
+                action.schedule();
+            }
+            button.context_menu(|ui| {
+                if ui.button("Open").clicked() {
+                    if let Some(action) = ActionToPerform::path_from_str(&part.path, false) {
                         action.schedule();
                     }
+                    ui.close();
                 }
-            }
-            #[cfg(not(windows))]
-            {
-                use crate::helper::KeyWithCommandPressed;
-                let Some(part) = e.to_str() else {
-                    continue;
-                };
-                if !part.starts_with('/') && !path.ends_with('/') {
-                    path += "/";
-                }
-                path += part;
-                let button = ui.add(Button::new(part).corner_radius(button_group));
-                if button.clicked()
-                    && let Some(action) =
-                        ActionToPerform::path_from_str(&path, ui.command_pressed())
-                {
-                    action.schedule();
-                }
-                button.context_menu(|ui| {
-                    if ui.button("Open").clicked() {
-                        if let Some(action) = ActionToPerform::path_from_str(&path, false) {
-                            action.schedule();
-                        }
-                        ui.close();
+                if ui.button("Open in new tab").clicked() {
+                    if let Some(action) = ActionToPerform::path_from_str(&part.path, true) {
+                        action.schedule();
                     }
-                    if ui.button("Open in new tab").clicked() {
-                        if let Some(action) = ActionToPerform::path_from_str(&path, true) {
-                            action.schedule();
-                        }
-                        ui.close();
-                    }
-                });
-            }
-            let dirs = get_directories_recursive(std::path::Path::new(&path), false, 1);
-            if dirs.len() > 1 {
+                    ui.close();
+                }
+            });
+
+            if part.has_subdirectories {
                 let button =
                     ui.add(Button::new(">").corner_radius(ButtonGroupElement::InTheMiddle));
                 button.context_menu(|ui| {
+                    let dirs =
+                        get_directories_recursive(std::path::Path::new(&part.path), false, 1);
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for dir in &dirs {
-                            let dir_display = dir.replace(&path, "");
+                            let dir_display = dir.replace(&part.path, "");
                             if dir_display.is_empty() {
                                 continue;
                             }
@@ -153,34 +193,12 @@ impl App {
                     });
                 });
             }
-            // #[cfg(windows)]
-            // if parts - 1 != i {
-            //     ui.menu_button(std::path::MAIN_SEPARATOR.to_string(), |ui| {
-            //         let p = std::path::Path::new(&path);
-            //         let dirs = get_directories_recursive(p, false, 1);
-            //         if dirs.is_empty() {
-            //             ui.close();
-            //         }
-            //         egui::ScrollArea::vertical().show(ui, |ui| {
-            //             for dir in &dirs {
-            //                 let dir_display = dir.replace(&path, "");
-            //                 if dir_display.is_empty() {
-            //                     continue;
-            //                 }
-            //                 if ui.button(dir_display.as_str()).clicked() {
-            //                     new_path = Some(ActionToPerform::ChangePaths(
-            //                         PathBuf::from_str(dir).expect("Failed to convert path"),
-            //                     ));
-            //                     ui.close();
-            //                 }
-            //             }
-            //         });
-            //     });
-            // }
         }
     }
 
     fn undo_redo_up(&mut self, ui: &mut Ui) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("undo_redo_up");
         let Some(current_tab) = self.tabs.get_current_tab() else {
             return;
         };
@@ -211,6 +229,8 @@ impl App {
     }
 
     pub(crate) fn top_panel(&mut self, ctx: &Context) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("top_panel");
         let is_searching = self
             .tabs
             .get_current_tab()
@@ -354,7 +374,7 @@ impl App {
                                                                     index, &path, ui,
                                                                 );
                                                             } else {
-                                                                Self::top_display(index, &path, ui);
+                                                                Self::top_display(&current_tab, ui);
                                                             }
                                                         },
                                                     );
@@ -377,6 +397,8 @@ impl App {
     }
 
     pub(crate) fn bottom_panel(&mut self, ctx: &Context) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("bottom_panel");
         let mut sort_changed = false;
         egui::TopBottomPanel::bottom("bottomPanel")
             .frame(egui::Frame::canvas(&ctx.style()))

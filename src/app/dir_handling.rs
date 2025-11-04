@@ -7,7 +7,7 @@ use std::{
 
 use icu::collator::CollatorBorrowed;
 use rayon::{
-    iter::{ParallelBridge, ParallelExtend, ParallelIterator},
+    iter::{IntoParallelRefMutIterator, ParallelBridge, ParallelExtend, ParallelIterator},
     slice::ParallelSliceMut,
 };
 
@@ -29,6 +29,9 @@ impl TabData {
     pub fn set_path(&mut self, path: impl Into<CurrentPath>) -> &CurrentPath {
         let path = path.into();
         self.current_path = path;
+        if let Some(path) = self.current_path.get_path() {
+            self.top_display_path.build(&path, self.show_hidden);
+        }
         self.start_watching_directory();
         // self.action_to_perform = Some(ActionToPerform::RequestFilesRefresh);
         &self.current_path
@@ -38,10 +41,15 @@ impl TabData {
         self.show_hidden = data_source
             .data_get_path_or_persisted::<DirectoryShowHidden>(&self.current_path)
             .0;
+        if let Some(path) = self.current_path.get_path() {
+            self.top_display_path.build(&path, self.show_hidden);
+        }
     }
 
     /// Start watching the current directory for changes
     pub fn start_watching_directory(&mut self) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("dir_handling::start_watching_directory");
         let Some(ref mut watcher) = self.watcher else {
             return;
         };
@@ -108,13 +116,16 @@ impl TabData {
     }
 
     pub fn refresh_list(&mut self) {
-        if self.is_searching() {
-            self.read_dir_filter();
-        } else {
-            self.read_dir();
-        }
+        self.read_dir();
+        self.update_visible_entries();
+        // if self.is_searching() {
+        //     self.read_dir_filter();
+        // } else {
+        //     self.read_dir();
+        // }
     }
 
+    #[allow(dead_code)]
     fn read_dir_filter(&mut self) {
         let case_sensitive = self
             .search
@@ -166,48 +177,122 @@ impl TabData {
                         }
                         e.try_into().ok()
                     })
-                    .collect::<Vec<super::dock::DirEntry>>()
+                    .collect::<Vec<crate::data::files::DirEntry>>()
             })
             .collect();
     }
 
-    fn read_dir(&mut self) {
-        let directories: &[PathBuf] = match &self.current_path {
-            CurrentPath::None => &[],
-            CurrentPath::One(path_buf) => std::slice::from_ref(path_buf),
-            CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
-        };
-
-        self.list.clear();
-
-        if self.show_hidden {
-            for d in directories {
-                let Ok(paths) = std::fs::read_dir(d) else {
-                    continue;
-                };
-                self.list.par_extend(paths.par_bridge().filter_map(|e| {
-                    let e = e.ok()?;
-                    e.try_into().ok()
-                }));
+    // pub fn get_visible_entries(&self) -> impl Iterator<Item = &DirEntry> {
+    //     self.visible_entries.iter().map(|&idx| &self.list[idx])
+    // }
+    pub fn update_visible_entries(&mut self) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!(
+            "dir_handling::update_visible_entries",
+            self.list.len().to_string()
+        );
+        self.visible_entries.clear();
+        let is_searching = self.is_searching();
+        let case_sensitive = self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.case_sensitive);
+        let search = self
+            .search
+            .as_ref()
+            .map(|search| search.value.as_str())
+            .unwrap_or_default();
+        let search_len = search.len();
+        let collator = build_collator(case_sensitive);
+        for (i, entry) in self.list.iter().enumerate() {
+            let mut visible = true;
+            if !self.show_hidden {
+                let name = entry.get_splitted_path().1;
+                if name.starts_with(".") || name.starts_with("$") {
+                    visible = false;
+                }
             }
-        } else {
-            for d in directories {
-                let Ok(paths) = std::fs::read_dir(d) else {
-                    continue;
-                };
-                self.list.par_extend(paths.par_bridge().filter_map(|e| {
-                    let e = e.ok()?;
-                    let s = e.file_name().as_encoded_bytes()[0];
-                    if s.eq(&b'.') || s.eq(&b'$') {
-                        return None;
+            if is_searching {
+                let name = entry.get_splitted_path().1;
+                if search_len > name.len() {
+                    visible = false;
+                } else {
+                    let chars = name.as_bytes();
+                    let mut found = false;
+                    for i in 0..=(name.len() - search_len) {
+                        if collator.compare_utf8(search.as_bytes(), &chars[i..i + search_len])
+                            == Ordering::Equal
+                        {
+                            found = true;
+                            break;
+                        }
                     }
-                    e.try_into().ok()
-                }));
+                    visible &= found;
+                }
+            }
+            if visible {
+                self.visible_entries.push(i);
             }
         }
     }
 
+    fn read_dir(&mut self) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("dir_handling::read_dir");
+        self.list.clear();
+        let directories: &[PathBuf] = match &self.current_path {
+            CurrentPath::None => &[],
+            CurrentPath::One(path_buf) => {
+                let paths = {
+                    #[cfg(feature = "profiling")]
+                    puffin::profile_scope!("dir_handling::read_dir::with_hidden::dir");
+                    std::fs::read_dir(path_buf)
+                };
+                let Ok(paths) = paths else {
+                    return;
+                };
+                #[cfg(feature = "profiling")]
+                puffin::profile_scope!("dir_handling::read_dir::with_hidden::mapping");
+                // self.list
+                //     .extend(paths.filter_map(|e| e.ok().and_then(|e| e.try_into().ok())));
+                self.list.par_extend(paths.par_bridge().filter_map(|e| {
+                    let e = e.ok()?;
+                    e.try_into().ok()
+                }));
+
+                #[cfg(feature = "profiling")]
+                puffin::profile_scope!("dir_handling::read_dir::meta");
+                self.list.par_iter_mut().for_each(|e| e.read_metadata());
+
+                return;
+            }
+            CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
+        };
+
+        for d in directories {
+            let paths = {
+                #[cfg(feature = "profiling")]
+                puffin::profile_scope!("dir_handling::read_dir::with_hidden::dir");
+                std::fs::read_dir(d)
+            };
+            let Ok(paths) = paths else {
+                continue;
+            };
+
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("dir_handling::read_dir::with_hidden::mapping");
+            self.list.par_extend(paths.par_bridge().filter_map(|e| {
+                let e = e.ok()?;
+                e.try_into().ok()
+            }));
+        }
+
+        self.list.par_iter_mut().for_each(|e| e.read_metadata());
+    }
+
     pub fn sort_entries(&mut self, sort_settings: &DirectoryViewSettings) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("dir_handling::sort_entries");
         match sort_settings.sorting {
             Sort::Name => {
                 let collator = &COLLATER;
@@ -228,12 +313,12 @@ impl TabData {
                 if sort_settings.invert_sort {
                     self.list.sort_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(b.modified_at.cmp(&a.modified_at))
+                        file_type_cmp.then(b.meta.modified_at.cmp(&a.meta.modified_at))
                     });
                 } else {
                     self.list.sort_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(a.modified_at.cmp(&b.modified_at))
+                        file_type_cmp.then(a.meta.modified_at.cmp(&b.meta.modified_at))
                     });
                 }
             }
@@ -241,12 +326,12 @@ impl TabData {
                 if sort_settings.invert_sort {
                     self.list.sort_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(b.created_at.cmp(&a.created_at))
+                        file_type_cmp.then(b.meta.created_at.cmp(&a.meta.created_at))
                     });
                 } else {
                     self.list.sort_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(a.created_at.cmp(&b.created_at))
+                        file_type_cmp.then(a.meta.created_at.cmp(&b.meta.created_at))
                     });
                 }
             }
@@ -254,12 +339,12 @@ impl TabData {
                 if sort_settings.invert_sort {
                     self.list.sort_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(b.size.cmp(&a.size))
+                        file_type_cmp.then(b.meta.size.cmp(&a.meta.size))
                     });
                 } else {
                     self.list.sort_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(a.size.cmp(&b.size))
+                        file_type_cmp.then(a.meta.size.cmp(&b.meta.size))
                     });
                 }
             }
@@ -276,6 +361,25 @@ impl TabData {
 
 pub fn get_directories(path: &Path, show_hidden: bool) -> BTreeSet<Cow<'static, str>> {
     get_directories_recursive(path, show_hidden, 2)
+}
+
+pub fn has_subdirectories(path: &Path, show_hidden: bool) -> bool {
+    walkdir::WalkDir::new(path)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|e| {
+            if !e.file_type().is_dir() {
+                return false;
+            }
+            if !show_hidden {
+                let file_name = e.file_name().to_string_lossy();
+                if file_name.starts_with('.') || file_name.starts_with('$') {
+                    return false;
+                }
+            }
+            true
+        })
 }
 
 pub fn get_directories_recursive(

@@ -1,178 +1,88 @@
-use egui::text::LayoutJob;
+use egui::ahash::HashMap;
+use egui::text::{LayoutJob, TextWrapping};
 use egui::util::undoer::Undoer;
-use egui::{Color32, FontId, Id, Layout, Sense, TextBuffer, TextFormat, Ui};
+use egui::{
+    Color32, Context, FontId, FontSelection, Galley, Id, Layout, Sense, TextBuffer, TextFormat, Ui,
+    WidgetText,
+};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
 use icu::collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu::collator::{Collator, CollatorBorrowed};
 use icu::locale::Locale;
 use serde::{Deserialize, Serialize};
-// use smallvec::SmallVec;
-use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
-use std::time::SystemTime;
+use std::sync::Arc;
 use std::{ffi::OsStr, path::PathBuf};
 
 use egui::Vec2;
 use egui_extras::{Column, TableBuilder};
 
 use crate::app::command_palette::build_for_path;
-use crate::app::commands::{ModalWindow, TabAction};
+use crate::app::commands::{ModalWindow, TabAction, TabTarget};
+use crate::data::time::ElapsedTime;
+use crate::widgets::time_label::draw_size;
 // use crate::app::dir_handling::COLLATER;
+use super::commands::ActionToPerform;
 use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
+use crate::app::top_bottom::TopDisplayPath;
 use crate::app::{Search, Sort};
+use crate::data::files::DirEntry;
 use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer};
 use crate::locations::Locations;
 use crate::toast;
 use crate::watcher::DirectoryWatcher;
+use std::cell::RefCell;
 
-use super::commands::ActionToPerform;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum EntryType {
-    File,
-    Directory,
+thread_local! {
+    pub static TIME_POOL: RefCell<HashMap<ElapsedTime, Arc<Galley>>> = RefCell::new(HashMap::default());
 }
 
-#[derive(Debug, Clone)]
-pub struct DirEntry {
-    pub path: Cow<'static, str>,
-    pub entry_type: EntryType,
-    pub created_at: TimestampSeconds,
-    pub modified_at: TimestampSeconds,
-    pub size: u64,
-    file_name_index: usize,
-    // pub sort_key: SmallVec<[u8; 40]>,
+pub fn populate_time_pool(components: impl Iterator<Item = ElapsedTime>, ui: &Context) {
+    TIME_POOL.with_borrow_mut(|pool| {
+        for component in components {
+            if !pool.contains_key(&component) {
+                let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
+                    component.to_string(),
+                    FontId::default(),
+                    Color32::DARK_GRAY,
+                )))
+                .into_galley_impl(
+                    ui,
+                    &ui.style(),
+                    TextWrapping::default(),
+                    FontSelection::Default,
+                    egui::Align::Center,
+                );
+                _ = pool.insert(component, galley);
+            }
+        }
+    })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct TimestampSeconds(u64);
-
-impl From<SystemTime> for TimestampSeconds {
-    fn from(value: SystemTime) -> Self {
-        // Unix timestamp in seconds (valid until year 2262)
-        let timestamp_seconds: u64 = value
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self(timestamp_seconds)
-    }
+thread_local! {
+    pub static SIZES_POOL: RefCell<HashMap<u64, Arc<Galley>>> = RefCell::new(HashMap::default());
 }
-
-impl TryFrom<std::fs::DirEntry> for DirEntry {
-    type Error = ();
-
-    fn try_from(value: std::fs::DirEntry) -> Result<Self, Self::Error> {
-        let Ok(meta) = value.metadata() else {
-            return Err(());
-        };
-        let file_type = meta.file_type();
-        #[cfg(target_os = "windows")]
-        let is_dir = {
-            use std::os::windows::fs::FileTypeExt;
-            file_type.is_dir() || file_type.is_symlink_dir()
-        };
-        #[cfg(not(target_os = "windows"))]
-        let is_dir = file_type.is_dir();
-        let entry_type = if is_dir {
-            EntryType::Directory
-        } else {
-            EntryType::File
-        };
-        // let mut sort_key = SmallVec::<[u8; 40]>::new();
-        // let _ =
-        //     COLLATER.write_sort_key_utf8_to(value.file_name().as_encoded_bytes(), &mut sort_key);
-        let path: Cow<'static, str> = Cow::Owned(value.path().to_string_lossy().to_string());
-        let file_name_index = path.len() - value.file_name().len();
-        let created_at = meta
-            .created()
-            .map(TimestampSeconds::from)
-            .unwrap_or_default();
-        let modified_at = meta
-            .modified()
-            .map(TimestampSeconds::from)
-            .unwrap_or_default();
-        #[cfg(windows)]
-        let size = std::os::windows::fs::MetadataExt::file_size(&meta);
-        #[cfg(target_os = "linux")]
-        let size = std::os::linux::fs::MetadataExt::st_size(&meta);
-        #[cfg(target_os = "macos")]
-        let size = std::os::macos::fs::MetadataExt::st_size(&meta);
-        Ok(Self {
-            path,
-            entry_type,
-            created_at,
-            modified_at,
-            size,
-            file_name_index,
-            // sort_key,
-        })
-    }
-}
-
-impl TryFrom<walkdir::DirEntry> for DirEntry {
-    type Error = ();
-
-    fn try_from(value: walkdir::DirEntry) -> Result<Self, Self::Error> {
-        let Ok(meta) = value.metadata() else {
-            return Err(());
-        };
-        let file_type = meta.file_type();
-        #[cfg(target_os = "windows")]
-        let is_dir = {
-            use std::os::windows::fs::FileTypeExt;
-            file_type.is_dir() || file_type.is_symlink_dir()
-        };
-        #[cfg(not(target_os = "windows"))]
-        let is_dir = file_type.is_dir();
-        let entry_type = if is_dir {
-            EntryType::Directory
-        } else {
-            EntryType::File
-        };
-        let path: Cow<'static, str> = Cow::Owned(value.path().to_string_lossy().to_string());
-        let file_name_index = path.len() - value.file_name().len();
-        // let mut sort_key = SmallVec::<[u8; 40]>::new();
-        // let _ =
-        //     COLLATER.write_sort_key_utf8_to(value.file_name().as_encoded_bytes(), &mut sort_key);
-        let created_at = meta
-            .created()
-            .map(TimestampSeconds::from)
-            .unwrap_or_default();
-        let modified_at = meta
-            .modified()
-            .map(TimestampSeconds::from)
-            .unwrap_or_default();
-        #[cfg(windows)]
-        let size = std::os::windows::fs::MetadataExt::file_size(&meta);
-        #[cfg(target_os = "linux")]
-        let size = std::os::linux::fs::MetadataExt::st_size(&meta);
-        #[cfg(target_os = "macos")]
-        let size = std::os::macos::fs::MetadataExt::st_size(&meta);
-        Ok(Self {
-            path,
-            entry_type,
-            created_at,
-            modified_at,
-            size,
-            file_name_index,
-            // sort_key,
-        })
-    }
-}
-impl DirEntry {
-    pub fn get_path(&self) -> &Path {
-        Path::new(self.path.as_str())
-    }
-
-    #[inline]
-    pub const fn is_file(&self) -> bool {
-        matches!(self.entry_type, EntryType::File)
-    }
-
-    pub fn get_splitted_path(&self) -> (&str, &str) {
-        self.path.split_at(self.file_name_index)
-    }
+pub fn populate_sizes_pool(components: impl Iterator<Item = u64>, ui: &Context) {
+    SIZES_POOL.with_borrow_mut(|pool| {
+        for component in components {
+            if !pool.contains_key(&component) {
+                let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
+                    crate::helper::format_bytes_simple(component),
+                    FontId::default(),
+                    Color32::DARK_GRAY,
+                )))
+                .into_galley_impl(
+                    ui,
+                    &ui.style(),
+                    TextWrapping::default(),
+                    FontSelection::Default,
+                    egui::Align::Center,
+                );
+                _ = pool.insert(component, galley);
+            }
+        }
+    })
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Default, Hash)]
@@ -181,6 +91,33 @@ pub enum CurrentPath {
     None,
     One(PathBuf),
     Multiple(Vec<PathBuf>),
+}
+
+impl CurrentPath {
+    pub fn get_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::None => None,
+            Self::One(path) => Some(path.clone()),
+            Self::Multiple(paths) => {
+                let mut common_path = paths.first()?.clone();
+                for path in paths.iter().skip(1) {
+                    let mut common_components = Vec::new();
+                    let common_iter = common_path.components().zip(path.components());
+
+                    for (a, b) in common_iter {
+                        if a == b {
+                            common_components.push(a);
+                        } else {
+                            break;
+                        }
+                    }
+
+                    common_path = common_components.into_iter().collect();
+                }
+                Some(common_path)
+            }
+        }
+    }
 }
 
 impl From<PathBuf> for CurrentPath {
@@ -244,12 +181,14 @@ impl CurrentPath {
 #[derive(Debug)]
 pub struct TabData {
     pub list: Vec<DirEntry>,
+    pub visible_entries: Vec<usize>,
     pub current_path: CurrentPath,
     pub show_hidden: bool,
     pub search: Option<Search>,
     pub watcher: Option<DirectoryWatcher>,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
+    pub top_display_path: TopDisplayPath,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -347,14 +286,18 @@ impl TabData {
         }
     }
     pub fn from_path(path: &Path) -> Self {
+        let mut top_display_path = TopDisplayPath::default();
+        top_display_path.build(path, false);
         let new = Self {
             id: get_id(),
             list: vec![],
+            visible_entries: vec![],
             current_path: CurrentPath::None,
             show_hidden: false,
             search: None,
             watcher: DirectoryWatcher::new().ok(),
             undoer: Undoer::default(),
+            top_display_path,
         };
         TabAction::ChangePaths(CurrentPath::One(path.into())).schedule_tab(new.id);
         new
@@ -364,7 +307,8 @@ impl TabData {
 pub struct MyTabViewer {
     closeable: bool,
     tab_paths: Vec<PathBuf>,
-    active_tab: Option<u32>,
+    active_tab: u32,
+    focused: bool,
 }
 
 impl TabViewer for MyTabViewer {
@@ -403,6 +347,8 @@ impl TabViewer for MyTabViewer {
     /// Defines the contents of a given `tab`.
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("MyTabViewer::ui");
         let cmd = ui.command_pressed();
         if !matches!(&tab.current_path, CurrentPath::None) {
             tab.undoer
@@ -418,7 +364,7 @@ impl TabViewer for MyTabViewer {
             ui.data_set_path(&tab.current_path, show_hidden.data);
             ActionToPerform::ViewSettingsChanged(super::DataSource::Local).schedule();
         }
-        if ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
+        if self.focused && ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
             let Some(parent) = tab.current_path.parent() else {
                 return;
             };
@@ -455,16 +401,17 @@ impl TabViewer for MyTabViewer {
         } else {
             false
         };
+        let table_id = Id::new(tab.id).with(&tab.current_path);
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .vscroll(true)
-            .id_salt(Id::new(tab.id).with(&tab.current_path))
+            .id_salt(table_id)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::remainder().at_least(260.0))
             .column(Column::auto().at_most(150.0).at_least(100.0))
             .column(Column::auto().at_most(150.0).at_least(100.0))
             .sense(egui::Sense::click());
-
+        let length = tab.visible_entries.len();
         if just_changed {
             if let Some(v) = selected_tabs.selected_fields.last()
                 && *v < tab.list.len()
@@ -474,7 +421,6 @@ impl TabViewer for MyTabViewer {
             }
         }
         let mut new_sort = None;
-
         table
             .header(text_height, |mut row| {
                 row.col(|col| {
@@ -524,9 +470,12 @@ impl TabViewer for MyTabViewer {
                 });
             })
             .body(|body| {
-                body.rows(text_height, tab.list.len(), |mut row| {
-                    let val = &tab.list[row.index()];
-                    let is_dir = val.entry_type == EntryType::Directory;
+                #[cfg(feature = "profiling")]
+                puffin::profile_scope!("MyTabViewer::ui::table_body");
+                body.rows(text_height, length, |mut row| {
+                    let index = tab.visible_entries[row.index()];
+                    let val = &tab.list[index];
+                    let is_dir = !val.is_file();
                     let indexed = row.index() + 1;
 
                     if row.index() == opened_popup {
@@ -535,6 +484,8 @@ impl TabViewer for MyTabViewer {
                         row.set_selected(true);
                     }
                     row.col(|ui| {
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("MyTabViewer::ui::table_body::first_column");
                         let color = if is_dir {
                             Color32::LIGHT_GRAY
                         } else {
@@ -581,16 +532,16 @@ impl TabViewer for MyTabViewer {
                             .sense(Sense::empty()),
                         );
 
-                        let ext = val
-                            .get_path()
-                            .extension()
-                            .unwrap_or_default()
-                            .to_ascii_lowercase();
-                        if ext.eq(&OsStr::new("png"))
-                            || ext.eq(&OsStr::new("jpg"))
-                            || ext.eq(&OsStr::new("jpeg"))
-                        {
-                            added_button.on_hover_ui(|ui| {
+                        added_button.on_hover_ui(|ui| {
+                            let ext = val
+                                .get_path()
+                                .extension()
+                                .unwrap_or_default()
+                                .to_ascii_lowercase();
+                            if ext.eq(&OsStr::new("png"))
+                                || ext.eq(&OsStr::new("jpg"))
+                                || ext.eq(&OsStr::new("jpeg"))
+                            {
                                 let path = std::fs::canonicalize(val.get_path())
                                     .unwrap_or_else(|_| val.get_path().to_path_buf())
                                     .to_string_lossy()
@@ -601,17 +552,17 @@ impl TabViewer for MyTabViewer {
                                         .maintain_aspect_ratio(true)
                                         .max_size(Vec2::new(300.0, 300.0)),
                                 );
-                            });
-                        } else {
-                            added_button.on_hover_text(val.path.as_str());
-                        }
+                            } else {
+                                ui.add(egui::Label::new(val.path.as_str()));
+                            }
+                        });
                     });
 
                     if row.response().double_clicked()
                         || convert_nr_to_egui_key(indexed)
                             .is_some_and(|k| row.response().ctx.key_with_command_pressed(k))
                     {
-                        if val.entry_type == EntryType::File {
+                        if val.is_file() {
                             ActionToPerform::SystemOpen(val.path.clone()).schedule();
                         } else {
                             let Ok(path) = std::fs::canonicalize(val.get_path()) else {
@@ -634,64 +585,47 @@ impl TabViewer for MyTabViewer {
                             .data_set_path(&tab.current_path, selected_tabs.clone());
                     }
                     row.col(|ui| {
-                        let time = {
-                            let datetime = std::time::UNIX_EPOCH
-                                + std::time::Duration::from_secs(val.modified_at.0);
-                            let system_time: std::time::SystemTime = datetime;
-                            system_time.elapsed().map_or_else(
-                                |_| "Future".to_string(),
-                                |elapsed| {
-                                    let days = elapsed.as_secs() / 86400;
-                                    if days > 0 {
-                                        format!("{days} days ago")
-                                    } else {
-                                        let hours = elapsed.as_secs() / 3600;
-                                        if hours > 0 {
-                                            format!("{hours} hours ago")
-                                        } else {
-                                            let minutes = elapsed.as_secs() / 60;
-                                            if minutes > 0 {
-                                                format!("{minutes} min ago")
-                                            } else {
-                                                "Just now".to_string()
-                                            }
-                                        }
-                                    }
-                                },
-                            )
-                        };
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("MyTabViewer::ui::table_body::time_column");
+                        // let time = {
+                        //     puffin::profile_scope!(
+                        //         "MyTabViewer::ui::table_body::time_column::string_build"
+                        //     );
+                        //     let Some(time) = TIME_POOL
+                        //         .with_borrow(|pool| pool.get(&val.since_modified).cloned())
+                        //     else {
+                        //         return;
+                        //     };
+                        //     time
+                        // };
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add(
-                                egui::Label::new(LayoutJob::simple_singleline(
-                                    time,
-                                    FontId::default(),
-                                    Color32::DARK_GRAY,
-                                ))
-                                .wrap_mode(egui::TextWrapMode::Truncate)
-                                .selectable(false)
-                                .sense(Sense::empty()),
-                            );
+                            ui.add(val.meta.since_modified);
                         });
                     });
                     row.col(|ui| {
-                        let size_text = if is_dir {
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("MyTabViewer::ui::table_body::size_column");
+                        if is_dir {
                             ui.add_space(1.0);
                             return;
-                        } else {
-                            crate::helper::format_bytes_simple(val.size)
-                        };
+                        }
+
                         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add(
-                                egui::Label::new(LayoutJob::simple_singleline(
-                                    size_text,
-                                    FontId::default(),
-                                    Color32::DARK_GRAY,
-                                ))
-                                .wrap_mode(egui::TextWrapMode::Truncate)
-                                .selectable(false)
-                                .sense(Sense::empty()),
-                            );
+                            draw_size(ui, val.meta.size)
                         });
+                        // let Some(size) =
+                        //     SIZES_POOL.with_borrow(|pool| pool.get(&val.size).cloned())
+                        // else {
+                        //     return;
+                        // };
+                        // ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                        //     ui.add(
+                        //         egui::Label::new(size)
+                        //             .wrap_mode(egui::TextWrapMode::Truncate)
+                        //             .selectable(false)
+                        //             .sense(Sense::empty()),
+                        //     );
+                        // });
                     });
                     let id = tab_popup_id.with(row.index());
                     egui::Popup::context_menu(&row.response())
@@ -827,6 +761,10 @@ impl TabViewer for MyTabViewer {
 
             ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Local).schedule();
         }
+        if !self.focused || !self.active_tab.eq(&tab.id) {
+            return;
+        }
+
         let input_key = ui.input(|i| {
             if i.key_pressed(egui::Key::ArrowDown) {
                 Some(egui::Key::ArrowDown)
@@ -842,9 +780,6 @@ impl TabViewer for MyTabViewer {
                 None
             }
         });
-        if !self.active_tab.is_some_and(|a| a.eq(&tab.id)) {
-            return;
-        }
         if let Some(change) = input_key {
             let new_value = match selected_tabs.selected_fields.last() {
                 Some(i) => match change {
@@ -889,6 +824,7 @@ impl TabViewer for MyTabViewer {
 #[derive(Debug)]
 pub struct MyTabs {
     dock_state: DockState<TabData>,
+    pub focused: bool,
 }
 
 impl MyTabs {
@@ -900,13 +836,26 @@ impl MyTabs {
         // Create a `DockState` with an initial tab "tab1" in the main `Surface`'s root node.
         let tabs = vec![TabData::from_path(path)];
         let dock_state = DockState::new(tabs);
-        Self { dock_state }
+        Self {
+            dock_state,
+            focused: false,
+        }
     }
 
     pub fn get_current_index(&mut self) -> Option<u32> {
         self.get_current_tab().map(|tab| tab.id)
     }
 
+    #[inline]
+    pub fn try_get_tab_by_target(&mut self, target: TabTarget) -> Option<&mut TabData> {
+        let tab_id = match target {
+            TabTarget::ActiveTab => self.get_current_index(),
+            TabTarget::TabWithId(id) => Some(id),
+        }?;
+        self.get_tab_by_id(tab_id)
+    }
+
+    #[inline]
     pub fn get_tab_by_id(&mut self, id: u32) -> Option<&mut TabData> {
         self.dock_state
             .iter_all_tabs_mut()
@@ -930,19 +879,27 @@ impl MyTabs {
     }
 
     pub fn ui(&mut self, ui: &mut Ui) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("MyTabs::ui");
         let tabs = self.get_tabs_paths();
         let tabs_len = self.dock_state.iter_all_tabs().count();
-        let active_tab = self.get_current_index();
-
-        for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
-            if item.check_for_file_system_events() {
-                TabAction::RequestFilesRefresh.schedule_tab(item.id);
+        let Some(active_tab) = self.get_current_index() else {
+            return;
+        };
+        {
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("MyTabs::ui::check_for_file_system_events");
+            for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
+                if item.check_for_file_system_events() {
+                    TabAction::RequestFilesRefresh.schedule_tab(item.id);
+                }
             }
         }
         let mut my_tab_viewer = MyTabViewer {
             closeable: tabs_len > 1,
             tab_paths: tabs,
             active_tab,
+            focused: self.focused,
         };
         DockArea::new(&mut self.dock_state)
             .show_leaf_close_all_buttons(false)

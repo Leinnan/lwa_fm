@@ -13,7 +13,15 @@ lto = true
 [profile.dev.package."*"]
 opt-level = 2
 
+[features]
+default = ["profiling"]
+profiling = ["dep:puffin", "dep:puffin_http", "profiling/profile-with-puffin"]
+
 [dependencies]
+log = { version = "0.4.28", features = ["std"] }
+profiling = { version = "1.0.17", default-features = false }
+puffin = {optional = true, version = "0.19.1"}
+puffin_http = {optional = true, version = "0.16.1"}
 icu = {git = "https://github.com/unicode-org/icu4x", rev = "4d2b015"}
 notify = "6.1"
 smallvec = "1.15"

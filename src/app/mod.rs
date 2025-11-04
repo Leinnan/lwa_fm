@@ -1,7 +1,8 @@
 use crate::app::commands::{COMMANDS_QUEUE, TabAction};
 use crate::app::directory_path_info::DirectoryPathInfo;
 use crate::app::directory_view_settings::DirectoryViewSettings;
-use crate::app::dock::{CurrentPath, DirEntry};
+use crate::app::dock::CurrentPath;
+use crate::data::files::DirEntry;
 use crate::helper::{DataHolder, KeyWithCommandPressed};
 use crate::locations::Locations;
 use crate::{app::settings::ApplicationSettings, locations::Location};
@@ -65,6 +66,8 @@ pub struct App {
     #[serde(skip)]
     command_palette: CommandPalette,
 }
+
+impl App {}
 
 #[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
 pub enum Sort {
@@ -190,20 +193,21 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn handle_action(&mut self, ctx: &egui::Context, action: ActionToPerform) {
-        let action_name = format!("{action:?}");
-        eprintln!("start {}", &action_name);
-        let start_time = std::time::Instant::now();
+        #[cfg(feature = "profiling")]
+        puffin::profile_function!("handle_action");
         match action {
             ActionToPerform::TabAction(target, action) => {
-                let tab_id = match target {
-                    commands::TabTarget::ActiveTab => self.tabs.get_current_index(),
-                    commands::TabTarget::TabWithId(id) => Some(id),
+                let Some(tab) = self.tabs.try_get_tab_by_target(target) else {
+                    return;
                 };
                 match action {
                     commands::TabAction::ChangePaths(path) => {
-                        let Some(tab) = tab_id.and_then(|id| self.tabs.get_tab_by_id(id)) else {
-                            return;
-                        };
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!(
+                            "handle_action::ChangePaths: {}",
+                            path.get_name_from_path()
+                        );
+
                         tab.set_path(path);
                         if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
                             let new_data = match tab.current_path.single_path() {
@@ -226,22 +230,31 @@ impl App {
                             ActionToPerform::TabAction(target, TabAction::RequestFilesRefresh),
                         );
                     }
-                    commands::TabAction::RequestFilesRefresh
-                    | commands::TabAction::FilterChanged => {
-                        let Some(tab) = tab_id.and_then(|id| self.tabs.get_tab_by_id(id)) else {
-                            return;
-                        };
+                    commands::TabAction::FilterChanged => {
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("handle_action::FilterChanged");
+                        tab.update_settings(ctx);
+                        tab.update_visible_entries();
+                    }
+                    commands::TabAction::RequestFilesRefresh => {
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("handle_action::RefreshFiles");
                         tab.update_settings(ctx);
                         tab.refresh_list();
+                        dock::populate_time_pool(
+                            tab.list.iter().map(|e| e.meta.since_modified),
+                            ctx,
+                        );
+                        dock::populate_sizes_pool(tab.list.iter().map(|e| e.meta.size), ctx);
                         self.handle_action(
                             ctx,
                             ActionToPerform::TabAction(target, TabAction::FilesSort),
                         );
                     }
                     commands::TabAction::FilesSort => {
-                        let Some(tab) = tab_id.and_then(|id| self.tabs.get_tab_by_id(id)) else {
-                            return;
-                        };
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("handle_action::FilesSort");
+
                         let settings = ctx
                             .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
                         tab.sort_entries(&settings.data);
@@ -262,10 +275,6 @@ impl App {
                                 ),
                             );
                         } else {
-                            let Some(tab) = tab_id.and_then(|id| self.tabs.get_tab_by_id(id))
-                            else {
-                                return;
-                            };
                             if !tab.can_undo() {
                                 return;
                             }
@@ -352,8 +361,6 @@ impl App {
                 let _ = open::that_detached(cow.as_str());
             }
         }
-        let duration = start_time.elapsed();
-        eprintln!("handle_action {action_name} took: {duration:?}");
     }
 }
 
@@ -365,6 +372,8 @@ impl eframe::App for App {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_function!("my_update");
         self.top_panel(ctx);
         self.bottom_panel(ctx);
         self.left_side_panel(ctx);

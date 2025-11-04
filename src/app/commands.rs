@@ -48,7 +48,7 @@ impl TabAction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TabTarget {
     #[default]
     ActiveTab,

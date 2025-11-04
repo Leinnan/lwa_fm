@@ -3,6 +3,7 @@ use egui::{CornerRadius, Sense, UiBuilder};
 use crate::consts::VERTICAL_SPACING;
 
 pub mod autocomplete_text;
+pub mod time_label;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonGroupElement {
