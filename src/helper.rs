@@ -2,7 +2,7 @@
 use std::any::Any;
 use std::hash::Hash;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use egui::util::id_type_map::{SerializableAny, TypeId};
@@ -10,6 +10,23 @@ use egui::{Context, Id, InputState, Ui};
 
 use crate::app::Data;
 use crate::app::dock::CurrentPath;
+
+pub trait PathHelper {
+    fn to_full_path(&self) -> Option<PathBuf>;
+    fn to_full_path_string(&self) -> String;
+}
+
+impl<T: AsRef<Path>> PathHelper for T {
+    fn to_full_path(&self) -> Option<PathBuf> {
+        std::fs::canonicalize(self).ok()
+    }
+    fn to_full_path_string(&self) -> String {
+        match self.to_full_path() {
+            Some(p) => p.to_string_lossy().replace("\\\\?\\", ""),
+            None => self.as_ref().to_string_lossy().replace("\\\\?\\", ""),
+        }
+    }
+}
 
 #[allow(dead_code)]
 pub trait DataHolder {

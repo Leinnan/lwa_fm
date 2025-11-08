@@ -9,8 +9,10 @@ use crate::{app::settings::ApplicationSettings, locations::Location};
 use command_palette::CommandPalette;
 use commands::{ActionToPerform, ModalWindow};
 use egui::TextBuffer;
+use mlua::Lua;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::str::FromStr;
@@ -26,6 +28,21 @@ pub mod dock;
 mod settings;
 mod side_panel;
 mod top_bottom;
+
+thread_local! {
+    pub static LUA_INSTANCE: RefCell<Lua> = RefCell::new({
+        let lua = Lua::new();
+
+        lua
+    });
+}
+
+// fn print_from_lua() {
+//     LUA_INSTANCE.with_borrow(|lua| match lua.load("print(\"Hello!\")").exec() {
+//         Ok(_) => println!("Lua print executed successfully"),
+//         Err(err) => println!("Lua print failed: {}", err),
+//     });
+// }
 
 pub static TOASTS: std::sync::LazyLock<egui::mutex::RwLock<egui_notify::Toasts>> =
     std::sync::LazyLock::new(|| {
@@ -208,6 +225,7 @@ impl App {
                             path.get_name_from_path()
                         );
 
+                        path.print_from_lua();
                         tab.set_path(path);
                         if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
                             let new_data = match tab.current_path.single_path() {

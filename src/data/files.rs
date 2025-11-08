@@ -169,9 +169,16 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
         })
     }
 }
+impl AsRef<Path> for DirEntry {
+    #[inline]
+    fn as_ref(&self) -> &Path {
+        Path::new(self.path.as_str())
+    }
+}
+
 impl DirEntry {
     pub fn get_path(&self) -> &Path {
-        Path::new(self.path.as_str())
+        self.as_ref()
     }
 
     #[inline]

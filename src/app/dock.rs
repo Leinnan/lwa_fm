@@ -9,7 +9,9 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
 use icu::collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu::collator::{Collator, CollatorBorrowed};
 use icu::locale::Locale;
+use mlua::{Function, UserData};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -18,20 +20,19 @@ use std::{ffi::OsStr, path::PathBuf};
 use egui::Vec2;
 use egui_extras::{Column, TableBuilder};
 
+use super::commands::ActionToPerform;
 use crate::app::command_palette::build_for_path;
 use crate::app::commands::{ModalWindow, TabAction, TabTarget};
-use crate::data::time::ElapsedTime;
-use crate::widgets::time_label::draw_size;
-// use crate::app::dir_handling::COLLATER;
-use super::commands::ActionToPerform;
 use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
 use crate::app::top_bottom::TopDisplayPath;
-use crate::app::{Search, Sort};
+use crate::app::{LUA_INSTANCE, Search, Sort};
 use crate::data::files::DirEntry;
-use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer};
+use crate::data::time::ElapsedTime;
+use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer, PathHelper};
 use crate::locations::Locations;
 use crate::toast;
 use crate::watcher::DirectoryWatcher;
+use crate::widgets::time_label::draw_size;
 use std::cell::RefCell;
 
 thread_local! {
@@ -93,7 +94,39 @@ pub enum CurrentPath {
     Multiple(Vec<PathBuf>),
 }
 
+impl UserData for CurrentPath {
+    fn add_fields<F: mlua::UserDataFields<Self>>(_: &mut F) {}
+
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("print_path", |c, this, ()| {
+            let path = this.get_name_from_path();
+            let full_path: Cow<'static, str> = match this {
+                CurrentPath::One(path_buf) => path_buf
+                    .to_full_path()
+                    .map(|p| Cow::Owned(p.to_string_lossy().to_string())),
+                _ => None,
+            }
+            .unwrap_or_default();
+            let print: Function = c.globals().get("print")?;
+            print.call::<()>(("FROM LUA: ", path.as_str()))?;
+            print.call::<()>(("Full path: ", full_path.as_ref()))?;
+            Ok(())
+        });
+
+        // Constructor
+        // methods.add_meta_function(MetaMethod::Call, |_, ()| Ok(Rectangle::default()));
+    }
+}
+
 impl CurrentPath {
+    pub fn print_from_lua(&self) {
+        let data = self.clone();
+        LUA_INSTANCE.with_borrow(|f| {
+            let globals = f.globals();
+            _ = globals.set("cur_dir", data);
+            let _ = f.load("cur_dir:print_path()").exec();
+        });
+    }
     pub fn get_path(&self) -> Option<PathBuf> {
         match self {
             Self::None => None,
@@ -542,10 +575,7 @@ impl TabViewer for MyTabViewer {
                                 || ext.eq(&OsStr::new("jpg"))
                                 || ext.eq(&OsStr::new("jpeg"))
                             {
-                                let path = std::fs::canonicalize(val.get_path())
-                                    .unwrap_or_else(|_| val.get_path().to_path_buf())
-                                    .to_string_lossy()
-                                    .replace("\\\\?\\", "");
+                                let path = val.to_full_path_string();
                                 let path = format!("file://{path}");
                                 ui.add(
                                     egui::Image::new(path)
