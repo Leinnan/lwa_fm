@@ -6,7 +6,7 @@ impl App {
     #[allow(clippy::too_many_lines)] // todo refactor
     pub(crate) fn central_panel(&mut self, ctx: &Context) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("central_panel");
+        puffin::profile_scope!("lwa_fm::central_panel");
         let frame = egui::Frame::central_panel(&ctx.style())
             .shadow(Shadow::NONE)
             .inner_margin(egui::Margin::ZERO)

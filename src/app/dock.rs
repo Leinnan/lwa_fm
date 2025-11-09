@@ -31,7 +31,6 @@ use crate::data::time::ElapsedTime;
 use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer, PathHelper};
 use crate::locations::Locations;
 use crate::toast;
-use crate::watcher::DirectoryWatcher;
 use crate::widgets::time_label::draw_size;
 use std::cell::RefCell;
 
@@ -62,14 +61,14 @@ pub fn populate_time_pool(components: impl Iterator<Item = ElapsedTime>, ui: &Co
 }
 
 thread_local! {
-    pub static SIZES_POOL: RefCell<HashMap<u64, Arc<Galley>>> = RefCell::new(HashMap::default());
+    pub static SIZES_POOL: RefCell<HashMap<u32, Arc<Galley>>> = RefCell::new(HashMap::default());
 }
-pub fn populate_sizes_pool(components: impl Iterator<Item = u64>, ui: &Context) {
+pub fn populate_sizes_pool(components: impl Iterator<Item = u32>, ui: &Context) {
     SIZES_POOL.with_borrow_mut(|pool| {
         for component in components {
             if !pool.contains_key(&component) {
                 let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-                    crate::helper::format_bytes_simple(component),
+                    crate::helper::format_bytes_simple(component as u64),
                     FontId::default(),
                     Color32::DARK_GRAY,
                 )))
@@ -218,7 +217,7 @@ pub struct TabData {
     pub current_path: CurrentPath,
     pub show_hidden: bool,
     pub search: Option<Search>,
-    pub watcher: Option<DirectoryWatcher>,
+    // pub watcher: Option<DirectoryWatcher>,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
     pub top_display_path: TopDisplayPath,
@@ -328,7 +327,7 @@ impl TabData {
             current_path: CurrentPath::None,
             show_hidden: false,
             search: None,
-            watcher: DirectoryWatcher::new().ok(),
+            // watcher: DirectoryWatcher::new().ok(),
             undoer: Undoer::default(),
             top_display_path,
         };
@@ -381,7 +380,7 @@ impl TabViewer for MyTabViewer {
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("MyTabViewer::ui");
+        puffin::profile_scope!("lwa_fm::MyTabViewer::ui");
         let cmd = ui.command_pressed();
         if !matches!(&tab.current_path, CurrentPath::None) {
             tab.undoer
@@ -504,7 +503,7 @@ impl TabViewer for MyTabViewer {
             })
             .body(|body| {
                 #[cfg(feature = "profiling")]
-                puffin::profile_scope!("MyTabViewer::ui::table_body");
+                puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body");
                 body.rows(text_height, length, |mut row| {
                     let index = tab.visible_entries[row.index()];
                     let val = &tab.list[index];
@@ -518,7 +517,7 @@ impl TabViewer for MyTabViewer {
                     }
                     row.col(|ui| {
                         #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("MyTabViewer::ui::table_body::first_column");
+                        puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::first_column");
                         let color = if is_dir {
                             Color32::LIGHT_GRAY
                         } else {
@@ -593,7 +592,7 @@ impl TabViewer for MyTabViewer {
                             .is_some_and(|k| row.response().ctx.key_with_command_pressed(k))
                     {
                         if val.is_file() {
-                            ActionToPerform::SystemOpen(val.path.clone()).schedule();
+                            ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
                         } else {
                             let Ok(path) = std::fs::canonicalize(val.get_path()) else {
                                 return;
@@ -616,7 +615,7 @@ impl TabViewer for MyTabViewer {
                     }
                     row.col(|ui| {
                         #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("MyTabViewer::ui::table_body::time_column");
+                        puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::time_column");
                         // let time = {
                         //     puffin::profile_scope!(
                         //         "MyTabViewer::ui::table_body::time_column::string_build"
@@ -634,7 +633,7 @@ impl TabViewer for MyTabViewer {
                     });
                     row.col(|ui| {
                         #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("MyTabViewer::ui::table_body::size_column");
+                        puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::size_column");
                         if is_dir {
                             ui.add_space(1.0);
                             return;
@@ -672,7 +671,7 @@ impl TabViewer for MyTabViewer {
                             }
                             if !is_dir {
                                 if ui.button("Open").clicked() {
-                                    ActionToPerform::SystemOpen(val.path.clone()).schedule();
+                                    ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
                                     ui.close();
                                     return;
                                 }
@@ -828,7 +827,7 @@ impl TabViewer for MyTabViewer {
                             return;
                         };
                         if entry.is_file() {
-                            ActionToPerform::SystemOpen(entry.path.clone()).schedule();
+                            ActionToPerform::SystemOpen(entry.path.clone().into()).schedule();
                         } else {
                             TabAction::ChangePaths(entry.get_path().to_path_buf().into())
                                 .schedule_tab(tab_id);
@@ -910,21 +909,21 @@ impl MyTabs {
 
     pub fn ui(&mut self, ui: &mut Ui) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("MyTabs::ui");
+        puffin::profile_scope!("lwa_fm::MyTabs::ui");
         let tabs = self.get_tabs_paths();
         let tabs_len = self.dock_state.iter_all_tabs().count();
         let Some(active_tab) = self.get_current_index() else {
             return;
         };
-        {
-            #[cfg(feature = "profiling")]
-            puffin::profile_scope!("MyTabs::ui::check_for_file_system_events");
-            for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
-                if item.check_for_file_system_events() {
-                    TabAction::RequestFilesRefresh.schedule_tab(item.id);
-                }
-            }
-        }
+        // {
+        //     #[cfg(feature = "profiling")]
+        //     puffin::profile_scope!("lwa_fm::MyTabs::ui::check_for_file_system_events");
+        //     for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
+        //         if item.check_for_file_system_events() {
+        //             TabAction::RequestFilesRefresh.schedule_tab(item.id);
+        //         }
+        //     }
+        // }
         let mut my_tab_viewer = MyTabViewer {
             closeable: tabs_len > 1,
             tab_paths: tabs,

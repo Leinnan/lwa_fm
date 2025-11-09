@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     thread,
@@ -11,6 +12,8 @@ use notify::{
     event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode},
 };
 
+use crate::toast;
+
 #[derive(Debug, Clone)]
 pub enum FileSystemEvent {
     Created(PathBuf),
@@ -18,6 +21,107 @@ pub enum FileSystemEvent {
     Deleted(PathBuf),
     Renamed { from: PathBuf, to: PathBuf },
     Error(String),
+}
+
+#[derive(Debug, Default)]
+pub struct DirectoryWatchers {
+    watchers: HashMap<PathBuf, DirectoryWatcher>,
+    receivers: Option<Receiver<DirectoryWatcher>>,
+}
+
+impl DirectoryWatchers {
+    #[inline]
+    pub fn stop(&mut self, path: &PathBuf) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::DirectoryWatchers::stop");
+        let Some(mut watcher) = self.watchers.remove(path) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            watcher.stop_watching();
+        });
+    }
+
+    pub fn start(&mut self, path: PathBuf) -> Result<()> {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::DirectoryWatchers::start");
+
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let Ok(mut watcher) = DirectoryWatcher::new() else {
+                return;
+            };
+            if let Err(err) = watcher.watch_directory(&path) {
+                eprintln!("Failed to watch directory: {}", err);
+                return;
+            }
+            _ = tx.send(watcher);
+        });
+        self.receivers = Some(rx);
+        Ok(())
+    }
+
+    pub fn check_for_new_watchers(&mut self) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_new_watchers");
+        let mut remove = false;
+        if let Some(receiver) = &self.receivers {
+            if let Ok(watcher) = receiver.try_recv() {
+                if let Some(path) = watcher.current_path.as_ref() {
+                    self.watchers.insert(path.to_path_buf(), watcher);
+                }
+                remove = true;
+            }
+        };
+        if remove {
+            self.receivers = None;
+        }
+    }
+
+    pub fn check_for_file_system_events(&mut self) -> bool {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_file_system_events");
+        let mut should_refresh = false;
+        for watcher in self.watchers.values_mut() {
+            // Process all pending events
+            while let Some(event) = watcher.try_recv_event() {
+                should_refresh = true;
+                match event {
+                    FileSystemEvent::Created(path) => {
+                        if let Some(file_name) = path.file_name() {
+                            toast!(Info, "File created: {}", file_name.to_string_lossy());
+                        }
+                    }
+                    FileSystemEvent::Modified(path) => {
+                        if let Some(file_name) = path.file_name() {
+                            toast!(Info, "File modified: {}", file_name.to_string_lossy());
+                        }
+                    }
+                    FileSystemEvent::Deleted(path) => {
+                        if let Some(file_name) = path.file_name() {
+                            toast!(Warning, "File deleted: {}", file_name.to_string_lossy());
+                        }
+                    }
+                    FileSystemEvent::Renamed { from, to } => {
+                        if let (Some(from_name), Some(to_name)) = (from.file_name(), to.file_name())
+                        {
+                            toast!(
+                                Info,
+                                "File renamed: {} → {}",
+                                from_name.to_string_lossy(),
+                                to_name.to_string_lossy()
+                            );
+                        }
+                    }
+                    FileSystemEvent::Error(err) => {
+                        toast!(Error, "File system error: {}", err);
+                    }
+                }
+            }
+        }
+        should_refresh
+    }
 }
 
 #[derive(Debug)]
@@ -72,7 +176,7 @@ impl DirectoryWatcher {
 
     pub fn watch_directory<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("dir_handling::watch_directory");
+        puffin::profile_scope!("lwa_fm::dir_handling::watch_directory");
         // self.stop_watching();
         let path = path.as_ref().to_path_buf();
 
@@ -85,16 +189,16 @@ impl DirectoryWatcher {
         Ok(())
     }
 
-    #[inline]
     pub fn stop_watching(&mut self) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("dir_handling::watch_directory::unwatch");
+        puffin::profile_scope!("lwa_fm::dir_handling::watch_directory::unwatch");
         if let Some(path) = &self.current_path {
             let _ = self.watcher.unwatch(path);
             self.current_path = None;
         }
     }
 
+    #[inline]
     pub fn try_recv_event(&self) -> Option<FileSystemEvent> {
         self.receiver.try_recv().ok()
     }

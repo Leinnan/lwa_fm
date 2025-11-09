@@ -5,6 +5,7 @@ use crate::app::dock::CurrentPath;
 use crate::data::files::DirEntry;
 use crate::helper::{DataHolder, KeyWithCommandPressed};
 use crate::locations::Locations;
+use crate::watcher::DirectoryWatchers;
 use crate::{app::settings::ApplicationSettings, locations::Location};
 use command_palette::CommandPalette;
 use commands::{ActionToPerform, ModalWindow};
@@ -21,7 +22,8 @@ use std::{fs, path::PathBuf};
 mod central_panel;
 pub mod command_palette;
 pub mod commands;
-mod dir_handling;
+pub mod database;
+pub mod dir_handling;
 pub mod directory_path_info;
 mod directory_view_settings;
 pub mod dock;
@@ -36,7 +38,6 @@ thread_local! {
         lua
     });
 }
-
 // fn print_from_lua() {
 //     LUA_INSTANCE.with_borrow(|lua| match lua.load("print(\"Hello!\")").exec() {
 //         Ok(_) => println!("Lua print executed successfully"),
@@ -82,6 +83,8 @@ pub struct App {
     display_modal: Option<ModalWindow>,
     #[serde(skip)]
     command_palette: CommandPalette,
+    #[serde(skip, default)]
+    pub watchers: DirectoryWatchers,
 }
 
 impl App {}
@@ -177,6 +180,7 @@ impl Default for App {
             settings: ApplicationSettings::default(),
             display_modal: None,
             command_palette,
+            watchers: DirectoryWatchers::default(),
         }
     }
 }
@@ -211,7 +215,8 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn handle_action(&mut self, ctx: &egui::Context, action: ActionToPerform) {
         #[cfg(feature = "profiling")]
-        puffin::profile_function!("handle_action");
+        puffin::profile_function!("lwa_fm::handle_action");
+
         match action {
             ActionToPerform::TabAction(target, action) => {
                 let Some(tab) = self.tabs.try_get_tab_by_target(target) else {
@@ -221,12 +226,18 @@ impl App {
                     commands::TabAction::ChangePaths(path) => {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!(
-                            "handle_action::ChangePaths: {}",
+                            "lwa_fm::handle_action::ChangePaths: {}",
                             path.get_name_from_path()
                         );
+                        if let Some(old_path) = tab.current_path.get_path() {
+                            self.watchers.stop(&old_path);
+                        }
 
                         path.print_from_lua();
-                        tab.set_path(path);
+                        let new_path = tab.set_path(path);
+                        if let Some(new_path) = new_path.get_path() {
+                            _ = self.watchers.start(new_path);
+                        }
                         if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
                             let new_data = match tab.current_path.single_path() {
                                 Some(p) => {
@@ -250,13 +261,13 @@ impl App {
                     }
                     commands::TabAction::FilterChanged => {
                         #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("handle_action::FilterChanged");
+                        puffin::profile_scope!("lwa_fm::handle_action::FilterChanged");
                         tab.update_settings(ctx);
                         tab.update_visible_entries();
                     }
                     commands::TabAction::RequestFilesRefresh => {
                         #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("handle_action::RefreshFiles");
+                        puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles");
                         tab.update_settings(ctx);
                         tab.refresh_list();
                         dock::populate_time_pool(
@@ -264,6 +275,12 @@ impl App {
                             ctx,
                         );
                         dock::populate_sizes_pool(tab.list.iter().map(|e| e.meta.size), ctx);
+
+                        // _ = thread::spawn(move || {
+                        //     thread::sleep(Duration::from_secs_f32(0.2));
+                        //     COMMANDS_QUEUE
+                        //         .push(ActionToPerform::TabAction(target, TabAction::FilesSort));
+                        // });
                         self.handle_action(
                             ctx,
                             ActionToPerform::TabAction(target, TabAction::FilesSort),
@@ -271,7 +288,7 @@ impl App {
                     }
                     commands::TabAction::FilesSort => {
                         #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("handle_action::FilesSort");
+                        puffin::profile_scope!("lwa_fm::handle_action::FilesSort");
 
                         let settings = ctx
                             .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
@@ -481,6 +498,24 @@ impl eframe::App for App {
         TOASTS.write().show(ctx);
         while let Some(action) = COMMANDS_QUEUE.pop() {
             self.handle_action(ctx, action);
+        }
+        {
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("lwa_fm::MyTabs::ui::check_for_new_watchers");
+            self.watchers.check_for_new_watchers();
+        }
+        {
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("lwa_fm::MyTabs::ui::check_for_file_system_events");
+            if self.watchers.check_for_file_system_events() {
+                self.handle_action(
+                    ctx,
+                    ActionToPerform::TabAction(
+                        commands::TabTarget::ActiveTab,
+                        TabAction::RequestFilesRefresh,
+                    ),
+                );
+            }
         }
     }
 }

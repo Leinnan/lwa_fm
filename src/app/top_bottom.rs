@@ -132,7 +132,7 @@ impl App {
     #[allow(clippy::needless_pass_by_ref_mut)]
     pub(crate) fn top_display(tab: &TabData, ui: &mut Ui) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("top_display");
+        puffin::profile_scope!("lwa_fm::top_display");
         let tab_index = tab.id;
         let parts = tab.top_display_path.len();
         #[allow(unused_variables)]
@@ -198,7 +198,7 @@ impl App {
 
     fn undo_redo_up(&mut self, ui: &mut Ui) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("undo_redo_up");
+        puffin::profile_scope!("lwa_fm::undo_redo_up");
         let Some(current_tab) = self.tabs.get_current_tab() else {
             return;
         };
@@ -230,7 +230,7 @@ impl App {
 
     pub(crate) fn top_panel(&mut self, ctx: &Context) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("top_panel");
+        puffin::profile_scope!("lwa_fm::top_panel");
         let is_searching = self
             .tabs
             .get_current_tab()
@@ -398,7 +398,7 @@ impl App {
 
     pub(crate) fn bottom_panel(&mut self, ctx: &Context) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("bottom_panel");
+        puffin::profile_scope!("lwa_fm::bottom_panel");
         let mut sort_changed = false;
         egui::TopBottomPanel::bottom("bottomPanel")
             .frame(egui::Frame::canvas(&ctx.style()))

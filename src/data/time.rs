@@ -4,8 +4,24 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct TimestampSeconds(u64);
+use bincode::{Decode, Encode};
+use serde::{Deserialize, Serialize};
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Deserialize,
+    Serialize,
+    Decode,
+    Encode,
+)]
+pub struct TimestampSeconds(u32);
 
 impl TimestampSeconds {
     #[inline]
@@ -28,7 +44,7 @@ impl TimestampSeconds {
 }
 
 impl Deref for TimestampSeconds {
-    type Target = u64;
+    type Target = u32;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -39,10 +55,10 @@ impl From<SystemTime> for TimestampSeconds {
     #[inline]
     fn from(value: SystemTime) -> Self {
         // Unix timestamp in seconds (valid until year 2262)
-        let timestamp_seconds: u64 = value
+        let timestamp_seconds = value
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_secs() as u32;
         Self(timestamp_seconds)
     }
 }
@@ -50,19 +66,33 @@ impl From<SystemTime> for TimestampSeconds {
 impl Into<Duration> for TimestampSeconds {
     #[inline]
     fn into(self) -> Duration {
-        Duration::from_secs(self.0)
+        Duration::from_secs(self.0 as u64)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Hash,
+    Deserialize,
+    Serialize,
+    Decode,
+    Encode,
+)]
 pub enum ElapsedTime {
     #[default]
     None,
-    Seconds(u64),
-    Minutes(u64),
-    Hours(u64),
-    Days(u64),
-    Years(u64),
+    Seconds(u32),
+    Minutes(u32),
+    Hours(u32),
+    Days(u32),
+    Years(u32),
 }
 
 impl ElapsedTime {
@@ -72,16 +102,16 @@ impl ElapsedTime {
         if days > 0 {
             let years = days / 365;
             if years > 0 {
-                Self::Years(years)
+                Self::Years(years as u32)
             } else {
-                Self::Days(days)
+                Self::Days(days as u32)
             }
         } else if seconds > 3600 {
-            Self::Hours(seconds / 3600)
+            Self::Hours(seconds as u32 / 3600)
         } else if seconds > 60 {
-            Self::Minutes(seconds / 60)
+            Self::Minutes(seconds as u32 / 60)
         } else {
-            Self::Seconds(seconds)
+            Self::Seconds(seconds as u32)
         }
     }
 }

@@ -7,7 +7,7 @@ use super::App;
 impl App {
     pub(crate) fn left_side_panel(&mut self, ctx: &Context) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("left_side_panel");
+        puffin::profile_scope!("lwa_fm::left_side_panel");
         let enabled = self
             .tabs
             .get_current_tab()

@@ -1,4 +1,4 @@
-use egui::{text::LayoutJob, *};
+use egui::{Color32, FontId, Layout, Response, Sense, Ui, Widget, epaint, text::LayoutJob};
 
 use crate::data::time::{ElapsedTime, TimestampSeconds};
 
@@ -6,7 +6,7 @@ impl Widget for ElapsedTime {
     #[inline]
     fn ui(self, ui: &mut Ui) -> Response {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("MyTabViewer::ui::table_body::time_column::time_label");
+        puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::time_column::time_label");
         let Some(galley) = crate::app::dock::TIME_POOL.with_borrow(|pool| pool.get(&self).cloned())
         else {
             return ui.response();
@@ -27,9 +27,9 @@ impl Widget for ElapsedTime {
     }
 }
 #[inline]
-pub fn draw_size(ui: &mut Ui, size: u64) -> Response {
+pub fn draw_size(ui: &mut Ui, size: u32) -> Response {
     #[cfg(feature = "profiling")]
-    puffin::profile_scope!("MyTabViewer::ui::table_body::size_column::draw_size");
+    puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::size_column::draw_size");
     let Some(galley) = crate::app::dock::SIZES_POOL.with_borrow(|pool| pool.get(&size).cloned())
     else {
         return ui.response();
@@ -55,9 +55,9 @@ pub struct TimeLabel {
     timestamp: TimestampSeconds,
 }
 
-impl TimeLabel {
+impl Default for TimeLabel {
     #[inline]
-    pub fn new() -> Self {
+    fn default() -> Self {
         Self {
             text: LayoutJob::simple_singleline(
                 String::with_capacity(15),
@@ -67,11 +67,14 @@ impl TimeLabel {
             timestamp: TimestampSeconds::default(),
         }
     }
+}
+
+impl TimeLabel {
     #[inline]
     pub fn update(&mut self, timestamp: TimestampSeconds) {
         use std::fmt::Write;
         self.text.text.clear();
-        let datetime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(*timestamp);
+        let datetime = timestamp.system_time();
         match datetime.elapsed() {
             Ok(elapsed) => {
                 let days = elapsed.as_secs() / 86400;

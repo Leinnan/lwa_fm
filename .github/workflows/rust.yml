@@ -31,6 +31,5 @@ jobs:
           key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-build-
       - uses: extractions/setup-just@v2
-
       - name: Validate
         run: just validate
