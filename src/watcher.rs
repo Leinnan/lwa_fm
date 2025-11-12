@@ -69,7 +69,7 @@ impl DirectoryWatchers {
         if let Some(receiver) = &self.receivers {
             if let Ok(watcher) = receiver.try_recv() {
                 if let Some(path) = watcher.current_path.as_ref() {
-                    self.watchers.insert(path.to_path_buf(), watcher);
+                    self.watchers.insert(path.clone(), watcher);
                 }
                 remove = true;
             }

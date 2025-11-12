@@ -7,7 +7,7 @@ use std::{
 
 use icu::collator::CollatorBorrowed;
 use rayon::{
-    iter::{IntoParallelRefMutIterator, ParallelBridge, ParallelExtend, ParallelIterator},
+    iter::{ParallelBridge, ParallelExtend, ParallelIterator},
     slice::ParallelSliceMut,
 };
 
@@ -125,63 +125,6 @@ impl TabData {
         // }
     }
 
-    #[allow(dead_code)]
-    fn read_dir_filter(&mut self) {
-        let case_sensitive = self
-            .search
-            .as_ref()
-            .is_some_and(|search| search.case_sensitive);
-        let search = self
-            .search
-            .as_ref()
-            .map(|search| search.value.as_str())
-            .unwrap_or_default();
-        let search_len = search.len();
-        let collator = build_collator(case_sensitive);
-        let directories: &[PathBuf] = match &self.current_path {
-            CurrentPath::None => &[],
-            CurrentPath::One(path_buf) => std::slice::from_ref(path_buf),
-            CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
-        };
-
-        let depth = self.search.as_ref().map_or(1, |search| search.depth);
-        self.list = directories
-            .iter()
-            .flat_map(|d| {
-                walkdir::WalkDir::new(d)
-                    .follow_links(true)
-                    .max_depth(depth)
-                    .into_iter()
-                    .flatten()
-                    .skip(1)
-                    .filter_map(|e| {
-                        let s = e.file_name().to_string_lossy();
-                        if !self.show_hidden && (s.starts_with('.') || s.starts_with('$')) {
-                            return None;
-                        }
-                        if search_len > s.len() {
-                            return None;
-                        }
-                        let chars = s.as_bytes();
-                        let mut found = false;
-                        for i in 0..=(s.len() - search_len) {
-                            if collator.compare_utf8(search.as_bytes(), &chars[i..i + search_len])
-                                == Ordering::Equal
-                            {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if !found {
-                            return None;
-                        }
-                        e.try_into().ok()
-                    })
-                    .collect::<Vec<crate::data::files::DirEntry>>()
-            })
-            .collect();
-    }
-
     // pub fn get_visible_entries(&self) -> impl Iterator<Item = &DirEntry> {
     //     self.visible_entries.iter().map(|&idx| &self.list[idx])
     // }
@@ -205,34 +148,40 @@ impl TabData {
         let search_len = search.len();
         let collator = build_collator(case_sensitive);
         for (i, entry) in self.list.iter().enumerate() {
-            let mut visible = true;
             if !self.show_hidden {
                 let name = entry.get_splitted_path().1;
                 if name.starts_with(".") || name.starts_with("$") {
-                    visible = false;
+                    continue;
                 }
             }
             if is_searching {
                 let name = entry.get_splitted_path().1;
                 if search_len > name.len() {
-                    visible = false;
-                } else {
-                    let chars = name.as_bytes();
-                    let mut found = false;
-                    for i in 0..=(name.len() - search_len) {
-                        if collator.compare_utf8(search.as_bytes(), &chars[i..i + search_len])
-                            == Ordering::Equal
-                        {
-                            found = true;
-                            break;
-                        }
+                    continue;
+                }
+                let chars = name.as_bytes();
+                let mut found = false;
+                for i in 0..=(name.len() - search_len) {
+                    if collator.compare_utf8(search.as_bytes(), &chars[i..i + search_len])
+                        == Ordering::Equal
+                    {
+                        found = true;
+                        log::error!(
+                            "MATCH: {}",
+                            name[i..i + search_len].escape_debug().to_string()
+                        );
+                        break;
                     }
-                    visible &= found;
+                }
+                if !found {
+                    if name.contains(search) {
+                        log::error!("WTF: {}", name);
+                    } else {
+                        continue;
+                    }
                 }
             }
-            if visible {
-                self.visible_entries.push(i);
-            }
+            self.visible_entries.push(i);
         }
     }
 
@@ -267,8 +216,18 @@ impl TabData {
             }
             CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
         };
-
+        let depth = self.search.as_ref().map_or(1, |search| search.depth);
+        eprintln!("DEPTH: {}", depth);
         for d in directories {
+            self.list.extend(
+                walkdir::WalkDir::new(d)
+                    .follow_links(true)
+                    .max_depth(depth)
+                    .into_iter()
+                    .flatten()
+                    .skip(1)
+                    .filter_map(|e| e.try_into().ok()),
+            );
             let paths = {
                 #[cfg(feature = "profiling")]
                 puffin::profile_scope!("lwa_fm::dir_handling::read_dir::with_hidden::dir");
@@ -285,8 +244,6 @@ impl TabData {
                 e.try_into().ok()
             }));
         }
-
-        self.list.par_iter_mut().for_each(|e| e.read_metadata());
     }
 
     pub fn sort_entries(&mut self, sort_settings: &DirectoryViewSettings) {

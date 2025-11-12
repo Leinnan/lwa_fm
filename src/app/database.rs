@@ -1,10 +1,10 @@
 use crate::data::files::{DirContent, DirEntry};
 use bincode::config;
 use directories::ProjectDirs;
-use std::{os::unix::ffi::OsStrExt, path::Path, sync::LazyLock, thread};
+use std::{path::Path, sync::LazyLock, thread};
 
 pub static SLED_DIRS: LazyLock<sled::Db> = LazyLock::new(|| {
-    let path = ProjectDirs::from("com", "Crayen", "Files").expect("");
+    let path = ProjectDirs::from("com", "Crayen", "Files2").expect("");
     if !path.data_dir().exists() {
         std::fs::create_dir_all(path.data_dir()).expect("Failed to create data directory");
     }
@@ -16,10 +16,12 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
     #[cfg(feature = "profiling")]
     puffin::profile_scope!("lwa_fm::dir_handling::db_read");
     let config = config::standard();
-    let path = dir.as_os_str().as_bytes().to_vec();
+    let path = dir.as_os_str().as_encoded_bytes().to_vec();
     if let Ok(Some(data)) = SLED_DIRS.get(&path) {
+        #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::db_read::deserialize");
         if let Ok((meta, _)) = bincode::decode_from_slice::<DirContent, _>(&data[..], config) {
+            #[cfg(feature = "profiling")]
             puffin::profile_scope!("lwa_fm::dir_handling::db_read::deserialize::extend");
             meta.populate(entries);
             return;

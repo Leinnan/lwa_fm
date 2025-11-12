@@ -1,15 +1,12 @@
 use crate::{
     app::dir_handling::COLLATER,
     data::time::{ElapsedTime, TimestampSeconds},
+    helper::PathHelper,
 };
 use bincode::{Decode, Encode};
 use rayon::iter::{IntoParallelRefIterator, ParallelBridge, ParallelExtend, ParallelIterator};
 use serde::{Deserialize, Serialize};
-use std::{
-    cmp::Ordering,
-    fs::FileType,
-    path::{Path, PathBuf},
-};
+use std::{cmp::Ordering, fs::FileType, path::Path};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Decode, Encode,
@@ -77,7 +74,7 @@ impl SortKey {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Decode, Encode)]
 pub struct DirContent {
-    pub path: PathBuf,
+    pub path: String,
     pub entries: Vec<DirEntryData>,
 }
 
@@ -94,23 +91,24 @@ impl DirContent {
         let entries: Vec<DirEntryData> = paths
             .par_bridge()
             .filter_map(|e| {
+                #[cfg(feature = "profiling")]
                 puffin::profile_scope!("lwa_fm::dir_handling::db_read::db_mapping::entry");
                 let e = e.ok()?;
                 e.try_into().ok()
             })
             .collect();
         Some(Self {
-            path: dir.into(),
+            path: dir.to_full_path_string(),
             entries,
         })
     }
 
     #[inline]
     pub fn populate(&self, entries: &mut Vec<DirEntry>) {
-        let file_name_index = self.path.as_os_str().len() + 1;
+        let file_name_index = self.path.len() + 1;
         entries.par_extend(self.entries.par_iter().map(|e| DirEntry {
             meta: e.meta,
-            path: format!("{}/{}", self.path.display(), &e.file_name),
+            path: format!("{}{}{}", self.path, std::path::MAIN_SEPARATOR, &e.file_name),
             file_name_index,
             sort_key: e.sort_key,
         }));
@@ -265,7 +263,7 @@ impl TryFrom<std::fs::DirEntry> for DirEntry {
         let path: String = {
             #[cfg(feature = "profiling")]
             puffin::profile_scope!("lwa_fm::dir_handling::conversion::from_std::string");
-            value.path().to_string_lossy().to_string()
+            value.path().to_full_path_string()
         };
         let file_name_index = path.len() - value.file_name().len();
         let sort_key = SortKey::new_path(
@@ -292,7 +290,7 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
             return Err(());
         };
         let meta: DirEntryMetaData = meta.into();
-        let path = value.path().to_string_lossy().to_string();
+        let path = value.path().to_full_path_string();
         let file_name_index = path.len() - value.file_name().len();
         // let mut sort_key = SmallVec::<[u8; 40]>::new();
         // let _ =

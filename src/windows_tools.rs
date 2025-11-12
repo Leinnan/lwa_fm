@@ -44,6 +44,7 @@ pub fn open_properties(path: impl AsRef<OsStr>) {
     // Open the properties window
     #[allow(unsafe_code)]
     unsafe {
+        #[allow(clippy::borrow_as_ptr)]
         match ShellExecuteExW(&mut sei) {
             Ok(()) => {}
             Err(e) => eprintln!("Failed to open properties window: {e:?}"),

@@ -263,6 +263,7 @@ impl App {
                                     ui.toggle_value(&mut search_visible, "🔍")
                                         .on_hover_text("Search");
                                     let mut search_changed = is_searching != search_visible;
+                                    let mut search_target_changed = false;
                                     if let Some(search) = &mut current_tab.search {
                                         search_changed |= ui
                                             .toggle_value(&mut search.case_sensitive, "🇨")
@@ -273,7 +274,7 @@ impl App {
                                                 .hint_text("Search"),
                                         );
                                         search_changed |= search_input.changed();
-                                        search_changed |= ui
+                                        search_target_changed |= ui
                                             .add(
                                                 egui::Slider::new(&mut search.depth, 1..=7)
                                                     .trailing_fill(true)
@@ -313,7 +314,9 @@ impl App {
                                     if search_visible != is_searching {
                                         current_tab.toggle_search(ui.ctx());
                                     }
-                                    if search_changed {
+                                    if search_target_changed {
+                                        TabAction::RequestFilesRefresh.schedule_tab(current_tab.id);
+                                    } else if search_changed {
                                         TabAction::FilterChanged.schedule_tab(current_tab.id);
                                     }
                                     ui.spacing_mut().item_spacing = spacing;
