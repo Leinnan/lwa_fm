@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, fs::FileType, path::Path};
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Decode, Encode,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Decode, Encode, Hash,
 )]
 pub enum EntryType {
     File,
@@ -26,11 +26,7 @@ impl From<FileType> for EntryType {
         };
         #[cfg(not(target_os = "windows"))]
         let is_dir = value.is_dir();
-        if is_dir {
-            EntryType::Directory
-        } else {
-            EntryType::File
-        }
+        if is_dir { Self::Directory } else { Self::File }
     }
 }
 
@@ -40,7 +36,7 @@ pub struct SortKey {
     pub sort_key: [u8; 30],
 }
 
-fn empty() -> [u8; 30] {
+const fn empty() -> [u8; 30] {
     [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ]
@@ -48,12 +44,14 @@ fn empty() -> [u8; 30] {
 
 impl SortKey {
     #[inline]
+    #[must_use]
     pub fn compare(&self, other: &Self) -> Ordering {
         self.is_file
             .cmp(&other.is_file)
             .then(self.sort_key.cmp(&other.sort_key))
     }
     #[inline]
+    #[must_use]
     pub fn new(entry: &DirEntry) -> Self {
         let base_path = entry.get_splitted_path().1;
         Self::new_path(base_path, entry.is_file())
@@ -67,7 +65,7 @@ impl SortKey {
         };
         let mut sort_key = Vec::with_capacity(30);
         _ = COLLATER.write_sort_key_to(path, &mut sort_key);
-        let sort_key = sort_key.try_into().unwrap_or(empty());
+        let sort_key = sort_key.try_into().unwrap_or_else(|_| empty());
         Self { is_file, sort_key }
     }
 }
@@ -79,6 +77,7 @@ pub struct DirContent {
 }
 
 impl DirContent {
+    #[must_use]
     pub fn read(dir: &Path) -> Option<Self> {
         let paths = {
             #[cfg(feature = "profiling")]
@@ -154,7 +153,7 @@ impl DirEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, Decode, Encode)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Decode, Encode, PartialEq, Eq, Hash)]
 pub struct DirEntryMetaData {
     pub entry_type: EntryType,
     pub created_at: TimestampSeconds,
@@ -204,7 +203,7 @@ impl From<std::fs::Metadata> for DirEntryMetaData {
         #[cfg(target_os = "macos")]
         let size = std::os::macos::fs::MetadataExt::st_size(&meta);
         let since_modified = modified_at.elapsed();
-        DirEntryMetaData {
+        Self {
             entry_type,
             created_at,
             modified_at,
@@ -231,8 +230,8 @@ impl TryFrom<std::fs::DirEntry> for DirEntryData {
         };
         let sort_key = SortKey::new_path(&file_name, meta.entry_type.eq(&EntryType::File));
         Ok(Self {
-            file_name,
             meta,
+            file_name,
             sort_key,
         })
     }
@@ -267,12 +266,12 @@ impl TryFrom<std::fs::DirEntry> for DirEntry {
         };
         let file_name_index = path.len() - value.file_name().len();
         let sort_key = SortKey::new_path(
-            value.file_name().as_os_str().to_str().unwrap(),
+            value.file_name().as_os_str().to_str().ok_or(())?,
             file_type.is_file(),
         );
         Ok(Self {
-            path,
             meta,
+            path,
             file_name_index,
             sort_key,
         })
@@ -286,22 +285,18 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
     fn try_from(value: walkdir::DirEntry) -> Result<Self, Self::Error> {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::conversion::from_walkdir");
-        let Ok(meta) = value.metadata() else {
-            return Err(());
-        };
+        let meta = value.metadata().map_err(|_| ())?;
         let meta: DirEntryMetaData = meta.into();
         let path = value.path().to_full_path_string();
         let file_name_index = path.len() - value.file_name().len();
         // let mut sort_key = SmallVec::<[u8; 40]>::new();
         // let _ =
         //     COLLATER.write_sort_key_utf8_to(value.file_name().as_encoded_bytes(), &mut sort_key);
-        let sort_key = SortKey::new_path(
-            value.file_name().to_str().unwrap(),
-            meta.entry_type.eq(&EntryType::File),
-        );
+        let file_name = value.file_name().to_str().ok_or(())?;
+        let sort_key = SortKey::new_path(file_name, meta.entry_type.eq(&EntryType::File));
         Ok(Self {
-            path,
             meta,
+            path,
             file_name_index,
             sort_key,
         })
@@ -315,16 +310,19 @@ impl AsRef<Path> for DirEntry {
 }
 
 impl DirEntry {
+    #[must_use]
     pub fn get_path(&self) -> &Path {
         self.as_ref()
     }
 
     #[inline]
+    #[must_use]
     pub const fn is_file(&self) -> bool {
         matches!(self.meta.entry_type, EntryType::File)
     }
 
     #[inline]
+    #[must_use]
     pub fn get_splitted_path(&self) -> (&str, &str) {
         self.path.split_at(self.file_name_index)
     }

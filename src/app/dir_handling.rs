@@ -6,10 +6,7 @@ use std::{
 };
 
 use icu::collator::CollatorBorrowed;
-use rayon::{
-    iter::{ParallelBridge, ParallelExtend, ParallelIterator},
-    slice::ParallelSliceMut,
-};
+use rayon::slice::ParallelSliceMut;
 
 use crate::{
     app::{
@@ -17,7 +14,6 @@ use crate::{
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
     },
-    data::files::DirEntry,
     helper::DataHolder,
 };
 pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
@@ -125,9 +121,6 @@ impl TabData {
         // }
     }
 
-    // pub fn get_visible_entries(&self) -> impl Iterator<Item = &DirEntry> {
-    //     self.visible_entries.iter().map(|&idx| &self.list[idx])
-    // }
     pub fn update_visible_entries(&mut self) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!(
@@ -191,109 +184,103 @@ impl TabData {
         self.list.clear();
         let directories: &[PathBuf] = match &self.current_path {
             CurrentPath::None => &[],
-            CurrentPath::One(path_buf) => {
-                // let paths = {
-                //     #[cfg(feature = "profiling")]
-                //     puffin::profile_scope!("lwa_fm::dir_handling::read_dir::with_hidden::dir");
-                //     std::fs::read_dir(path_buf)
-                // };
-                // let Ok(paths) = paths else {
-                //     return;
-                // };
-                #[cfg(feature = "profiling")]
-                puffin::profile_scope!("lwa_fm::dir_handling::read_dir::with_hidden::mapping");
-                // // self.list
-                // //     .extend(paths.filter_map(|e| e.ok().and_then(|e| e.try_into().ok())));
-                // self.list.par_extend(paths.par_bridge().filter_map(|e| {
-                //     let e = e.ok()?;
-                //     e.try_into().ok()
-                // }));
-                database::read_dir(path_buf, &mut self.list);
-                // #[cfg(feature = "profiling")]
-                // puffin::profile_scope!("lwa_fm::dir_handling::read_dir::meta");
-                // self.list.par_iter_mut().for_each(|e| e.read_metadata());
-                return;
-            }
+            CurrentPath::One(path_buf) => &[path_buf.clone()],
             CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
         };
         let depth = self.search.as_ref().map_or(1, |search| search.depth);
-        eprintln!("DEPTH: {}", depth);
+
         for d in directories {
-            self.list.extend(
-                walkdir::WalkDir::new(d)
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("lwa_fm::dir_handling::read_dir::with_hidden::mapping");
+            database::read_dir(d, &mut self.list);
+            if depth > 1 {
+                for dir in walkdir::WalkDir::new(d)
                     .follow_links(true)
+                    .min_depth(1)
                     .max_depth(depth)
                     .into_iter()
                     .flatten()
-                    .skip(1)
-                    .filter_map(|e| e.try_into().ok()),
-            );
-            let paths = {
-                #[cfg(feature = "profiling")]
-                puffin::profile_scope!("lwa_fm::dir_handling::read_dir::with_hidden::dir");
-                std::fs::read_dir(d)
-            };
-            let Ok(paths) = paths else {
-                continue;
-            };
-
-            #[cfg(feature = "profiling")]
-            puffin::profile_scope!("lwa_fm::dir_handling::read_dir::with_hidden::mapping");
-            self.list.par_extend(paths.par_bridge().filter_map(|e| {
-                let e = e.ok()?;
-                e.try_into().ok()
-            }));
+                    .filter(|e| e.file_type().is_dir())
+                {
+                    if !self.show_hidden {
+                        let mut parent = dir.path().parent();
+                        let mut depth = 0;
+                        let mut skip = false;
+                        while let Some(p) = parent {
+                            if p.iter().last().is_some_and(|f| {
+                                f.to_string_lossy().starts_with(".")
+                                    || f.to_string_lossy().starts_with("$")
+                            }) {
+                                skip = true;
+                                break;
+                            }
+                            depth += 1;
+                            if depth >= dir.depth() {
+                                break;
+                            }
+                            parent = p.parent();
+                        }
+                        if skip {
+                            continue;
+                        }
+                    }
+                    database::read_dir(dir.path(), &mut self.list);
+                }
+            }
         }
+        self.list.dedup_by_key(|k| k.meta);
     }
 
     pub fn sort_entries(&mut self, sort_settings: &DirectoryViewSettings) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::sort_entries");
-        let sort_fn: fn(&DirEntry, &DirEntry) -> Ordering = match sort_settings.sorting {
+        match sort_settings.sorting {
             Sort::Modified => {
                 if sort_settings.invert_sort {
-                    |a, b| {
+                    self.list.par_sort_unstable_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
                         file_type_cmp.then(b.meta.modified_at.cmp(&a.meta.modified_at))
-                    }
+                    });
                 } else {
-                    |a, b| {
+                    self.list.par_sort_unstable_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
                         file_type_cmp.then(a.meta.modified_at.cmp(&b.meta.modified_at))
-                    }
+                    });
                 }
             }
             Sort::Name => {
                 if sort_settings.invert_sort {
-                    |a, b| b.sort_key.compare(&a.sort_key)
+                    self.list
+                        .par_sort_unstable_by(|a, b| b.sort_key.compare(&a.sort_key));
                 } else {
-                    |a, b| a.sort_key.compare(&b.sort_key)
+                    self.list
+                        .par_sort_unstable_by(|a, b| a.sort_key.compare(&b.sort_key));
                 }
             }
             Sort::Created => {
                 if sort_settings.invert_sort {
-                    |a, b| {
+                    self.list.par_sort_unstable_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
                         file_type_cmp.then(b.meta.created_at.cmp(&a.meta.created_at))
-                    }
+                    });
                 } else {
-                    |a, b| {
+                    self.list.par_sort_unstable_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
                         file_type_cmp.then(a.meta.created_at.cmp(&b.meta.created_at))
-                    }
+                    });
                 }
             }
             Sort::Size => {
                 if sort_settings.invert_sort {
-                    |a, b| {
+                    self.list.par_sort_unstable_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
                         file_type_cmp.then(b.meta.size.cmp(&a.meta.size))
-                    }
+                    });
                 } else {
-                    |a, b| {
+                    self.list.par_sort_unstable_by(|a, b| {
                         let file_type_cmp = a.is_file().cmp(&b.is_file());
                         file_type_cmp.then(a.meta.size.cmp(&b.meta.size))
-                    }
+                    });
                 }
             }
             Sort::Random => {
@@ -305,7 +292,14 @@ impl TabData {
                 return;
             }
         };
-        self.list.par_sort_unstable_by(sort_fn);
+    }
+
+    pub fn deep_or_multiple_paths(&self) -> bool {
+        if self.current_path.multiple_paths() {
+            return true;
+        } else {
+            self.search.as_ref().map_or(1, |search| search.depth) > 1
+        }
     }
 }
 

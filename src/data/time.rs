@@ -20,26 +20,31 @@ use serde::{Deserialize, Serialize};
     Serialize,
     Decode,
     Encode,
+    Hash,
 )]
 pub struct TimestampSeconds(u32);
 
 impl TimestampSeconds {
     #[inline]
+    #[must_use]
     pub fn to_duration(self) -> Duration {
         self.into()
     }
 
     #[inline]
+    #[must_use]
     pub fn system_time(self) -> SystemTime {
         std::time::UNIX_EPOCH + self.to_duration()
     }
 
     #[inline]
+    #[must_use]
     pub fn elapsed(self) -> ElapsedTime {
-        match self.system_time().elapsed() {
-            Err(_) => ElapsedTime::None,
-            Ok(duration) => ElapsedTime::from_seconds(duration.as_secs()),
-        }
+        self.system_time()
+            .elapsed()
+            .map_or(ElapsedTime::None, |duration| {
+                ElapsedTime::from_seconds(duration.as_secs())
+            })
     }
 }
 
@@ -63,10 +68,10 @@ impl From<SystemTime> for TimestampSeconds {
     }
 }
 
-impl Into<Duration> for TimestampSeconds {
+impl From<TimestampSeconds> for Duration {
     #[inline]
-    fn into(self) -> Duration {
-        Duration::from_secs(self.0 as u64)
+    fn from(value: TimestampSeconds) -> Self {
+        Self::from_secs(u64::from(value.0))
     }
 }
 
@@ -97,7 +102,8 @@ pub enum ElapsedTime {
 
 impl ElapsedTime {
     #[inline]
-    pub fn from_seconds(seconds: u64) -> Self {
+    #[must_use]
+    pub const fn from_seconds(seconds: u64) -> Self {
         let days = seconds / 86400;
         if days > 0 {
             let years = days / 365;
@@ -119,12 +125,12 @@ impl ElapsedTime {
 impl Display for ElapsedTime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ElapsedTime::None => write!(f, "Future"),
-            ElapsedTime::Seconds(_) => write!(f, "Just now"),
-            ElapsedTime::Minutes(m) => write!(f, "{} min ago", m),
-            ElapsedTime::Hours(h) => write!(f, "{} hours ago", h),
-            ElapsedTime::Days(d) => write!(f, "{} days ago", d),
-            ElapsedTime::Years(y) => write!(f, "{} years ago", y),
+            Self::None => write!(f, "Future"),
+            Self::Seconds(_) => write!(f, "Just now"),
+            Self::Minutes(m) => write!(f, "{m} min ago"),
+            Self::Hours(h) => write!(f, "{h} hours ago"),
+            Self::Days(d) => write!(f, "{d} days ago"),
+            Self::Years(y) => write!(f, "{y} years ago"),
         }
     }
 }

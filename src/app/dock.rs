@@ -263,6 +263,7 @@ impl TabData {
     }
     pub fn toggle_search(&mut self, data_source: &impl DataHolder) {
         if let Some(search) = &self.search {
+            let was_deep = search.depth > 1;
             data_source.data_set_tab::<Search>(self.id, search.clone());
             self.search = None;
             if self.current_path.multiple_paths() {
@@ -275,6 +276,8 @@ impl TabData {
                 };
                 TabAction::ChangePaths(path).schedule_tab(self.id);
                 // self.set_path(path, Some(data_source));
+            } else if was_deep {
+                TabAction::RequestFilesRefresh.schedule_tab(self.id);
             }
         } else {
             self.search = Some(
@@ -408,7 +411,8 @@ impl TabViewer for MyTabViewer {
 
         let is_searching = tab.is_searching();
         let tab_id = tab.id;
-        let multiple_dirs = tab.current_path.multiple_paths();
+
+        let multiple_dirs = tab.deep_or_multiple_paths();
         let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 1.5;
 
         let tab_popup_id = Id::new(tab_id).with(1500);
@@ -444,13 +448,12 @@ impl TabViewer for MyTabViewer {
             .column(Column::auto().at_most(150.0).at_least(100.0))
             .sense(egui::Sense::click());
         let length = tab.visible_entries.len();
-        if just_changed {
-            if let Some(v) = selected_tabs.selected_fields.last()
-                && *v < tab.list.len()
-            {
-                eprintln!("{:?}", selected_tabs.just_changed);
-                table = table.scroll_to_row(*v, None);
-            }
+        if just_changed
+            && let Some(v) = selected_tabs.selected_fields.last()
+            && *v < tab.list.len()
+        {
+            eprintln!("{:?}", selected_tabs.just_changed);
+            table = table.scroll_to_row(*v, None);
         }
         let mut new_sort = None;
         table
@@ -540,7 +543,7 @@ impl TabViewer for MyTabViewer {
                             }
                         }
                         let (dir, file) = val.get_splitted_path();
-                        if is_searching && multiple_dirs {
+                        if is_searching || multiple_dirs {
                             ui.add(
                                 egui::Label::new(LayoutJob::simple_singleline(
                                     dir.into(),
@@ -880,6 +883,7 @@ impl MyTabs {
         let tab_id = match target {
             TabTarget::ActiveTab => self.get_current_index(),
             TabTarget::TabWithId(id) => Some(id),
+            TabTarget::AllTabs => None,
         }?;
         self.get_tab_by_id(tab_id)
     }
@@ -890,6 +894,13 @@ impl MyTabs {
             .iter_all_tabs_mut()
             .find(|(_, tab)| tab.id == id)
             .map(|(_, tab)| tab)
+    }
+    #[inline]
+    pub fn get_tab_ids(&mut self) -> Vec<u32> {
+        self.dock_state
+            .iter_all_tabs_mut()
+            .map(|(_, tab)| tab.id)
+            .collect()
     }
 
     pub fn get_current_tab(&mut self) -> Option<&mut TabData> {

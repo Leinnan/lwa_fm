@@ -1,4 +1,4 @@
-use crate::app::commands::{COMMANDS_QUEUE, TabAction};
+use crate::app::commands::{COMMANDS_QUEUE, TabAction, TabTarget};
 use crate::app::directory_path_info::DirectoryPathInfo;
 use crate::app::directory_view_settings::DirectoryViewSettings;
 use crate::app::dock::CurrentPath;
@@ -33,9 +33,7 @@ mod top_bottom;
 
 thread_local! {
     pub static LUA_INSTANCE: RefCell<Lua> = RefCell::new({
-        let lua = Lua::new();
-
-        lua
+        Lua::new()
     });
 }
 // fn print_from_lua() {
@@ -219,6 +217,14 @@ impl App {
 
         match action {
             ActionToPerform::TabAction(target, action) => {
+                if target == TabTarget::AllTabs {
+                    let tabs_ids = self.tabs.get_tab_ids();
+                    for id in tabs_ids {
+                        ActionToPerform::TabAction(TabTarget::TabWithId(id), action.clone())
+                            .schedule();
+                    }
+                    return;
+                }
                 let Some(tab) = self.tabs.try_get_tab_by_target(target) else {
                     return;
                 };
@@ -293,6 +299,7 @@ impl App {
                         let settings = ctx
                             .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
                         tab.sort_entries(&settings.data);
+                        tab.update_visible_entries();
                     }
                     commands::TabAction::SearchInFavorites(start) => {
                         let favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
@@ -511,7 +518,7 @@ impl eframe::App for App {
                 self.handle_action(
                     ctx,
                     ActionToPerform::TabAction(
-                        commands::TabTarget::ActiveTab,
+                        commands::TabTarget::AllTabs,
                         TabAction::RequestFilesRefresh,
                     ),
                 );

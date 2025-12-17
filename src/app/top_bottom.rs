@@ -377,7 +377,7 @@ impl App {
                                                                     index, &path, ui,
                                                                 );
                                                             } else {
-                                                                Self::top_display(&current_tab, ui);
+                                                                Self::top_display(current_tab, ui);
                                                             }
                                                         },
                                                     );

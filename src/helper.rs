@@ -21,10 +21,10 @@ impl<T: AsRef<Path>> PathHelper for T {
         std::fs::canonicalize(self).ok()
     }
     fn to_full_path_string(&self) -> String {
-        match self.to_full_path() {
-            Some(p) => p.to_string_lossy().replace("\\\\?\\", ""),
-            None => self.as_ref().to_string_lossy().replace("\\\\?\\", ""),
-        }
+        self.to_full_path().map_or_else(
+            || self.as_ref().to_string_lossy().replace("\\\\?\\", ""),
+            |p| p.to_string_lossy().replace("\\\\?\\", ""),
+        )
     }
 }
 

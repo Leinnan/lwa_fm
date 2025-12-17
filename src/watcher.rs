@@ -42,7 +42,7 @@ impl DirectoryWatchers {
         });
     }
 
-    pub fn start(&mut self, path: PathBuf) -> Result<()> {
+    pub fn start(&mut self, path: PathBuf) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::DirectoryWatchers::start");
 
@@ -53,26 +53,26 @@ impl DirectoryWatchers {
                 return;
             };
             if let Err(err) = watcher.watch_directory(&path) {
-                eprintln!("Failed to watch directory: {}", err);
+                eprintln!("Failed to watch directory: {err}");
                 return;
             }
             _ = tx.send(watcher);
         });
         self.receivers = Some(rx);
-        Ok(())
     }
 
     pub fn check_for_new_watchers(&mut self) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_new_watchers");
-        let mut remove = false;
-        if let Some(receiver) = &self.receivers {
-            if let Ok(watcher) = receiver.try_recv() {
-                if let Some(path) = watcher.current_path.as_ref() {
-                    self.watchers.insert(path.clone(), watcher);
-                }
-                remove = true;
+        let remove = if let Some(receiver) = &self.receivers
+            && let Ok(watcher) = receiver.try_recv()
+        {
+            if let Some(path) = watcher.current_path.as_ref() {
+                self.watchers.insert(path.clone(), watcher);
             }
+            true
+        } else {
+            false
         };
         if remove {
             self.receivers = None;
