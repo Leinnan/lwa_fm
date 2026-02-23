@@ -194,12 +194,8 @@ impl App {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
-        // This is also where you can customize the look and feel of egui using
-        // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
 
-        // egui_taffy uses taffy's raw floating-point layout values for child UI rects,
-        // which can produce sub-pixel coordinates. Disable egui's "Unaligned" debug
-        // overlay so it doesn't fire on every virtual-scroll row.
+        #[cfg(debug_assertions)]
         cc.egui_ctx.style_mut(|style| {
             style.debug.show_unaligned = false;
         });
