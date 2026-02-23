@@ -18,7 +18,12 @@ use std::sync::Arc;
 use std::{ffi::OsStr, path::PathBuf};
 
 use egui::Vec2;
-use egui_extras::{Column, TableBuilder};
+use egui_taffy::{
+    TuiBuilderLogic, taffy, tid, tui,
+    virtual_tui::{VirtualGridRowHelper, VirtualGridRowHelperParams},
+};
+use taffy::prelude::*;
+use taffy::style_helpers;
 
 use super::commands::ActionToPerform;
 use crate::app::command_palette::build_for_path;
@@ -346,6 +351,21 @@ pub struct MyTabViewer {
     focused: bool,
 }
 
+// Column dimension constants used in both the header and data rows of the file grid.
+const COL_MODIFIED_W: f32 = 125.0;
+const COL_MODIFIED_MIN: f32 = 100.0;
+const COL_MODIFIED_MAX: f32 = 150.0;
+const COL_SIZE_W: f32 = 125.0;
+const COL_SIZE_MIN: f32 = 100.0;
+const COL_SIZE_MAX: f32 = 150.0;
+
+/// Captured row interaction result collected while the taffy tui borrow is active,
+/// so they can be processed afterwards (when `tab` can be borrowed again).
+struct RowResult {
+    row_index: usize,
+    response: egui::Response,
+}
+
 impl TabViewer for MyTabViewer {
     // This associated type is used to attach some data to each tab.
     type Tab = TabData;
@@ -437,354 +457,603 @@ impl TabViewer for MyTabViewer {
         } else {
             false
         };
-        let table_id = Id::new(tab.id).with(&tab.current_path);
-        let mut table = TableBuilder::new(ui)
-            .striped(true)
-            .vscroll(true)
-            .id_salt(table_id)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::remainder().at_least(260.0))
-            .column(Column::auto().at_most(150.0).at_least(100.0))
-            .column(Column::auto().at_most(150.0).at_least(100.0))
-            .sense(egui::Sense::click());
-        let length = tab.visible_entries.len();
-        if just_changed
-            && let Some(v) = selected_tabs.selected_fields.last()
-            && *v < tab.list.len()
-        {
-            eprintln!("{:?}", selected_tabs.just_changed);
-            table = table.scroll_to_row(*v, None);
-        }
+        let entries_len = tab.visible_entries.len();
+
         let mut new_sort = None;
-        table
-            .header(text_height, |mut row| {
-                row.col(|col| {
-                    let res = col
-                        .vertical_centered_justified(|ui| {
-                            ui.add(
-                                egui::Label::new("Name")
-                                    .wrap_mode(egui::TextWrapMode::Truncate)
-                                    .selectable(false)
-                                    .sense(Sense::click()),
-                            )
-                        })
-                        .inner;
-                    if res.clicked() {
-                        new_sort = Some(Sort::Name);
-                    }
-                });
-                row.col(|col| {
-                    let res = col
-                        .vertical_centered_justified(|ui| {
-                            ui.add(
-                                egui::Label::new("Modified")
-                                    .wrap_mode(egui::TextWrapMode::Truncate)
-                                    .selectable(false)
-                                    .sense(Sense::click()),
-                            )
-                        })
-                        .inner;
-                    if res.clicked() {
-                        new_sort = Some(Sort::Modified);
-                    }
-                });
-                row.col(|col| {
-                    let res = col
-                        .vertical_centered_justified(|ui| {
-                            ui.add(
-                                egui::Label::new("Size")
-                                    .wrap_mode(egui::TextWrapMode::Truncate)
-                                    .selectable(false)
-                                    .sense(Sense::click()),
-                            )
-                        })
-                        .inner;
-                    if res.clicked() {
-                        new_sort = Some(Sort::Size);
-                    }
-                });
+
+        // ── Unified virtual-grid: sticky header row + scrollable body ────────
+        //
+        // The grid has 3 columns:  [Name (flex) | Modified (fixed) | Size (fixed)]
+        // Row 1 is the sticky header.  Data rows follow via VirtualGridRowHelper.
+        // Row interactions are collected into a Vec and processed after the tui
+        // closure, because we cannot borrow `tab` inside the closure.
+        let header_row_count: u16 = 1;
+
+        // We need to collect row responses outside the tui closure because
+        // borrowing `tab` inside it is not possible.
+        let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
+
+        tui(ui, Id::new("file_grid").with(tab.id))
+            .reserve_available_space()
+            .style(taffy::Style {
+                flex_direction: taffy::FlexDirection::Column,
+                size: percent(1.),
+                max_size: percent(1.),
+                ..Default::default()
             })
-            .body(|body| {
-                #[cfg(feature = "profiling")]
-                puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body");
-                body.rows(text_height, length, |mut row| {
-                    let index = tab.visible_entries[row.index()];
-                    let val = &tab.list[index];
-                    let is_dir = !val.is_file();
-                    let indexed = row.index() + 1;
+            .show(|tui| {
+                // ── Scrollable grid container ────────────────────────────────
+                tui.style(taffy::Style {
+                    display: taffy::Display::Grid,
+                    overflow: taffy::Point {
+                        x: taffy::Overflow::Hidden,
+                        y: taffy::Overflow::Scroll,
+                    },
+                    // 3 columns: Name (1fr, no hard min), Modified (fixed range), Size (fixed range)
+                    grid_template_columns: vec![
+                        fr(1.),
+                        minmax(min_content(), length(COL_MODIFIED_MAX)),
+                        minmax(min_content(), length(COL_SIZE_MAX)),
+                    ],
+                    size: taffy::Size {
+                        width: percent(1.),
+                        height: auto(),
+                    },
+                    max_size: percent(1.),
+                    grid_auto_rows: vec![length(text_height)],
+                    ..Default::default()
+                })
+                .add(|tui| {
+                    // ── Virtual data rows ────────────────────────────────────
+                    VirtualGridRowHelper::show(
+                        VirtualGridRowHelperParams {
+                            header_row_count,
+                            row_count: entries_len,
+                        },
+                        tui,
+                        |tui, info| {
+                            #[cfg(feature = "profiling")]
+                            puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body");
 
-                    if row.index() == opened_popup {
-                        row.set_hovered(true);
-                    } else if selected_tabs.selected_fields.contains(&row.index()) {
-                        row.set_selected(true);
-                    }
-                    row.col(|ui| {
-                        #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::first_column");
-                        let color = if is_dir {
-                            Color32::LIGHT_GRAY
-                        } else {
-                            Color32::GRAY
-                        };
-                        if cmd {
-                            if indexed < 10 {
-                                ui.add_sized(
-                                    [25.0, ui.available_height()],
-                                    egui::Label::new(LayoutJob::simple_format(
-                                        format!("[{indexed}]"),
-                                        TextFormat {
-                                            color: Color32::DARK_GRAY,
-                                            ..Default::default()
-                                        },
-                                    )),
-                                );
+                            let mut idgen = info.id_gen();
+                            let grid_row_param = info.grid_row_setter();
+
+                            let row_index = info.idx;
+                            let index = tab.visible_entries[row_index];
+                            let val = &tab.list[index];
+                            let is_dir = !val.is_file();
+                            let indexed = row_index + 1;
+
+                            let is_hovered = row_index == opened_popup;
+                            let is_selected = selected_tabs.selected_fields.contains(&row_index);
+
+                            let bg_color = if is_selected {
+                                tui.egui_ui().style().visuals.selection.bg_fill
+                            } else if is_hovered {
+                                tui.egui_ui().style().visuals.widgets.hovered.bg_fill
+                            } else if row_index % 2 == 0 {
+                                tui.egui_ui().style().visuals.faint_bg_color
                             } else {
-                                ui.add_sized([25.0, ui.available_height()], egui::Label::new(""));
-                            }
-                        }
-                        let (dir, file) = val.get_splitted_path();
-                        if is_searching || multiple_dirs {
-                            ui.add(
-                                egui::Label::new(LayoutJob::simple_singleline(
-                                    dir.into(),
-                                    FontId::default(),
-                                    Color32::DARK_GRAY,
-                                ))
-                                .wrap_mode(egui::TextWrapMode::Truncate)
-                                .selectable(false)
-                                .sense(Sense::empty()),
-                            );
-                        }
-
-                        let added_button = ui.add(
-                            egui::Label::new(LayoutJob::simple_singleline(
-                                file.into(),
-                                FontId::default(),
-                                color,
-                            ))
-                            .wrap_mode(egui::TextWrapMode::Truncate)
-                            .selectable(false)
-                            .sense(Sense::empty()),
-                        );
-
-                        added_button.on_hover_ui(|ui| {
-                            let ext = val
-                                .get_path()
-                                .extension()
-                                .unwrap_or_default()
-                                .to_ascii_lowercase();
-                            if ext.eq(&OsStr::new("png"))
-                                || ext.eq(&OsStr::new("jpg"))
-                                || ext.eq(&OsStr::new("jpeg"))
-                            {
-                                let path = val.to_full_path_string();
-                                let path = format!("file://{path}");
-                                ui.add(
-                                    egui::Image::new(path)
-                                        .maintain_aspect_ratio(true)
-                                        .max_size(Vec2::new(300.0, 300.0)),
-                                );
-                            } else {
-                                ui.add(egui::Label::new(val.path.as_str()));
-                            }
-                        });
-                    });
-
-                    if row.response().double_clicked()
-                        || convert_nr_to_egui_key(indexed)
-                            .is_some_and(|k| row.response().ctx.key_with_command_pressed(k))
-                    {
-                        if val.is_file() {
-                            ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
-                        } else {
-                            let Ok(path) = std::fs::canonicalize(val.get_path()) else {
-                                return;
+                                egui::Color32::TRANSPARENT
                             };
-                            if row.response().ctx.shift_pressed() {
-                                ActionToPerform::NewTab(path).schedule();
-                            } else {
-                                TabAction::ChangePaths(path.into()).schedule_tab(tab_id);
-                            }
-                        }
-                    } else if row.response().clicked() {
-                        if !shift_pressed {
-                            selected_tabs.selected_fields.clear();
-                        }
-                        selected_tabs.selected_fields.push(row.index());
-                        selected_tabs.just_changed = true;
-                        row.response()
-                            .ctx
-                            .data_set_path(&tab.current_path, selected_tabs.clone());
-                    }
-                    row.col(|ui| {
-                        #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::time_column");
-                        // let time = {
-                        //     puffin::profile_scope!(
-                        //         "MyTabViewer::ui::table_body::time_column::string_build"
-                        //     );
-                        //     let Some(time) = TIME_POOL
-                        //         .with_borrow(|pool| pool.get(&val.since_modified).cloned())
-                        //     else {
-                        //         return;
-                        //     };
-                        //     time
-                        // };
-                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add(val.meta.since_modified);
-                        });
-                    });
-                    row.col(|ui| {
-                        #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::size_column");
-                        if is_dir {
-                            ui.add_space(1.0);
-                            return;
-                        }
 
-                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            draw_size(ui, val.meta.size)
-                        });
-                        // let Some(size) =
-                        //     SIZES_POOL.with_borrow(|pool| pool.get(&val.size).cloned())
-                        // else {
-                        //     return;
-                        // };
-                        // ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                        //     ui.add(
-                        //         egui::Label::new(size)
-                        //             .wrap_mode(egui::TextWrapMode::Truncate)
-                        //             .selectable(false)
-                        //             .sense(Sense::empty()),
-                        //     );
-                        // });
-                    });
-                    let id = tab_popup_id.with(row.index());
-                    egui::Popup::context_menu(&row.response())
-                        .id(id)
-                        .show(|ui| {
-                            ui.data_set_tab::<PopupOpened>(tab_id, PopupOpened(id, row.index()));
-                            let options =
-                                build_for_path(&tab.current_path, val.get_path(), &favorites);
-                            for option in options {
-                                if ui.button(option.name.as_str()).clicked() {
-                                    option.action.clone().schedule();
-                                    ui.close();
-                                }
-                            }
-                            if !is_dir {
-                                if ui.button("Open").clicked() {
-                                    ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
-                                    ui.close();
-                                    return;
-                                }
-                                #[cfg(windows)]
-                                if ui.button("Show in explorer").clicked() {
-                                    crate::windows_tools::display_in_explorer(val.get_path())
-                                        .unwrap_or_else(|_| {
-                                            toast!(Error, "Could not open in explorer");
-                                        });
-                                    ui.close();
-                                }
-                                let val_dir = PathBuf::from(val.get_splitted_path().0);
-                                let matching_dirs =
-                                    self.tab_paths.iter().filter(|s| !val_dir.eq(*s));
-                                #[allow(clippy::collapsible_else_if)]
-                                if matching_dirs.clone().count() > 0 {
-                                    ui.separator();
-                                    ui.menu_button("Move to", |ui| {
-                                        for other in matching_dirs {
-                                            let other = PathBuf::from(
-                                                std::fs::canonicalize(other)
-                                                    .unwrap_or_else(|_| {
-                                                        val.get_path().to_path_buf()
-                                                    })
-                                                    .to_fixed_string(),
+                            // ── Name column ───────────────────────────────
+                            let name_response = tui
+                                .id(idgen())
+                                .mut_style(&grid_row_param)
+                                .mut_style(|style| {
+                                    style.min_size = taffy::Size {
+                                        width: length(0.0),
+                                        height: auto(),
+                                    };
+                                    style.overflow.x = taffy::Overflow::Hidden;
+                                    style.align_items = Some(taffy::AlignItems::Center);
+                                })
+                                .add_with_background_ui(
+                                    |ui, container| {
+                                        ui.painter().rect_filled(
+                                            container.full_container(),
+                                            0.0,
+                                            bg_color,
+                                        );
+                                    },
+                                    |tui, ()| {
+                                        tui.mut_style(|style| {
+                                            style.size.width = percent(1.);
+                                            style.overflow.x = taffy::Overflow::Hidden;
+                                            style.align_items =
+                                                Some(taffy::AlignItems::Center);
+                                        })
+                                        .ui(|ui: &mut Ui| {
+                                            #[cfg(feature = "profiling")]
+                                            puffin::profile_scope!(
+                                                "lwa_fm::MyTabViewer::ui::table_body::first_column"
                                             );
+                                            let color = if is_dir {
+                                                Color32::LIGHT_GRAY
+                                            } else {
+                                                Color32::GRAY
+                                            };
 
-                                            if ui
-                                                .button(format!(
-                                                    "{}",
-                                                    &other
-                                                        .file_name()
-                                                        .expect("Failed")
-                                                        .to_string_lossy()
-                                                ))
-                                                .on_hover_text(other.display().to_string())
-                                                .clicked()
-                                            {
-                                                let path = val.get_path();
+                                            ui.with_layout(
+                                                Layout::left_to_right(egui::Align::Center),
+                                                |ui| {
+                                                    if cmd && indexed < 10 {
+                                                        ui.add(
+                                                            egui::Label::new(
+                                                                LayoutJob::simple_format(
+                                                                    format!("[{indexed}]"),
+                                                                    TextFormat {
+                                                                        color: Color32::DARK_GRAY,
+                                                                        ..Default::default()
+                                                                    },
+                                                                ),
+                                                            )
+                                                            .wrap_mode(
+                                                                egui::TextWrapMode::Truncate,
+                                                            )
+                                                            .selectable(false)
+                                                            .sense(Sense::empty()),
+                                                        );
+                                                    }
+                                                    let (dir, file) = val.get_splitted_path();
+                                                    if is_searching || multiple_dirs {
+                                                        ui.add(
+                                                            egui::Label::new(
+                                                                LayoutJob::simple_singleline(
+                                                                    dir.into(),
+                                                                    FontId::default(),
+                                                                    Color32::DARK_GRAY,
+                                                                ),
+                                                            )
+                                                            .wrap_mode(
+                                                                egui::TextWrapMode::Truncate,
+                                                            )
+                                                            .selectable(false)
+                                                            .sense(Sense::empty()),
+                                                        );
+                                                    }
 
-                                                let filename =
-                                                    path.file_name().expect("NO FILENAME");
-                                                let target_path = other.join(filename);
-                                                println!("{}", &target_path.display());
-                                                let move_result = fs::rename(path, &target_path);
-                                                let mut success = move_result.is_ok();
-                                                let _ = move_result.inspect_err(|e| {
-                                                    e.raw_os_error().inspect(|nr| {
-                                                        // OSError: [WinError 17] The system cannot move the file to a different disk drive
-                                                        if *nr == 17 {
-                                                            let copy_success =
-                                                                fs::copy(path, target_path.clone())
-                                                                    .is_ok();
-                                                            if copy_success {
-                                                                success =
-                                                                    fs::remove_file(path).is_ok();
-                                                            }
+                                                    let added_button = ui.add(
+                                                        egui::Label::new(
+                                                            LayoutJob::simple_singleline(
+                                                                file.into(),
+                                                                FontId::default(),
+                                                                color,
+                                                            ),
+                                                        )
+                                                        .wrap_mode(egui::TextWrapMode::Truncate)
+                                                        .selectable(false)
+                                                        .sense(Sense::empty()),
+                                                    );
+
+                                                    added_button.on_hover_ui(|ui| {
+                                                        let ext = val
+                                                            .get_path()
+                                                            .extension()
+                                                            .unwrap_or_default()
+                                                            .to_ascii_lowercase();
+                                                        if ext.eq(&OsStr::new("png"))
+                                                            || ext.eq(&OsStr::new("jpg"))
+                                                            || ext.eq(&OsStr::new("jpeg"))
+                                                        {
+                                                            let path = val.to_full_path_string();
+                                                            let path = format!("file://{path}");
+                                                            ui.add(
+                                                                egui::Image::new(path)
+                                                                    .maintain_aspect_ratio(true)
+                                                                    .max_size(Vec2::new(
+                                                                        300.0, 300.0,
+                                                                    )),
+                                                            );
+                                                        } else {
+                                                            ui.add(egui::Label::new(
+                                                                val.path.as_str(),
+                                                            ));
                                                         }
                                                     });
-                                                });
-                                                if !success {
-                                                    toast!(
-                                                        Error,
-                                                        "Failed to move file {}",
-                                                        filename.to_string_lossy()
-                                                    );
-                                                }
-                                                ui.close();
-                                            }
-                                        }
-                                    });
-                                }
-                            }
-                            ui.separator();
-                            if ui.button("Move to Trash").clicked() {
-                                trash::delete(val.get_path()).unwrap_or_else(|_| {
-                                    toast!(Error, "Could not move it to trash.");
-                                });
-                                ui.close();
-                                TabAction::RequestFilesRefresh.schedule_active_tab();
-                            }
-                            if ui.button("Copy path to clipboard").clicked() {
-                                let Ok(mut clipboard) = arboard::Clipboard::new() else {
-                                    toast!(Error, "Failed to read the clipboard.");
-                                    return;
-                                };
-                                clipboard.set_text(val.path.clone()).unwrap_or_else(|_| {
-                                    toast!(Error, "Failed to update the clipboard.");
-                                });
-                                ui.close();
-                            }
-                            if ui.button("Rename").clicked() {
-                                ui.data_mut(|w| {
-                                    w.insert_temp(egui::Id::new(ModalWindow::Rename), val.clone());
-                                });
-                                ActionToPerform::ToggleModalWindow(ModalWindow::Rename).schedule();
-                                ui.close();
-                            }
+                                                },
+                                            )
+                                            .response
+                                        })
+                                    },
+                                )
+                                .main;
 
-                            #[cfg(windows)]
-                            {
-                                ui.separator();
-                                if ui.button("Properties").clicked() {
-                                    crate::windows_tools::open_properties(val.get_path());
-                                    ui.close();
+                            // ── Modified column ───────────────────────────
+                            tui.id(idgen())
+                                .mut_style(&grid_row_param)
+                                .mut_style(|style| {
+                                    style.size = taffy::Size {
+                                        width: length(COL_MODIFIED_W),
+                                        height: auto(),
+                                    };
+                                    style.min_size = taffy::Size {
+                                        width: length(COL_MODIFIED_MIN),
+                                        height: auto(),
+                                    };
+                                    style.max_size = taffy::Size {
+                                        width: length(COL_MODIFIED_MAX),
+                                        height: auto(),
+                                    };
+                                    style.align_items = Some(taffy::AlignItems::Center);
+                                })
+                                .add_with_background_ui(
+                                    |ui, container| {
+                                        ui.painter().rect_filled(
+                                            container.full_container(),
+                                            0.0,
+                                            bg_color,
+                                        );
+                                    },
+                                    |tui, ()| {
+                                        tui.ui(|ui: &mut Ui| {
+                                            #[cfg(feature = "profiling")]
+                                            puffin::profile_scope!(
+                                                "lwa_fm::MyTabViewer::ui::table_body::time_column"
+                                            );
+
+                                            ui.with_layout(
+                                                Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.add(val.meta.since_modified);
+                                                },
+                                            )
+                                            .response
+                                        })
+                                    },
+                                );
+
+                            // ── Size column ───────────────────────────────
+                            tui.id(idgen())
+                                .mut_style(&grid_row_param)
+                                .mut_style(|style| {
+                                    style.size = taffy::Size {
+                                        width: length(COL_SIZE_W),
+                                        height: auto(),
+                                    };
+                                    style.min_size = taffy::Size {
+                                        width: length(COL_SIZE_MIN),
+                                        height: auto(),
+                                    };
+                                    style.max_size = taffy::Size {
+                                        width: length(COL_SIZE_MAX),
+                                        height: auto(),
+                                    };
+                                    style.align_items = Some(taffy::AlignItems::Center);
+                                })
+                                .add_with_background_ui(
+                                    |ui, container| {
+                                        ui.painter().rect_filled(
+                                            container.full_container(),
+                                            0.0,
+                                            bg_color,
+                                        );
+                                    },
+                                    |tui, ()| {
+                                        tui.ui(|ui: &mut Ui| {
+                                            #[cfg(feature = "profiling")]
+                                            puffin::profile_scope!(
+                                                "lwa_fm::MyTabViewer::ui::table_body::size_column"
+                                            );
+
+                                            if is_dir {
+                                                ui.allocate_response(
+                                                    egui::Vec2::ZERO,
+                                                    Sense::empty(),
+                                                )
+                                            } else {
+                                                ui.with_layout(
+                                                    Layout::right_to_left(egui::Align::Center),
+                                                    |ui| {
+                                                        draw_size(ui, val.meta.size);
+                                                    },
+                                                )
+                                                .response
+                                            }
+                                        })
+                                    },
+                                );
+
+                            // ── Row interaction sense (full row) ──────────
+                            // Build a rect that spans the full available width at the
+                            // same vertical position as the name cell.
+                            let available_width =
+                                tui.egui_ui().available_rect_before_wrap().width();
+                            let full_row_rect = egui::Rect::from_min_max(
+                                egui::pos2(name_response.rect.left(), name_response.rect.top()),
+                                egui::pos2(
+                                    name_response.rect.left() + available_width,
+                                    name_response.rect.bottom(),
+                                ),
+                            );
+                            let row_response = tui.egui_ui_mut().interact(
+                                full_row_rect,
+                                Id::new("row_sense_full").with(tab_id).with(row_index),
+                                Sense::click(),
+                            );
+
+                            row_results.push(RowResult {
+                                row_index,
+                                response: row_response,
+                            });
+                        },
+                    );
+
+                    // ── Sticky header row (grid row 1) ───────────────────────
+                    // Name header
+                    tui.sticky([false, true].into())
+                        .id(tid(("header_name", tab_id)))
+                        .mut_style(|style| {
+                            style.grid_row = style_helpers::line(1);
+                            style.grid_column = line(1);
+                            style.padding = length(4.);
+                            style.align_items = Some(taffy::AlignItems::Center);
+                            // Allow the Name cell to shrink with the column but
+                            // never below zero; text uses Extend so it is never
+                            // clipped to "…" regardless of the measured width.
+                            style.min_size.width = length(0.0);
+                            style.overflow.x = taffy::Overflow::Hidden;
+                        })
+                        .add_with_background_color(|tui| {
+                            tui.mut_style(|style| {
+                                style.size.width = percent(1.);
+                                style.overflow.x = taffy::Overflow::Hidden;
+                            })
+                            .ui(|ui: &mut Ui| {
+                                let res = ui.add(
+                                    egui::Label::new("Name")
+                                        // Extend keeps the full text visible even
+                                        // when the column is narrow; the parent
+                                        // cell clips it via overflow:hidden.
+                                        .wrap_mode(egui::TextWrapMode::Extend)
+                                        .selectable(false)
+                                        .sense(Sense::click()),
+                                );
+                                if res.clicked() {
+                                    new_sort = Some(Sort::Name);
                                 }
-                            }
+                            });
+                        });
+
+                    // Modified header
+                    tui.sticky([false, true].into())
+                        .id(tid(("header_modified", tab_id)))
+                        .mut_style(|style| {
+                            style.grid_row = style_helpers::line(1);
+                            style.grid_column = line(2);
+                            style.padding = length(4.);
+                            style.align_items = Some(taffy::AlignItems::Center);
+                            style.size = taffy::Size {
+                                width: length(COL_MODIFIED_W),
+                                height: auto(),
+                            };
+                            style.min_size = taffy::Size {
+                                width: length(COL_MODIFIED_MIN),
+                                height: auto(),
+                            };
+                            style.max_size = taffy::Size {
+                                width: length(COL_MODIFIED_MAX),
+                                height: auto(),
+                            };
+                        })
+                        .add_with_background_color(|tui| {
+                            tui.mut_style(|style| {
+                                style.size.width = percent(1.);
+                            })
+                            .ui(|ui: &mut Ui| {
+                                let res = ui.add(
+                                    egui::Label::new("Modified")
+                                        .wrap_mode(egui::TextWrapMode::Extend)
+                                        .selectable(false)
+                                        .sense(Sense::click()),
+                                );
+                                if res.clicked() {
+                                    new_sort = Some(Sort::Modified);
+                                }
+                            });
+                        });
+
+                    // Size header
+                    tui.sticky([false, true].into())
+                        .id(tid(("header_size", tab_id)))
+                        .mut_style(|style| {
+                            style.grid_row = style_helpers::line(1);
+                            style.grid_column = line(3);
+                            style.padding = length(4.);
+                            style.align_items = Some(taffy::AlignItems::Center);
+                            style.size = taffy::Size {
+                                width: length(COL_SIZE_W),
+                                height: auto(),
+                            };
+                            style.min_size = taffy::Size {
+                                width: length(COL_SIZE_MIN),
+                                height: auto(),
+                            };
+                            style.max_size = taffy::Size {
+                                width: length(COL_SIZE_MAX),
+                                height: auto(),
+                            };
+                        })
+                        .add_with_background_color(|tui| {
+                            tui.mut_style(|style| {
+                                style.size.width = percent(1.);
+                            })
+                            .ui(|ui: &mut Ui| {
+                                let res = ui.add(
+                                    egui::Label::new("Size")
+                                        .wrap_mode(egui::TextWrapMode::Extend)
+                                        .selectable(false)
+                                        .sense(Sense::click()),
+                                );
+                                if res.clicked() {
+                                    new_sort = Some(Sort::Size);
+                                }
+                            });
                         });
                 });
             });
+
+        // ── Process row interactions (post-tui, tab borrow is free again) ────
+        for RowResult {
+            row_index,
+            response: row_response,
+        } in &row_results
+        {
+            let row_index = *row_index;
+            let index = tab.visible_entries[row_index];
+            let val = &tab.list[index];
+            let is_dir = !val.is_file();
+            let indexed = row_index + 1;
+
+            if row_response.double_clicked()
+                || convert_nr_to_egui_key(indexed)
+                    .is_some_and(|k| row_response.ctx.key_with_command_pressed(k))
+            {
+                if val.is_file() {
+                    ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
+                } else if let Ok(path) = std::fs::canonicalize(val.get_path()) {
+                    if row_response.ctx.shift_pressed() {
+                        ActionToPerform::NewTab(path).schedule();
+                    } else {
+                        TabAction::ChangePaths(path.into()).schedule_tab(tab_id);
+                    }
+                }
+            } else if row_response.clicked() {
+                if !shift_pressed {
+                    selected_tabs.selected_fields.clear();
+                }
+                selected_tabs.selected_fields.push(row_index);
+                selected_tabs.just_changed = true;
+                row_response
+                    .ctx
+                    .data_set_path(&tab.current_path, selected_tabs.clone());
+            }
+
+            // ── Context menu ─────────────────────────────────────────────────
+            let popup_id = tab_popup_id.with(row_index);
+            egui::Popup::context_menu(row_response)
+                .id(popup_id)
+                .show(|ui| {
+                    ui.data_set_tab::<PopupOpened>(tab_id, PopupOpened(popup_id, row_index));
+                    let options = build_for_path(&tab.current_path, val.get_path(), &favorites);
+                    for option in options {
+                        if ui.button(option.name.as_str()).clicked() {
+                            option.action.clone().schedule();
+                            ui.close();
+                        }
+                    }
+                    if !is_dir {
+                        if ui.button("Open").clicked() {
+                            ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
+                            ui.close();
+                            return;
+                        }
+                        #[cfg(windows)]
+                        if ui.button("Show in explorer").clicked() {
+                            crate::windows_tools::display_in_explorer(val.get_path())
+                                .unwrap_or_else(|_| {
+                                    toast!(Error, "Could not open in explorer");
+                                });
+                            ui.close();
+                        }
+                        let val_dir = PathBuf::from(val.get_splitted_path().0);
+                        let matching_dirs = self.tab_paths.iter().filter(|s| !val_dir.eq(*s));
+                        #[allow(clippy::collapsible_else_if)]
+                        if matching_dirs.clone().count() > 0 {
+                            ui.separator();
+                            ui.menu_button("Move to", |ui| {
+                                for other in matching_dirs {
+                                    let other = PathBuf::from(
+                                        std::fs::canonicalize(other)
+                                            .unwrap_or_else(|_| val.get_path().to_path_buf())
+                                            .to_fixed_string(),
+                                    );
+
+                                    if ui
+                                        .button(format!(
+                                            "{}",
+                                            &other.file_name().expect("Failed").to_string_lossy()
+                                        ))
+                                        .on_hover_text(other.display().to_string())
+                                        .clicked()
+                                    {
+                                        let path = val.get_path();
+                                        let filename = path.file_name().expect("NO FILENAME");
+                                        let target_path = other.join(filename);
+                                        println!("{}", &target_path.display());
+                                        let move_result = fs::rename(path, &target_path);
+                                        let mut success = move_result.is_ok();
+                                        let _ = move_result.inspect_err(|e| {
+                                            e.raw_os_error().inspect(|nr| {
+                                                // OSError: [WinError 17] The system cannot move the file to a different disk drive
+                                                if *nr == 17 {
+                                                    let copy_success =
+                                                        fs::copy(path, target_path.clone()).is_ok();
+                                                    if copy_success {
+                                                        success = fs::remove_file(path).is_ok();
+                                                    }
+                                                }
+                                            });
+                                        });
+                                        if !success {
+                                            toast!(
+                                                Error,
+                                                "Failed to move file {}",
+                                                filename.to_string_lossy()
+                                            );
+                                        }
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Move to Trash").clicked() {
+                        trash::delete(val.get_path()).unwrap_or_else(|_| {
+                            toast!(Error, "Could not move it to trash.");
+                        });
+                        ui.close();
+                        TabAction::RequestFilesRefresh.schedule_active_tab();
+                    }
+                    if ui.button("Copy path to clipboard").clicked() {
+                        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+                            toast!(Error, "Failed to read the clipboard.");
+                            return;
+                        };
+                        clipboard.set_text(val.path.clone()).unwrap_or_else(|_| {
+                            toast!(Error, "Failed to update the clipboard.");
+                        });
+                        ui.close();
+                    }
+                    if ui.button("Rename").clicked() {
+                        ui.data_mut(|w| {
+                            w.insert_temp(egui::Id::new(ModalWindow::Rename), val.clone());
+                        });
+                        ActionToPerform::ToggleModalWindow(ModalWindow::Rename).schedule();
+                        ui.close();
+                    }
+
+                    #[cfg(windows)]
+                    {
+                        ui.separator();
+                        if ui.button("Properties").clicked() {
+                            crate::windows_tools::open_properties(val.get_path());
+                            ui.close();
+                        }
+                    }
+                });
+
+            // Scroll selected row into view
+            if just_changed
+                && let Some(v) = selected_tabs.selected_fields.last()
+                && *v == row_index
+            {
+                ui.scroll_to_cursor(Some(egui::Align::Center));
+            }
+        }
+
         if let Some(new_sort) = new_sort {
             let mut settings: DirectoryViewSettings =
                 ui.data_get_path_or_persisted(&tab.current_path).data;
@@ -1004,5 +1273,170 @@ const fn convert_nr_to_egui_key(nr: usize) -> Option<egui::Key> {
         9 => Some(egui::Key::Num9),
         0 => Some(egui::Key::Num0),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::files::{DirEntry, EntryType};
+
+    /// Build a list of [`DirEntry`] values from the project's `src/` directory.
+    ///
+    /// Using real filesystem entries means paths, timestamps, and sizes are all
+    /// realistic, which exercises the galley-pool paths in the renderer.
+    fn make_entries() -> Vec<DirEntry> {
+        std::fs::read_dir("src")
+            .expect("src/ must exist")
+            .filter_map(|e| e.ok())
+            .filter_map(|e| DirEntry::try_from(e).ok())
+            .take(20)
+            .collect()
+    }
+
+    /// Build a [`MyTabs`] whose active tab is populated from `src/`.
+    fn populated_tabs() -> MyTabs {
+        let path = std::path::Path::new("src");
+        let mut tab = TabData::from_path(path);
+        tab.list = make_entries();
+        tab.visible_entries = (0..tab.list.len()).collect();
+        MyTabs {
+            dock_state: egui_dock::DockState::new(vec![tab]),
+            focused: true,
+        }
+    }
+
+    /// Draw one frame of the dock view, seeding galley pools and draining commands.
+    fn draw_frame(ctx: &egui::Context, my_tabs: &mut MyTabs) {
+        // Seed the pre-computed galley pools so time / size widgets render.
+        for (_, tab) in my_tabs.dock_state.iter_all_tabs() {
+            populate_time_pool(tab.list.iter().map(|e| e.meta.since_modified), ctx);
+            populate_sizes_pool(tab.list.iter().map(|e| e.meta.size), ctx);
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            my_tabs.ui(ui);
+        });
+
+        // Drain the command queue so it does not fill up across frames.
+        while crate::app::commands::COMMANDS_QUEUE.pop().is_some() {}
+    }
+
+    // ── Snapshot: dock view at a standard desktop width ──────────────────────
+
+    #[test]
+    fn test_dock_view_wide() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 500.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs),
+                populated_tabs(),
+            );
+
+        harness.run_steps(12);
+        harness.snapshot("dock_view_wide");
+    }
+
+    // ── Snapshot: dock view at a narrow width (split-pane scenario) ───────────
+    //
+    // Before the fix the name column had `min_size.width = 260 px` and the grid
+    // had `overflow.x = Visible`, which forced cells to bleed outside the panel
+    // at this width.  The snapshot now shows text clipped with "…" instead.
+
+    #[test]
+    fn test_dock_view_narrow() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(350.0, 500.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs),
+                populated_tabs(),
+            );
+
+        harness.run_steps(12);
+        harness.snapshot("dock_view_narrow");
+    }
+
+    // ── Snapshot: dock view with long / duplicated names (ellipsis stress) ────
+
+    #[test]
+    fn test_dock_view_long_names() {
+        // Duplicate entries so we get more rows and more truncation to render.
+        let entries = make_entries();
+        let all: Vec<DirEntry> = entries
+            .iter()
+            .chain(entries.iter())
+            .cloned()
+            .take(20)
+            .collect();
+
+        let path = std::path::Path::new("src");
+        let mut tab = TabData::from_path(path);
+        tab.list = all;
+        tab.visible_entries = (0..tab.list.len()).collect();
+        let my_tabs = MyTabs {
+            dock_state: egui_dock::DockState::new(vec![tab]),
+            focused: false,
+        };
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(400.0, 600.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs),
+                my_tabs,
+            );
+
+        harness.run_steps(12);
+        harness.snapshot("dock_view_long_names");
+    }
+
+    // ── Snapshot: empty tab (no entries) ─────────────────────────────────────
+
+    #[test]
+    fn test_dock_view_empty_tab() {
+        let tab = TabData::from_path(std::path::Path::new("src"));
+        let my_tabs = MyTabs {
+            dock_state: egui_dock::DockState::new(vec![tab]),
+            focused: false,
+        };
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(700.0, 400.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs),
+                my_tabs,
+            );
+
+        harness.run_steps(12);
+        harness.snapshot("dock_view_empty_tab");
+    }
+
+    // ── Unit: DirEntry constructed from real fs has correct entry type ────────
+
+    #[test]
+    fn test_dir_entry_entry_type() {
+        let entries = make_entries();
+        assert!(!entries.is_empty(), "src/ must contain at least one entry");
+        for entry in &entries {
+            let path = entry.get_path();
+            if path.is_file() {
+                assert!(
+                    entry.is_file(),
+                    "Expected file entry for {}",
+                    path.display()
+                );
+            } else {
+                assert!(
+                    !entry.is_file(),
+                    "Expected directory entry for {}",
+                    path.display()
+                );
+                assert_eq!(
+                    entry.meta.entry_type,
+                    EntryType::Directory,
+                    "Entry type mismatch for {}",
+                    path.display()
+                );
+            }
+        }
     }
 }

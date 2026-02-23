@@ -67,6 +67,10 @@ windows = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+egui_kittest = { version = "0.33", features = ["snapshot", "wgpu"] }
+egui-winit = { version = "0.33", features = ["accesskit"] }
+
 [build-dependencies]
 anyhow = "1.0"
 winresource = "0.1.19"
