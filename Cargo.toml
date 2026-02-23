@@ -56,6 +56,7 @@ arboard = "3.4.1"
 embed_plist = "1.2"
 rayon = "1.10"
 bincode = "=2.0.1"
+egui_taffy = "0.10.0"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
