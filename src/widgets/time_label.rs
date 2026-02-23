@@ -12,15 +12,15 @@ impl Widget for ElapsedTime {
             return ui.response();
         };
 
-        // If the user said "use this specific galley", then just use it:
+        // Allocate exactly the text size; the parent cell layout controls
+        // horizontal positioning via right-to-left layout.
         let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::hover());
-        let galley_pos = rect.center_top();
+        let galley_pos = rect.min;
 
         if ui.is_rect_visible(response.rect) {
             let response_color = ui.style().visuals.text_color();
-            ui.painter().add(
-                epaint::TextShape::new(galley_pos, galley, response_color), // .with_underline(underline),
-            );
+            ui.painter()
+                .add(epaint::TextShape::new(galley_pos, galley, response_color));
         }
 
         response
@@ -35,15 +35,15 @@ pub fn draw_size(ui: &mut Ui, size: u32) -> Response {
         return ui.response();
     };
 
-    // If the user said "use this specific galley", then just use it:
+    // Allocate exactly the text size; the parent cell layout controls
+    // horizontal positioning via right-to-left layout.
     let (rect, response) = ui.allocate_exact_size(galley.size(), Sense::empty());
-    let galley_pos = rect.center_top();
+    let galley_pos = rect.min;
 
     if ui.is_rect_visible(response.rect) {
         let response_color = ui.style().visuals.text_color();
-        ui.painter().add(
-            epaint::TextShape::new(galley_pos, galley, response_color), // .with_underline(underline),
-        );
+        ui.painter()
+            .add(epaint::TextShape::new(galley_pos, galley, response_color));
     }
 
     response

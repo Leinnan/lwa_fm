@@ -197,6 +197,13 @@ impl App {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
 
+        // egui_taffy uses taffy's raw floating-point layout values for child UI rects,
+        // which can produce sub-pixel coordinates. Disable egui's "Unaligned" debug
+        // overlay so it doesn't fire on every virtual-scroll row.
+        cc.egui_ctx.style_mut(|style| {
+            style.debug.show_unaligned = false;
+        });
+
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {

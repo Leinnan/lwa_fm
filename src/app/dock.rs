@@ -433,7 +433,7 @@ impl TabViewer for MyTabViewer {
         let tab_id = tab.id;
 
         let multiple_dirs = tab.deep_or_multiple_paths();
-        let text_height = egui::TextStyle::Body.resolve(ui.style()).size * 1.5;
+        let text_height = (egui::TextStyle::Body.resolve(ui.style()).size * 1.5).ceil();
 
         let tab_popup_id = Id::new(tab_id).with(1500);
         let mut selected_tabs = ui
@@ -476,6 +476,18 @@ impl TabViewer for MyTabViewer {
         tui(ui, Id::new("file_grid").with(tab.id))
             .reserve_available_space()
             .style(taffy::Style {
+                padding: Rect {
+                    left: LengthPercentage::ZERO,
+                    right: LengthPercentage::ZERO,
+                    top: LengthPercentage::ZERO,
+                    bottom: LengthPercentage::ZERO,
+                },
+                margin: Rect {
+                    left: LengthPercentageAuto::ZERO,
+                    right: LengthPercentageAuto::ZERO,
+                    top: LengthPercentageAuto::ZERO,
+                    bottom: LengthPercentageAuto::ZERO,
+                },
                 flex_direction: taffy::FlexDirection::Column,
                 size: percent(1.),
                 max_size: percent(1.),
@@ -489,18 +501,26 @@ impl TabViewer for MyTabViewer {
                         x: taffy::Overflow::Hidden,
                         y: taffy::Overflow::Scroll,
                     },
-                    // 3 columns: Name (1fr, no hard min), Modified (fixed range), Size (fixed range)
-                    grid_template_columns: vec![
-                        fr(1.),
-                        minmax(min_content(), length(COL_MODIFIED_MAX)),
-                        minmax(min_content(), length(COL_SIZE_MAX)),
-                    ],
+                    margin: Rect {
+                        left: LengthPercentageAuto::ZERO,
+                        right: LengthPercentageAuto::ZERO,
+                        top: LengthPercentageAuto::ZERO,
+                        bottom: LengthPercentageAuto::ZERO,
+                    },
+                    padding: Rect {
+                        left: LengthPercentage::ZERO,
+                        right: LengthPercentage::ZERO,
+                        top: LengthPercentage::ZERO,
+                        bottom: LengthPercentage::ZERO,
+                    },
+                    // 3 columns: Name (1fr, fills remaining), Modified (fixed), Size (fixed)
+                    grid_template_columns: vec![fr(1.), length(COL_MODIFIED_W), length(COL_SIZE_W)],
                     size: taffy::Size {
                         width: percent(1.),
                         height: auto(),
                     },
                     max_size: percent(1.),
-                    grid_auto_rows: vec![length(text_height)],
+                    grid_auto_rows: vec![min_content()],
                     ..Default::default()
                 })
                 .add(|tui| {
@@ -536,18 +556,20 @@ impl TabViewer for MyTabViewer {
                             } else {
                                 egui::Color32::TRANSPARENT
                             };
+                            let height = length(text_height * 1.1);
+                            let min_size = taffy::Size {
+                                width: length(0.0),
+                                height,
+                            };
 
                             // ── Name column ───────────────────────────────
                             let name_response = tui
                                 .id(idgen())
                                 .mut_style(&grid_row_param)
                                 .mut_style(|style| {
-                                    style.min_size = taffy::Size {
-                                        width: length(0.0),
-                                        height: auto(),
-                                    };
+                                    style.min_size = min_size.clone();
                                     style.overflow.x = taffy::Overflow::Hidden;
-                                    style.align_items = Some(taffy::AlignItems::Center);
+                                    style.align_items = Some(taffy::AlignItems::Stretch);
                                 })
                                 .add_with_background_ui(
                                     |ui, container| {
@@ -559,6 +581,13 @@ impl TabViewer for MyTabViewer {
                                     },
                                     |tui, ()| {
                                         tui.mut_style(|style| {
+                                            style.padding =
+                                                Rect {
+                                                    left: LengthPercentage::Length(10.0),
+                                                    right: LengthPercentage::Length(10.0),
+                                                    top: LengthPercentage::ZERO,
+                                                    bottom: LengthPercentage::ZERO,
+                                                };
                                             style.size.width = percent(1.);
                                             style.overflow.x = taffy::Overflow::Hidden;
                                             style.align_items =
@@ -664,19 +693,26 @@ impl TabViewer for MyTabViewer {
                             tui.id(idgen())
                                 .mut_style(&grid_row_param)
                                 .mut_style(|style| {
+                                    style.padding = Rect {
+                                        left: LengthPercentage::Length(10.0),
+                                        right: LengthPercentage::Length(10.0),
+                                        top: LengthPercentage::ZERO,
+                                        bottom: LengthPercentage::ZERO,
+                                    };
                                     style.size = taffy::Size {
                                         width: length(COL_MODIFIED_W),
                                         height: auto(),
                                     };
                                     style.min_size = taffy::Size {
                                         width: length(COL_MODIFIED_MIN),
-                                        height: auto(),
+                                        height,
                                     };
                                     style.max_size = taffy::Size {
                                         width: length(COL_MODIFIED_MAX),
                                         height: auto(),
                                     };
-                                    style.align_items = Some(taffy::AlignItems::Center);
+                                    style.align_items = Some(taffy::AlignItems::Stretch);
+                                    // style.align_items = Some(taffy::AlignItems::Center);
                                 })
                                 .add_with_background_ui(
                                     |ui, container| {
@@ -687,7 +723,10 @@ impl TabViewer for MyTabViewer {
                                         );
                                     },
                                     |tui, ()| {
-                                        tui.ui(|ui: &mut Ui| {
+                                        tui.mut_style(|style| {
+                                            style.size.width = percent(1.);
+                                        })
+                                        .ui(|ui: &mut Ui| {
                                             #[cfg(feature = "profiling")]
                                             puffin::profile_scope!(
                                                 "lwa_fm::MyTabViewer::ui::table_body::time_column"
@@ -708,19 +747,26 @@ impl TabViewer for MyTabViewer {
                             tui.id(idgen())
                                 .mut_style(&grid_row_param)
                                 .mut_style(|style| {
+                                    style.padding = Rect {
+                                        left: LengthPercentage::Length(10.0),
+                                        right: LengthPercentage::Length(10.0),
+                                        top: LengthPercentage::ZERO,
+                                        bottom: LengthPercentage::ZERO,
+                                    };
                                     style.size = taffy::Size {
                                         width: length(COL_SIZE_W),
                                         height: auto(),
                                     };
                                     style.min_size = taffy::Size {
                                         width: length(COL_SIZE_MIN),
-                                        height: auto(),
+                                        height,
                                     };
                                     style.max_size = taffy::Size {
                                         width: length(COL_SIZE_MAX),
                                         height: auto(),
                                     };
-                                    style.align_items = Some(taffy::AlignItems::Center);
+                                    style.align_items = Some(taffy::AlignItems::Stretch);
+                                    // style.align_items = Some(taffy::AlignItems::Center);
                                 })
                                 .add_with_background_ui(
                                     |ui, container| {
@@ -731,7 +777,10 @@ impl TabViewer for MyTabViewer {
                                         );
                                     },
                                     |tui, ()| {
-                                        tui.ui(|ui: &mut Ui| {
+                                        tui.mut_style(|style| {
+                                            style.size.width = percent(1.);
+                                        })
+                                        .ui(|ui: &mut Ui| {
                                             #[cfg(feature = "profiling")]
                                             puffin::profile_scope!(
                                                 "lwa_fm::MyTabViewer::ui::table_body::size_column"
@@ -824,6 +873,7 @@ impl TabViewer for MyTabViewer {
                             style.grid_column = line(2);
                             style.padding = length(4.);
                             style.align_items = Some(taffy::AlignItems::Center);
+                            style.justify_content = Some(taffy::JustifyContent::FlexEnd);
                             style.size = taffy::Size {
                                 width: length(COL_MODIFIED_W),
                                 height: auto(),
@@ -842,15 +892,17 @@ impl TabViewer for MyTabViewer {
                                 style.size.width = percent(1.);
                             })
                             .ui(|ui: &mut Ui| {
-                                let res = ui.add(
-                                    egui::Label::new("Modified")
-                                        .wrap_mode(egui::TextWrapMode::Extend)
-                                        .selectable(false)
-                                        .sense(Sense::click()),
-                                );
-                                if res.clicked() {
-                                    new_sort = Some(Sort::Modified);
-                                }
+                                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let res = ui.add(
+                                        egui::Label::new("Modified")
+                                            .wrap_mode(egui::TextWrapMode::Extend)
+                                            .selectable(false)
+                                            .sense(Sense::click()),
+                                    );
+                                    if res.clicked() {
+                                        new_sort = Some(Sort::Modified);
+                                    }
+                                });
                             });
                         });
 
@@ -862,6 +914,7 @@ impl TabViewer for MyTabViewer {
                             style.grid_column = line(3);
                             style.padding = length(4.);
                             style.align_items = Some(taffy::AlignItems::Center);
+                            style.justify_content = Some(taffy::JustifyContent::FlexEnd);
                             style.size = taffy::Size {
                                 width: length(COL_SIZE_W),
                                 height: auto(),
@@ -880,15 +933,17 @@ impl TabViewer for MyTabViewer {
                                 style.size.width = percent(1.);
                             })
                             .ui(|ui: &mut Ui| {
-                                let res = ui.add(
-                                    egui::Label::new("Size")
-                                        .wrap_mode(egui::TextWrapMode::Extend)
-                                        .selectable(false)
-                                        .sense(Sense::click()),
-                                );
-                                if res.clicked() {
-                                    new_sort = Some(Sort::Size);
-                                }
+                                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let res = ui.add(
+                                        egui::Label::new("Size")
+                                            .wrap_mode(egui::TextWrapMode::Extend)
+                                            .selectable(false)
+                                            .sense(Sense::click()),
+                                    );
+                                    if res.clicked() {
+                                        new_sort = Some(Sort::Size);
+                                    }
+                                });
                             });
                         });
                 });
@@ -1210,6 +1265,7 @@ impl MyTabs {
             active_tab,
             focused: self.focused,
         };
+        ui.spacing_mut().item_spacing = [0.0, 0.0].into();
         DockArea::new(&mut self.dock_state)
             .show_leaf_close_all_buttons(false)
             .show_leaf_collapse_buttons(false)
@@ -1254,7 +1310,7 @@ impl MyTabs {
         } else {
             0.0
         };
-        style.tab.tab_body.inner_margin = egui::Margin::same(10);
+        style.tab.tab_body.inner_margin = egui::Margin::same(0);
         style.tab.tab_body.stroke = egui::Stroke::NONE;
         style
     }
