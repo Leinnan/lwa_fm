@@ -5,7 +5,7 @@ use egui::{
     Color32, Context, FontId, FontSelection, Galley, Id, Layout, Sense, TextBuffer, TextFormat, Ui,
     WidgetText,
 };
-use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex, TabViewer};
+use egui_dock::{DockArea, DockState, Style, TabViewer};
 use icu::collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu::collator::{Collator, CollatorBorrowed};
 use icu::locale::Locale;
@@ -25,6 +25,7 @@ use egui_taffy::{
 use taffy::prelude::*;
 use taffy::style_helpers;
 
+use super::assets::AssetManager;
 use super::commands::ActionToPerform;
 use crate::app::command_palette::build_for_path;
 use crate::app::commands::{ModalWindow, TabAction, TabTarget};
@@ -344,11 +345,12 @@ impl TabData {
     }
 }
 
-pub struct MyTabViewer {
+pub struct MyTabViewer<'a> {
     closeable: bool,
     tab_paths: Vec<PathBuf>,
     active_tab: u32,
     focused: bool,
+    assets: &'a mut AssetManager,
 }
 
 // Column dimension constants used in both the header and data rows of the file grid.
@@ -366,7 +368,7 @@ struct RowResult {
     response: egui::Response,
 }
 
-impl TabViewer for MyTabViewer {
+impl TabViewer for MyTabViewer<'_> {
     // This associated type is used to attach some data to each tab.
     type Tab = TabData;
 
@@ -556,7 +558,7 @@ impl TabViewer for MyTabViewer {
                             } else {
                                 egui::Color32::TRANSPARENT
                             };
-                            let height = length(text_height * 1.1);
+                            let height = length(text_height.max(self.assets.render_size()) * self.assets.row_height_multiplier());
                             let min_size = taffy::Size {
                                 width: length(0.0),
                                 height,
@@ -583,8 +585,8 @@ impl TabViewer for MyTabViewer {
                                         tui.mut_style(|style| {
                                             style.padding =
                                                 Rect {
-                                                    left: LengthPercentage::Length(10.0),
-                                                    right: LengthPercentage::Length(10.0),
+                                                    left: LengthPercentage::length(10.0),
+                                                    right: LengthPercentage::length(10.0),
                                                     top: LengthPercentage::ZERO,
                                                     bottom: LengthPercentage::ZERO,
                                                 };
@@ -604,12 +606,21 @@ impl TabViewer for MyTabViewer {
                                                 Color32::GRAY
                                             };
 
-                                            ui.with_layout(
-                                                Layout::left_to_right(egui::Align::Center),
-                                                |ui| {
-                                                    if cmd && indexed < 10 {
-                                                        ui.add(
-                                                            egui::Label::new(
+                                             ui.with_layout(
+                                                 Layout::left_to_right(egui::Align::Center),
+                                                 |ui| {
+                                                      if let Some(texture) = self.assets.request_entry_texture(val) {
+                                                          let render_sz = self.assets.render_size_for(val);
+                                                          ui.add(
+                                                              egui::Image::new(&texture)
+                                                                  .fit_to_exact_size(Vec2::splat(render_sz)),
+                                                          );
+                                                      } else {
+                                                          ui.allocate_space(Vec2::splat(self.assets.render_size_for(val)));
+                                                      }
+                                                     if cmd && indexed < 10 {
+                                                         ui.add(
+                                                             egui::Label::new(
                                                                 LayoutJob::simple_format(
                                                                     format!("[{indexed}]"),
                                                                     TextFormat {
@@ -694,8 +705,8 @@ impl TabViewer for MyTabViewer {
                                 .mut_style(&grid_row_param)
                                 .mut_style(|style| {
                                     style.padding = Rect {
-                                        left: LengthPercentage::Length(10.0),
-                                        right: LengthPercentage::Length(10.0),
+                                        left: LengthPercentage::length(10.0),
+                                        right: LengthPercentage::length(10.0),
                                         top: LengthPercentage::ZERO,
                                         bottom: LengthPercentage::ZERO,
                                     };
@@ -748,8 +759,8 @@ impl TabViewer for MyTabViewer {
                                 .mut_style(&grid_row_param)
                                 .mut_style(|style| {
                                     style.padding = Rect {
-                                        left: LengthPercentage::Length(10.0),
-                                        right: LengthPercentage::Length(10.0),
+                                        left: LengthPercentage::length(10.0),
+                                        right: LengthPercentage::length(10.0),
                                         top: LengthPercentage::ZERO,
                                         bottom: LengthPercentage::ZERO,
                                     };
@@ -1242,7 +1253,7 @@ impl MyTabs {
         Some(active_tab)
     }
 
-    pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn ui(&mut self, ui: &mut Ui, assets: &mut AssetManager) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::MyTabs::ui");
         let tabs = self.get_tabs_paths();
@@ -1264,6 +1275,7 @@ impl MyTabs {
             tab_paths: tabs,
             active_tab,
             focused: self.focused,
+            assets,
         };
         ui.spacing_mut().item_spacing = [0.0, 0.0].into();
         DockArea::new(&mut self.dock_state)
@@ -1279,7 +1291,7 @@ impl MyTabs {
         let is_not_focused = self.dock_state.focused_leaf().is_none();
         if is_not_focused {
             self.dock_state
-                .set_focused_node_and_surface((SurfaceIndex::main(), NodeIndex::root()));
+                .set_focused_node_and_surface(egui_dock::NodePath::MAIN_ROOT);
         }
         let new_window = TabData::from_path(path);
         let root_node = self
@@ -1364,6 +1376,7 @@ mod tests {
 
     /// Draw one frame of the dock view, seeding galley pools and draining commands.
     fn draw_frame(ctx: &egui::Context, my_tabs: &mut MyTabs) {
+        let mut assets = crate::app::assets::AssetManager::default();
         // Seed the pre-computed galley pools so time / size widgets render.
         for (_, tab) in my_tabs.dock_state.iter_all_tabs() {
             populate_time_pool(tab.list.iter().map(|e| e.meta.since_modified), ctx);
@@ -1371,7 +1384,7 @@ mod tests {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            my_tabs.ui(ui);
+            my_tabs.ui(ui, &mut assets);
         });
 
         // Drain the command queue so it does not fill up across frames.

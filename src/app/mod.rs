@@ -1,3 +1,4 @@
+use crate::app::assets::AssetManager;
 use crate::app::commands::{COMMANDS_QUEUE, TabAction, TabTarget};
 use crate::app::directory_path_info::DirectoryPathInfo;
 use crate::app::directory_view_settings::DirectoryViewSettings;
@@ -19,6 +20,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::{fs, path::PathBuf};
 
+pub(crate) mod assets;
 mod central_panel;
 pub mod command_palette;
 pub mod commands;
@@ -83,6 +85,8 @@ pub struct App {
     command_palette: CommandPalette,
     #[serde(skip, default)]
     pub watchers: DirectoryWatchers,
+    #[serde(skip, default)]
+    assets: AssetManager,
 }
 
 impl App {}
@@ -179,6 +183,7 @@ impl Default for App {
             display_modal: None,
             command_palette,
             watchers: DirectoryWatchers::default(),
+            assets: AssetManager::default(),
         }
     }
 }
@@ -211,6 +216,7 @@ impl App {
 
             value.load_locations();
             value.tabs = crate::app::dock::MyTabs::new(&get_starting_path());
+            value.assets = AssetManager::default();
             return value;
         }
 
@@ -462,14 +468,15 @@ impl eframe::App for App {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
-    /// Called each time the UI needs repainting, which may be many times per second.
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         #[cfg(feature = "profiling")]
         puffin::profile_function!("my_update");
-        self.top_panel(ctx);
-        self.bottom_panel(ctx);
-        self.left_side_panel(ctx);
-        self.central_panel(ctx);
+        self.assets.poll_results(&ctx);
+        self.top_panel(&ctx);
+        self.bottom_panel(&ctx);
+        self.left_side_panel(&ctx);
+        self.central_panel(&ctx);
 
         if ctx.key_with_command_pressed(egui::Key::P) {
             ActionToPerform::ToggleModalWindow(ModalWindow::Settings).schedule();
@@ -493,14 +500,14 @@ impl eframe::App for App {
         if let Some(modal) = &self.display_modal {
             match modal {
                 ModalWindow::Settings => {
-                    self.settings.display(ctx);
+                    self.settings.display(&ctx);
                 }
                 ModalWindow::Commands => {
-                    self.command_palette.ui(ctx);
+                    self.command_palette.ui(&ctx);
                 } // ModalWindow::NewDirectory => todo!(),
                 ModalWindow::Rename => {
                     let modal_response =
-                        egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(ctx, |ui| {
+                        egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(&ctx, |ui| {
                             ui.label("Old name");
                             let (old, mut name) = ui.data_mut(|d| {
                                 let old =
@@ -552,9 +559,9 @@ impl eframe::App for App {
             }
         }
 
-        TOASTS.write().show(ctx);
+        TOASTS.write().show(&ctx);
         while let Some(action) = COMMANDS_QUEUE.pop() {
-            self.handle_action(ctx, action);
+            self.handle_action(&ctx, action);
         }
         {
             #[cfg(feature = "profiling")]
@@ -566,9 +573,11 @@ impl eframe::App for App {
             puffin::profile_scope!("lwa_fm::MyTabs::ui::check_for_file_system_events");
             let changed_directories = self.watchers.check_for_file_system_events();
             if !changed_directories.is_empty() {
+                self.assets
+                    .invalidate_directories(changed_directories.iter().cloned());
                 crate::app::database::invalidate_dirs(changed_directories);
                 self.handle_action(
-                    ctx,
+                    &ctx,
                     ActionToPerform::TabAction(
                         commands::TabTarget::AllTabs,
                         TabAction::RequestFilesRefresh,
