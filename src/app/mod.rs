@@ -242,14 +242,57 @@ impl App {
                             "lwa_fm::handle_action::ChangePaths: {}",
                             path.get_name_from_path()
                         );
-                        if let Some(old_path) = tab.current_path.get_path() {
-                            self.watchers.stop(&old_path);
-                        }
+                        let old_watcher_specs = tab.watcher_specs();
 
                         path.print_from_lua();
-                        let new_path = tab.set_path(path);
-                        if let Some(new_path) = new_path.get_path() {
-                            _ = self.watchers.start(new_path);
+                        tab.set_path(path);
+                        let new_watcher_specs = tab.watcher_specs();
+                        let refreshed_path = tab.current_path.get_path();
+
+                        let old_specs_by_path = old_watcher_specs
+                            .iter()
+                            .cloned()
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        let new_specs_by_path = new_watcher_specs
+                            .iter()
+                            .cloned()
+                            .collect::<std::collections::BTreeMap<_, _>>();
+
+                        let removed_watchers = old_specs_by_path
+                            .keys()
+                            .filter(|path| !new_specs_by_path.contains_key(*path))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let added_watchers = new_specs_by_path
+                            .iter()
+                            .filter(|(path, _)| !old_specs_by_path.contains_key(*path))
+                            .map(|(path, mode)| (path.clone(), *mode))
+                            .collect::<Vec<_>>();
+                        let restarted_watchers = new_specs_by_path
+                            .iter()
+                            .filter_map(|(path, new_mode)| {
+                                old_specs_by_path.get(path).and_then(|old_mode| {
+                                    if old_mode != new_mode {
+                                        Some((path.clone(), *new_mode))
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                            .collect::<Vec<_>>();
+
+                        self.watchers.stop_many(removed_watchers);
+                        self.watchers.stop_many(
+                            restarted_watchers
+                                .iter()
+                                .map(|(path, _)| path.clone())
+                                .collect::<Vec<_>>(),
+                        );
+                        self.watchers.start_many(added_watchers);
+                        self.watchers.start_many(restarted_watchers);
+
+                        if let Some(new_path) = refreshed_path {
+                            crate::app::database::invalidate_dir(&new_path);
                         }
                         if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
                             let new_data = match tab.current_path.single_path() {
@@ -521,7 +564,9 @@ impl eframe::App for App {
         {
             #[cfg(feature = "profiling")]
             puffin::profile_scope!("lwa_fm::MyTabs::ui::check_for_file_system_events");
-            if self.watchers.check_for_file_system_events() {
+            let changed_directories = self.watchers.check_for_file_system_events();
+            if !changed_directories.is_empty() {
+                crate::app::database::invalidate_dirs(changed_directories);
                 self.handle_action(
                     ctx,
                     ActionToPerform::TabAction(

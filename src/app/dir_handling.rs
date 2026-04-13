@@ -5,6 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use notify::RecursiveMode;
+
 use icu::collator::CollatorBorrowed;
 use rayon::slice::ParallelSliceMut;
 
@@ -22,6 +24,21 @@ pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
 use super::{Sort, dock::TabData};
 
 impl TabData {
+    pub fn watcher_specs(&self) -> Vec<(PathBuf, RecursiveMode)> {
+        let roots: &[PathBuf] = match &self.current_path {
+            CurrentPath::None => &[],
+            CurrentPath::One(path_buf) => std::slice::from_ref(path_buf),
+            CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
+        };
+        let mode = if self.search.as_ref().map_or(1, |search| search.depth) > 1 {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+
+        roots.iter().cloned().map(|path| (path, mode)).collect()
+    }
+
     pub fn set_path(&mut self, path: impl Into<CurrentPath>) -> &CurrentPath {
         let path = path.into();
         self.current_path = path;
