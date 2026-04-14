@@ -487,6 +487,9 @@ impl eframe::App for App {
         #[cfg(feature = "profiling")]
         puffin::profile_function!("my_update");
         self.assets.poll_results(&ctx);
+        let active_directory = self.tabs.get_current_path();
+        self.assets
+            .set_active_directory(active_directory.as_deref());
         self.top_panel(&ctx);
         self.bottom_panel(&ctx);
         self.left_side_panel(&ctx);
@@ -546,10 +549,16 @@ impl eframe::App for App {
                             ui.text_edit_singleline(&mut name);
                             let valid = !Path::new(&name).try_exists().is_ok_and(|f| f);
                             if ui.add_enabled(valid, egui::Button::new("Rename")).clicked() {
-                                let _ = fs::rename(
+                                if fs::rename(
                                     old.get_path(),
-                                    Path::new(old.get_splitted_path().0).join(name),
-                                );
+                                    Path::new(old.get_splitted_path().0).join(&name),
+                                )
+                                .is_ok()
+                                {
+                                    crate::app::database::invalidate_dir(Path::new(
+                                        old.get_splitted_path().0,
+                                    ));
+                                }
                                 ui.data_mut(|w| {
                                     w.remove_temp::<String>(
                                         egui::Id::new(ModalWindow::Rename).with("new"),
