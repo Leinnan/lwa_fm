@@ -1,3 +1,4 @@
+use crate::app::assets::AssetManager;
 use crate::app::commands::{COMMANDS_QUEUE, TabAction, TabTarget};
 use crate::app::directory_path_info::DirectoryPathInfo;
 use crate::app::directory_view_settings::DirectoryViewSettings;
@@ -19,6 +20,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::{fs, path::PathBuf};
 
+pub(crate) mod assets;
 mod central_panel;
 pub mod command_palette;
 pub mod commands;
@@ -83,6 +85,8 @@ pub struct App {
     command_palette: CommandPalette,
     #[serde(skip, default)]
     pub watchers: DirectoryWatchers,
+    #[serde(skip, default)]
+    assets: AssetManager,
 }
 
 impl App {}
@@ -179,6 +183,7 @@ impl Default for App {
             display_modal: None,
             command_palette,
             watchers: DirectoryWatchers::default(),
+            assets: AssetManager::default(),
         }
     }
 }
@@ -207,6 +212,7 @@ impl App {
 
             value.load_locations();
             value.tabs = crate::app::dock::MyTabs::new(&get_starting_path());
+            value.assets = AssetManager::default();
             return value;
         }
 
@@ -238,14 +244,57 @@ impl App {
                             "lwa_fm::handle_action::ChangePaths: {}",
                             path.get_name_from_path()
                         );
-                        if let Some(old_path) = tab.current_path.get_path() {
-                            self.watchers.stop(&old_path);
-                        }
+                        let old_watcher_specs = tab.watcher_specs();
 
                         path.print_from_lua();
-                        let new_path = tab.set_path(path);
-                        if let Some(new_path) = new_path.get_path() {
-                            _ = self.watchers.start(new_path);
+                        tab.set_path(path);
+                        let new_watcher_specs = tab.watcher_specs();
+                        let refreshed_path = tab.current_path.get_path();
+
+                        let old_specs_by_path = old_watcher_specs
+                            .iter()
+                            .cloned()
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        let new_specs_by_path = new_watcher_specs
+                            .iter()
+                            .cloned()
+                            .collect::<std::collections::BTreeMap<_, _>>();
+
+                        let removed_watchers = old_specs_by_path
+                            .keys()
+                            .filter(|path| !new_specs_by_path.contains_key(*path))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let added_watchers = new_specs_by_path
+                            .iter()
+                            .filter(|(path, _)| !old_specs_by_path.contains_key(*path))
+                            .map(|(path, mode)| (path.clone(), *mode))
+                            .collect::<Vec<_>>();
+                        let restarted_watchers = new_specs_by_path
+                            .iter()
+                            .filter_map(|(path, new_mode)| {
+                                old_specs_by_path.get(path).and_then(|old_mode| {
+                                    if old_mode != new_mode {
+                                        Some((path.clone(), *new_mode))
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                            .collect::<Vec<_>>();
+
+                        self.watchers.stop_many(removed_watchers);
+                        self.watchers.stop_many(
+                            restarted_watchers
+                                .iter()
+                                .map(|(path, _)| path.clone())
+                                .collect::<Vec<_>>(),
+                        );
+                        self.watchers.start_many(added_watchers);
+                        self.watchers.start_many(restarted_watchers);
+
+                        if let Some(new_path) = refreshed_path {
+                            crate::app::database::invalidate_dir(&new_path);
                         }
                         if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
                             let new_data = match tab.current_path.single_path() {
@@ -415,14 +464,15 @@ impl eframe::App for App {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
-    /// Called each time the UI needs repainting, which may be many times per second.
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         #[cfg(feature = "profiling")]
         puffin::profile_function!("my_update");
-        self.top_panel(ctx);
-        self.bottom_panel(ctx);
-        self.left_side_panel(ctx);
-        self.central_panel(ctx);
+        self.assets.poll_results(&ctx);
+        self.top_panel(&ctx);
+        self.bottom_panel(&ctx);
+        self.left_side_panel(&ctx);
+        self.central_panel(&ctx);
 
         if ctx.key_with_command_pressed(egui::Key::P) {
             ActionToPerform::ToggleModalWindow(ModalWindow::Settings).schedule();
@@ -446,14 +496,14 @@ impl eframe::App for App {
         if let Some(modal) = &self.display_modal {
             match modal {
                 ModalWindow::Settings => {
-                    self.settings.display(ctx);
+                    self.settings.display(&ctx);
                 }
                 ModalWindow::Commands => {
-                    self.command_palette.ui(ctx);
+                    self.command_palette.ui(&ctx);
                 } // ModalWindow::NewDirectory => todo!(),
                 ModalWindow::Rename => {
                     let modal_response =
-                        egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(ctx, |ui| {
+                        egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(&ctx, |ui| {
                             ui.label("Old name");
                             let (old, mut name) = ui.data_mut(|d| {
                                 let old =
@@ -505,9 +555,9 @@ impl eframe::App for App {
             }
         }
 
-        TOASTS.write().show(ctx);
+        TOASTS.write().show(&ctx);
         while let Some(action) = COMMANDS_QUEUE.pop() {
-            self.handle_action(ctx, action);
+            self.handle_action(&ctx, action);
         }
         {
             #[cfg(feature = "profiling")]
@@ -517,9 +567,13 @@ impl eframe::App for App {
         {
             #[cfg(feature = "profiling")]
             puffin::profile_scope!("lwa_fm::MyTabs::ui::check_for_file_system_events");
-            if self.watchers.check_for_file_system_events() {
+            let changed_directories = self.watchers.check_for_file_system_events();
+            if !changed_directories.is_empty() {
+                self.assets
+                    .invalidate_directories(changed_directories.iter().cloned());
+                crate::app::database::invalidate_dirs(changed_directories);
                 self.handle_action(
-                    ctx,
+                    &ctx,
                     ActionToPerform::TabAction(
                         commands::TabTarget::AllTabs,
                         TabAction::RequestFilesRefresh,

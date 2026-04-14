@@ -19,11 +19,13 @@ impl App {
                 ui.add_enabled_ui(enabled, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if let Some(data) = ui.data_get_persisted::<Locations>() {
-                            data.draw_ui("Favorites", ui, true);
+                            data.draw_ui("Favorites", ui, true, &mut self.assets);
                         }
-                        self.user_locations.draw_ui("User", ui, false);
+                        self.user_locations
+                            .draw_ui("User", ui, false, &mut self.assets);
                         #[cfg(not(target_os = "macos"))]
-                        self.drives_locations.draw_ui("Drives", ui, false);
+                        self.drives_locations
+                            .draw_ui("Drives", ui, false, &mut self.assets);
                     });
                 });
             });

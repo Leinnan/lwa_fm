@@ -18,7 +18,7 @@ use crate::{
     locations::Locations,
     widgets::{ButtonGroupElement, UiBuilderExt},
 };
-use egui::{Button, Context, Layout, OpenUrl, Ui, Vec2, style::HandleShape};
+use egui::{Button, Context, Frame, Layout, OpenUrl, Ui, Vec2, style::HandleShape};
 
 #[derive(Debug, Clone, Default)]
 pub struct TopDisplayPath(Vec<TopDisplayPathPart>);
@@ -108,7 +108,7 @@ impl App {
                 &directory_info.possible_options,
             )
             .max_suggestions(10)
-            .set_text_edit_properties(|s| s.frame(false))
+            .set_text_edit_properties(|s| s.frame(Frame::new()))
             .highlight_matches(true),
         );
 

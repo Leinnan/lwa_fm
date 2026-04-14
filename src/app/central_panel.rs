@@ -14,7 +14,7 @@ impl App {
         let response = egui::CentralPanel::default()
             .frame(frame)
             .show(ctx, |ui| {
-                self.tabs.ui(ui);
+                self.tabs.ui(ui, &mut self.assets);
             })
             .response;
         let focused = response.has_focus() || response.hovered();

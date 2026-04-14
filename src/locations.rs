@@ -1,8 +1,11 @@
 use std::{borrow::Cow, path::PathBuf, str::FromStr};
 
-use egui::{Align, Layout, RichText, TextBuffer, Ui};
+use egui::{Align, Layout, RichText, TextBuffer, Ui, Vec2};
 
-use crate::{app::commands::ActionToPerform, helper::KeyWithCommandPressed};
+use crate::{
+    app::{assets::AssetManager, commands::ActionToPerform},
+    helper::KeyWithCommandPressed,
+};
 
 #[derive(serde::Deserialize, serde::Serialize, Default, Debug, Clone)]
 #[serde(default)]
@@ -24,7 +27,7 @@ const fn empty_icon(_ui: &mut egui::Ui, _openness: f32, _response: &egui::Respon
 }
 
 impl Locations {
-    pub fn draw_ui(&self, id: &str, ui: &mut Ui, removable: bool) {
+    pub fn draw_ui(&self, id: &str, ui: &mut Ui, removable: bool, assets: &mut AssetManager) {
         if self.locations.is_empty() {
             return;
         }
@@ -36,11 +39,26 @@ impl Locations {
                     Layout::top_down(Align::Min).with_cross_justify(true),
                     |ui| {
                         for location in &self.locations {
-                            let button = ui.add(
-                                egui::Button::new(location.name.as_str())
-                                    .frame(false)
-                                    .fill(egui::Color32::from_white_alpha(0)),
-                            );
+                            let button = ui
+                                .horizontal(|ui| {
+                                    if let Some(texture) = assets.request_sidebar_texture(
+                                        &PathBuf::from_str(&location.path).unwrap_or_default(),
+                                    ) {
+                                        ui.add(
+                                            egui::Image::new(&texture).fit_to_exact_size(
+                                                Vec2::splat(assets.render_size()),
+                                            ),
+                                        );
+                                    } else {
+                                        ui.allocate_space(Vec2::splat(assets.render_size()));
+                                    }
+                                    ui.add(
+                                        egui::Button::new(location.name.as_str())
+                                            .frame(false)
+                                            .fill(egui::Color32::from_white_alpha(0)),
+                                    )
+                                })
+                                .inner;
                             if button.clicked() {
                                 if let Some(action) = ActionToPerform::path_from_str(
                                     &location.path,
