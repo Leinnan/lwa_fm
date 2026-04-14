@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -10,6 +11,8 @@ use std::time::Instant;
 use directories::ProjectDirs;
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 use ffmpeg_sidecar::command::FfmpegCommand;
+use image::codecs::gif::{GifEncoder, Repeat};
+use image::{Delay, Frame, RgbaImage};
 use lru::LruCache;
 
 use crate::data::files::DirEntry;
@@ -20,6 +23,9 @@ const ICON_EXT_PREFIX: &str = "icon_";
 const NO_EXT_ICON_KEY: &str = "icon_no_ext";
 const ICON_RETRY_SECS: u64 = 30;
 const TEXTURE_CAPACITY: usize = 512;
+const GIF_BYTES_CAPACITY: usize = 128;
+const VIDEO_GIF_FRAMES: u32 = 15;
+const VIDEO_GIF_FRAME_DELAY_MS: u16 = 600;
 
 static FFMPEG_READY: OnceLock<Result<(), String>> = OnceLock::new();
 
@@ -95,6 +101,10 @@ enum AssetJob {
         lookup_arg: String,
         icon_size: IconSize,
     },
+    VideoGif {
+        source_path: PathBuf,
+        request_key: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +116,11 @@ enum AssetJobResult {
     Failed {
         request_key: String,
     },
+    GifReady {
+        source_path: PathBuf,
+        request_key: String,
+        gif_bytes: Arc<[u8]>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -116,12 +131,76 @@ enum ThumbnailKind {
 
 pub struct AssetManager {
     textures: LruCache<String, TextureHandle>,
+    gif_bytes: LruCache<String, Arc<[u8]>>,
     pending: HashSet<String>,
     failed: HashMap<String, Instant>,
     sender: Sender<AssetJob>,
     receiver: Receiver<AssetJobResult>,
     icon_size: IconSize,
     per_dir_icon_size: HashMap<String, IconSize>,
+    gif_store: PersistentGifStore,
+}
+
+pub enum HoverPreview {
+    ImageUri(String),
+    GifBytes {
+        uri: Cow<'static, str>,
+        bytes: Arc<[u8]>,
+    },
+    Loading,
+    Fallback,
+}
+
+struct PersistentGifStore {
+    tree: sled::Tree,
+}
+
+impl PersistentGifStore {
+    const TREE_NAME: &'static [u8] = b"video_gifs_v1";
+    const FALLBACK_TREE_NAME: &'static [u8] = b"video_gifs_tmp_v1";
+    const MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
+
+    fn open() -> Self {
+        let db_path = thumbnail_cache_base_dir().join("asset_store");
+        let _ = fs::create_dir_all(&db_path);
+        let db = sled::open(&db_path).unwrap_or_else(|err| {
+            log::warn!(
+                "failed to open gif cache database at {}: {err}",
+                db_path.display()
+            );
+            sled::Config::new()
+                .temporary(true)
+                .open()
+                .expect("temporary sled database should open")
+        });
+        let tree = db
+            .open_tree(Self::TREE_NAME)
+            .or_else(|err| {
+                log::warn!("failed to open gif cache tree: {err}");
+                db.open_tree(Self::FALLBACK_TREE_NAME)
+            })
+            .expect("gif cache tree should open");
+        Self { tree }
+    }
+
+    fn get(&self, path: &Path) -> Option<Arc<[u8]>> {
+        self.tree
+            .get(gif_store_key(path))
+            .ok()?
+            .map(|bytes| Arc::<[u8]>::from(bytes.as_ref()))
+    }
+
+    fn persist(&self, path: &Path, gif_bytes: &Arc<[u8]>) {
+        if gif_bytes.len() > Self::MAX_ENTRY_BYTES {
+            return;
+        }
+        if let Err(err) = self.tree.insert(gif_store_key(path), gif_bytes.as_ref()) {
+            log::warn!(
+                "failed to persist gif preview for {}: {err}",
+                path.display()
+            );
+        }
+    }
 }
 
 impl AssetManager {
@@ -169,6 +248,17 @@ impl AssetManager {
                             Some(image) => AssetJobResult::Ready { image, request_key },
                             None => AssetJobResult::Failed { request_key },
                         },
+                        AssetJob::VideoGif {
+                            source_path,
+                            request_key,
+                        } => match generate_video_gif(&source_path) {
+                            Some(gif_bytes) => AssetJobResult::GifReady {
+                                source_path,
+                                request_key,
+                                gif_bytes,
+                            },
+                            None => AssetJobResult::Failed { request_key },
+                        },
                     };
 
                     if worker_tx.send(result).is_err() {
@@ -182,12 +272,16 @@ impl AssetManager {
             textures: LruCache::new(
                 std::num::NonZero::new(TEXTURE_CAPACITY).expect("TEXTURE_CAPACITY must be > 0"),
             ),
+            gif_bytes: LruCache::new(
+                std::num::NonZero::new(GIF_BYTES_CAPACITY).expect("GIF_BYTES_CAPACITY must be > 0"),
+            ),
             pending: HashSet::new(),
             failed: HashMap::new(),
             sender: job_tx,
             receiver: result_rx,
             icon_size: IconSize::default(),
             per_dir_icon_size: HashMap::new(),
+            gif_store: PersistentGifStore::open(),
         }
     }
 
@@ -214,6 +308,17 @@ impl AssetManager {
                     self.failed.insert(request_key, Instant::now());
                     received_any = true;
                 }
+                Ok(AssetJobResult::GifReady {
+                    source_path,
+                    request_key,
+                    gif_bytes,
+                }) => {
+                    self.pending.remove(&request_key);
+                    self.failed.remove(&request_key);
+                    self.gif_store.persist(&source_path, &gif_bytes);
+                    self.gif_bytes.put(request_key, gif_bytes);
+                    received_any = true;
+                }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
@@ -227,6 +332,7 @@ impl AssetManager {
         if self.icon_size != size {
             self.icon_size = size;
             self.textures.clear();
+            self.gif_bytes.clear();
             self.pending.clear();
             self.failed.clear();
         }
@@ -311,6 +417,26 @@ impl AssetManager {
         None
     }
 
+    pub fn request_hover_preview(&mut self, entry: &DirEntry) -> HoverPreview {
+        let Some(ext) = entry
+            .get_path()
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::to_ascii_lowercase)
+        else {
+            return HoverPreview::Fallback;
+        };
+
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" | "ico" | "avif"
+            | "tga" => HoverPreview::ImageUri(format!("file://{}", entry.to_full_path_string())),
+            "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" | "flv" | "m4v" | "3gp" | "ogv" => {
+                self.request_video_hover_preview(entry.get_path())
+            }
+            _ => HoverPreview::Fallback,
+        }
+    }
+
     pub fn invalidate_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
         let directories: Vec<String> = directories
             .into_iter()
@@ -334,6 +460,15 @@ impl AssetManager {
         for key in keys_to_remove {
             self.textures.pop(&key);
         }
+        let gif_keys_to_remove: Vec<String> = self
+            .gif_bytes
+            .iter()
+            .filter(|(key, _)| matches_dir(key))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in gif_keys_to_remove {
+            self.gif_bytes.pop(&key);
+        }
         self.pending.retain(|key| !matches_dir(key));
         self.failed.retain(|key, _| !matches_dir(key));
     }
@@ -344,6 +479,31 @@ impl AssetManager {
             .get(dir)
             .copied()
             .unwrap_or(self.icon_size)
+    }
+
+    fn request_video_hover_preview(&mut self, path: &Path) -> HoverPreview {
+        let request_key = video_gif_request_key(path);
+        if let Some(bytes) = self.gif_bytes.get(&request_key) {
+            return HoverPreview::GifBytes {
+                uri: Cow::Owned(format!("bytes://{request_key}.gif")),
+                bytes: bytes.clone(),
+            };
+        }
+        if let Some(bytes) = self.gif_store.get(path) {
+            self.gif_bytes.put(request_key.clone(), bytes.clone());
+            return HoverPreview::GifBytes {
+                uri: Cow::Owned(format!("bytes://{request_key}.gif")),
+                bytes,
+            };
+        }
+        if !self.is_pending_or_failed(&request_key) {
+            let _ = self.sender.send(AssetJob::VideoGif {
+                source_path: path.to_path_buf(),
+                request_key: request_key.clone(),
+            });
+            self.pending.insert(request_key);
+        }
+        HoverPreview::Loading
     }
 
     fn request_file_icon_texture(
@@ -464,13 +624,17 @@ fn thumbnail_cache_path(path: &Path, size: IconSize) -> PathBuf {
 }
 
 fn thumbnail_cache_dir() -> PathBuf {
-    let base = ProjectDirs::from("io", "github.leinnan", "dirfleet").map_or_else(
-        || PathBuf::from(".cache"),
-        |dirs| dirs.cache_dir().to_path_buf(),
-    );
+    let base = thumbnail_cache_base_dir();
     let path = base.join("thumbnails");
     let _ = fs::create_dir_all(&path);
     path
+}
+
+fn thumbnail_cache_base_dir() -> PathBuf {
+    ProjectDirs::from("io", "github.leinnan", "dirfleet").map_or_else(
+        || PathBuf::from(".cache"),
+        |dirs| dirs.cache_dir().to_path_buf(),
+    )
 }
 
 fn load_or_generate_thumbnail(
@@ -563,6 +727,89 @@ fn ensure_ffmpeg() -> Result<(), String> {
     FFMPEG_READY
         .get_or_init(|| ffmpeg_sidecar::download::auto_download().map_err(|err| err.to_string()))
         .clone()
+}
+
+fn video_gif_request_key(path: &Path) -> String {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    if let Ok(metadata) = fs::metadata(path)
+        && let Ok(modified) = metadata.modified()
+    {
+        modified.hash(&mut hasher);
+    }
+    format!("{}#{:x}", path.to_full_path_string(), hasher.finish())
+}
+
+fn gif_store_key(path: &Path) -> Vec<u8> {
+    video_gif_request_key(path).into_bytes()
+}
+
+fn video_frame_temp_dir(path: &Path) -> Option<PathBuf> {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "dirfleet_hover_gif_{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos()
+    ));
+    dir.push(path.file_stem()?.to_string_lossy().as_ref());
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+fn generate_video_gif(path: &Path) -> Option<Arc<[u8]>> {
+    ensure_ffmpeg().ok()?;
+
+    let duration_secs = probe_video_duration(path).unwrap_or(30.0).max(1.0);
+    let start_pct = 0.05_f64;
+    let end_pct = 0.90_f64;
+    let span = (end_pct - start_pct) * duration_secs;
+    let frame_step = span / f64::from(VIDEO_GIF_FRAMES);
+    let frame_dir = video_frame_temp_dir(path)?;
+    let file_stem = path.file_stem()?.to_string_lossy();
+    let mut frame_paths = Vec::with_capacity(VIDEO_GIF_FRAMES as usize);
+
+    for index in 0..VIDEO_GIF_FRAMES {
+        let timestamp = start_pct.mul_add(duration_secs, f64::from(index) * frame_step);
+        let frame_path = frame_dir.join(format!("{file_stem}_frame_{index:03}.png"));
+        let mut ffmpeg = FfmpegCommand::new()
+            .seek(format!("{timestamp:.3}"))
+            .input(path.to_string_lossy())
+            .frames(1)
+            .args(["-vf", "scale='min(320,iw)':-2"])
+            .args(["-q:v", "3"])
+            .output(frame_path.to_string_lossy())
+            .spawn()
+            .ok()?;
+        ffmpeg.wait().ok()?;
+        if frame_path.exists() {
+            frame_paths.push(frame_path);
+        }
+    }
+
+    if frame_paths.is_empty() {
+        let _ = fs::remove_dir_all(frame_dir);
+        return None;
+    }
+    let delay = Delay::from_saturating_duration(std::time::Duration::from_millis(u64::from(
+        VIDEO_GIF_FRAME_DELAY_MS,
+    )));
+    let mut gif_bytes = Vec::new();
+    {
+        let mut encoder = GifEncoder::new_with_speed(&mut gif_bytes, 10);
+        encoder.set_repeat(Repeat::Infinite).ok()?;
+
+        for frame_path in &frame_paths {
+            let image = image::open(frame_path).ok()?;
+            let rgba: RgbaImage = image.to_rgba8();
+            let frame = Frame::from_parts(rgba, 0, 0, delay);
+            encoder.encode_frame(frame).ok()?;
+        }
+    }
+
+    let _ = fs::remove_dir_all(frame_dir);
+    Some(Arc::from(gif_bytes))
 }
 
 fn video_seek_timestamp(path: &Path) -> String {

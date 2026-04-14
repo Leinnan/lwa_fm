@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Default)]
 pub struct DirectoryViewSettings {
     pub sorting: super::Sort,
+    pub display_type: super::DisplayType,
     pub invert_sort: bool,
 }
 
