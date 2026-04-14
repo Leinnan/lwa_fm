@@ -362,6 +362,11 @@ const COL_MODIFIED_MAX: f32 = 150.0;
 const COL_SIZE_W: f32 = 125.0;
 const COL_SIZE_MIN: f32 = 100.0;
 const COL_SIZE_MAX: f32 = 150.0;
+const GRID_TILE_WIDTH: f32 = 168.0;
+const GRID_TILE_HEIGHT: f32 = 148.0;
+const GRID_TILE_PADDING: f32 = 10.0;
+const GRID_TILE_PREVIEW_SIZE: f32 = 84.0;
+const GRID_TILE_TEXT_HEIGHT: f32 = 20.0;
 
 /// Captured row interaction result collected while the taffy tui borrow is active,
 /// so they can be processed afterwards (when `tab` can be borrowed again).
@@ -422,13 +427,19 @@ impl MyTabViewer<'_> {
 
         let entries_len = tab.visible_entries.len();
         let tab_popup_id = Id::new(tab_id).with(1500);
-        let render_size = self.assets.render_size().max(32.0);
-        let tile_width = (render_size * 4.5).max(140.0);
-        let tile_height = (render_size + 70.0).max(120.0);
+        let tile_width = GRID_TILE_WIDTH;
+        let tile_height = GRID_TILE_HEIGHT;
         let item_spacing = ui.spacing().item_spacing;
         let columns = ((ui.available_width() + item_spacing.x) / (tile_width + item_spacing.x))
             .floor()
             .max(1.0) as usize;
+        let full_row_spacing = if columns > 1 {
+            let used_width = columns as f32 * tile_width + (columns - 1) as f32 * item_spacing.x;
+            let leftover_width = (ui.available_width() - used_width).max(0.0);
+            item_spacing.x + leftover_width / columns as f32
+        } else {
+            item_spacing.x
+        };
         let row_count = entries_len.div_ceil(columns);
 
         let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
@@ -437,8 +448,15 @@ impl MyTabViewer<'_> {
             .auto_shrink([false, false])
             .show_rows(ui, tile_height, row_count, |ui, row_range| {
                 for row in row_range {
+                    let row_start = row * columns;
+                    let row_items = (entries_len - row_start).min(columns);
                     ui.horizontal_top(|ui| {
-                        ui.spacing_mut().item_spacing.x = item_spacing.x;
+                        let row_spacing = if row_items > 1 {
+                            full_row_spacing
+                        } else {
+                            item_spacing.x
+                        };
+                        ui.spacing_mut().item_spacing.x = row_spacing;
 
                         for col in 0..columns {
                             let row_index = row * columns + col;
@@ -1277,42 +1295,55 @@ impl MyTabViewer<'_> {
         ui.painter()
             .rect_stroke(rect, 8.0, stroke, egui::StrokeKind::Inside);
 
-        let inner_rect = rect.shrink2(Vec2::new(8.0, 8.0));
-        let text_width = (inner_rect.width() - 4.0).max(0.0);
+        let inner_rect = rect.shrink2(Vec2::splat(GRID_TILE_PADDING));
+        let text_width = inner_rect.width().max(0.0);
         let mut child_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(inner_rect)
                 .layout(Layout::top_down(egui::Align::Center)),
         );
-        child_ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+        child_ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
 
-        let render_size = self.assets.render_size_for(entry).max(32.0);
-        child_ui.add_space(4.0);
-        if let Some(texture) = self.assets.request_entry_texture(entry) {
-            child_ui.add(egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(render_size)));
-        } else {
-            child_ui.allocate_space(Vec2::splat(render_size));
-        }
+        let preview_size = GRID_TILE_PREVIEW_SIZE.max(self.assets.render_size_for(entry));
+        let preview_height = (inner_rect.height() - GRID_TILE_TEXT_HEIGHT - 12.0).max(preview_size);
+        let preview_width = text_width.min(preview_size);
+
+        child_ui.allocate_ui_with_layout(
+            Vec2::new(text_width, preview_height),
+            Layout::top_down_justified(egui::Align::Center),
+            |ui| {
+                ui.add_space(((preview_height - preview_size) * 0.5).max(0.0));
+                if let Some(texture) = self.assets.request_entry_texture(entry) {
+                    ui.add(
+                        egui::Image::new(&texture)
+                            .maintain_aspect_ratio(true)
+                            .fit_to_exact_size(Vec2::new(preview_width, preview_size)),
+                    );
+                } else {
+                    ui.allocate_space(Vec2::new(preview_width, preview_size));
+                }
+            },
+        );
 
         if cmd && indexed < 10 {
             child_ui.add(
                 egui::Label::new(LayoutJob::simple_format(
                     format!("[{indexed}]"),
                     TextFormat {
-                        color: Color32::DARK_GRAY,
+                        color: Color32::from_gray(110),
                         ..Default::default()
                     },
                 ))
-                .wrap_mode(egui::TextWrapMode::Wrap)
+                .wrap_mode(egui::TextWrapMode::Truncate)
                 .selectable(false)
                 .sense(Sense::empty()),
             );
         }
 
         child_ui.add_sized(
-            [text_width, 40.0],
+            [text_width, GRID_TILE_TEXT_HEIGHT],
             egui::Label::new(entry.get_splitted_path().1)
-                .wrap_mode(egui::TextWrapMode::Wrap)
+                .wrap_mode(egui::TextWrapMode::Truncate)
                 .selectable(false)
                 .sense(Sense::empty()),
         );
@@ -1822,6 +1853,8 @@ const fn convert_nr_to_egui_key(nr: usize) -> Option<egui::Key> {
 mod tests {
     use super::*;
     use crate::data::files::{DirEntry, EntryType};
+    use crate::helper::DataHolder;
+    use std::sync::OnceLock;
 
     /// Build a list of [`DirEntry`] values from the project's `src/` directory.
     ///
@@ -1836,6 +1869,92 @@ mod tests {
             .collect()
     }
 
+    fn fixture_root() -> &'static std::path::Path {
+        static ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+        ROOT.get_or_init(|| {
+            let root = std::env::temp_dir().join("lwa_fm_kittest_grid");
+            std::fs::create_dir_all(&root).expect("grid fixture root must be created");
+
+            for dir_name in ["Applications", "Projects", "Pictures"] {
+                std::fs::create_dir_all(root.join(dir_name))
+                    .expect("grid fixture directory must be created");
+            }
+
+            for (name, bytes) in [
+                (
+                    "Zrzut ekranu 2026-03-16 o 12.45.04.png",
+                    &MINI_PNG[..],
+                ),
+                (
+                    "Zrzut ekranu 2026-03-09 o 13.14.58.png",
+                    &MINI_PNG[..],
+                ),
+                (
+                    "Vacation panorama with a very descriptive title.png",
+                    &MINI_PNG[..],
+                ),
+            ] {
+                std::fs::write(root.join(name), bytes).expect("png fixture must be written");
+            }
+
+            for name in [
+                "Old World.app",
+                "Factorio save data.zip",
+                "Meeting notes.txt",
+                "Quarterly financial summary.pdf",
+                "README.md",
+                "Recording archive.rs",
+                "super-extra-long filename that should truncate gracefully in the icon grid view.txt",
+            ] {
+                std::fs::write(root.join(name), b"fixture").expect("text fixture must be written");
+            }
+
+            root
+        })
+        .as_path()
+    }
+
+    const MINI_PNG: [u8; 70] = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 252, 255, 159, 161,
+        30, 0, 7, 130, 2, 127, 60, 211, 91, 198, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    fn grid_entries() -> Vec<DirEntry> {
+        let mut entries: Vec<_> = std::fs::read_dir(fixture_root())
+            .expect("grid fixture root must exist")
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| DirEntry::try_from(entry).ok())
+            .collect();
+        entries.sort_by(|left, right| left.get_splitted_path().1.cmp(right.get_splitted_path().1));
+        entries
+    }
+
+    fn long_name_entries() -> Vec<DirEntry> {
+        let mut entries = grid_entries();
+        entries.sort_by(|left, right| {
+            right
+                .get_splitted_path()
+                .1
+                .len()
+                .cmp(&left.get_splitted_path().1.len())
+        });
+        entries.truncate(9);
+        entries
+    }
+
+    fn populated_tabs_from_entries(entries: Vec<DirEntry>, display_type: DisplayType) -> MyTabs {
+        let path = fixture_root();
+        let mut tab = TabData::from_path(path);
+        tab.display_type = display_type;
+        tab.list = entries;
+        tab.visible_entries = (0..tab.list.len()).collect();
+        MyTabs {
+            dock_state: egui_dock::DockState::new(vec![tab]),
+            focused: true,
+        }
+    }
+
     /// Build a [`MyTabs`] whose active tab is populated from `src/`.
     fn populated_tabs() -> MyTabs {
         let path = std::path::Path::new("src");
@@ -1848,16 +1967,16 @@ mod tests {
         }
     }
 
-    fn populated_tabs_with_display(display_type: DisplayType) -> MyTabs {
-        let mut tabs = populated_tabs();
-        tabs.get_current_tab()
-            .expect("missing active tab")
-            .display_type = display_type;
-        tabs
-    }
-
     /// Draw one frame of the dock view, seeding galley pools and draining commands.
     fn draw_frame(ctx: &egui::Context, my_tabs: &mut MyTabs) {
+        draw_frame_with_selection(ctx, my_tabs, None);
+    }
+
+    fn draw_frame_with_selection(
+        ctx: &egui::Context,
+        my_tabs: &mut MyTabs,
+        selected_fields: Option<&[usize]>,
+    ) {
         let mut assets = crate::app::assets::AssetManager::default();
         // Seed the pre-computed galley pools so time / size widgets render.
         for (_, tab) in my_tabs.dock_state.iter_all_tabs() {
@@ -1866,6 +1985,20 @@ mod tests {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(indices) = selected_fields {
+                let current_path = my_tabs
+                    .get_current_tab()
+                    .expect("missing active tab")
+                    .current_path
+                    .clone();
+                ui.data_set_path(
+                    &current_path,
+                    Selected {
+                        selected_fields: indices.to_vec(),
+                        just_changed: false,
+                    },
+                );
+            }
             my_tabs.ui(ui, &mut assets);
         });
 
@@ -1962,15 +2095,75 @@ mod tests {
     }
 
     #[test]
-    fn test_dock_view_icons_smoke() {
+    fn test_dock_view_icons_wide() {
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::Vec2::new(900.0, 500.0))
+            .with_size(egui::Vec2::new(960.0, 620.0))
             .build_state(
                 |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs),
-                populated_tabs_with_display(DisplayType::Icons),
+                populated_tabs_from_entries(grid_entries(), DisplayType::Icons),
             );
 
         harness.run_steps(12);
+        harness.snapshot("dock_view_icons_wide");
+    }
+
+    #[test]
+    fn test_dock_view_icons_narrow() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(420.0, 620.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs),
+                populated_tabs_from_entries(grid_entries(), DisplayType::Icons),
+            );
+
+        harness.run_steps(12);
+        harness.snapshot("dock_view_icons_narrow");
+    }
+
+    #[test]
+    fn test_dock_view_icons_long_names() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(620.0, 700.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs),
+                populated_tabs_from_entries(long_name_entries(), DisplayType::Icons),
+            );
+
+        harness.run_steps(12);
+        harness.snapshot("dock_view_icons_long_names");
+    }
+
+    #[test]
+    fn test_dock_view_icons_empty_tab() {
+        let mut tab = TabData::from_path(fixture_root());
+        tab.display_type = DisplayType::Icons;
+        let my_tabs = MyTabs {
+            dock_state: egui_dock::DockState::new(vec![tab]),
+            focused: false,
+        };
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(720.0, 420.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs),
+                my_tabs,
+            );
+
+        harness.run_steps(12);
+        harness.snapshot("dock_view_icons_empty_tab");
+    }
+
+    #[test]
+    fn test_dock_view_icons_selected() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(960.0, 620.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame_with_selection(ctx, my_tabs, Some(&[2])),
+                populated_tabs_from_entries(grid_entries(), DisplayType::Icons),
+            );
+
+        harness.run_steps(12);
+        harness.snapshot("dock_view_icons_selected");
     }
 
     // ── Unit: DirEntry constructed from real fs has correct entry type ────────
