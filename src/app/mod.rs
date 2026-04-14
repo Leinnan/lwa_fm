@@ -108,6 +108,13 @@ pub enum DisplayType {
     Icons,
 }
 
+impl DisplayType {
+    /// returns if it is a list
+    pub const fn is_list(&self) -> bool {
+        matches!(self, DisplayType::List)
+    }
+}
+
 #[derive(Deserialize, Serialize, Default, Debug, Clone)]
 pub struct Search {
     pub value: String,

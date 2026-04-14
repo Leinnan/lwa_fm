@@ -31,7 +31,7 @@ use crate::app::command_palette::build_for_path;
 use crate::app::commands::{ModalWindow, TabAction, TabTarget};
 use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
 use crate::app::top_bottom::TopDisplayPath;
-use crate::app::{LUA_INSTANCE, Search, Sort};
+use crate::app::{DisplayType, LUA_INSTANCE, Search, Sort};
 use crate::data::files::DirEntry;
 use crate::data::time::ElapsedTime;
 use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer, PathHelper};
@@ -222,6 +222,7 @@ pub struct TabData {
     pub visible_entries: Vec<usize>,
     pub current_path: CurrentPath,
     pub show_hidden: bool,
+    pub display_type: DisplayType,
     pub search: Option<Search>,
     // pub watcher: Option<DirectoryWatcher>,
     undoer: Undoer<CurrentPath>,
@@ -335,6 +336,7 @@ impl TabData {
             visible_entries: vec![],
             current_path: CurrentPath::None,
             show_hidden: false,
+            display_type: DisplayType::default(),
             search: None,
             // watcher: DirectoryWatcher::new().ok(),
             undoer: Undoer::default(),
@@ -368,44 +370,11 @@ struct RowResult {
     response: egui::Response,
 }
 
-impl TabViewer for MyTabViewer<'_> {
-    // This associated type is used to attach some data to each tab.
-    type Tab = TabData;
-
-    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
-        false
+impl MyTabViewer<'_> {
+    fn grid_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
+        // TODO
     }
-
-    fn closeable(&mut self, _: &mut Self::Tab) -> bool {
-        self.closeable
-    }
-
-    fn id(&mut self, tab: &mut Self::Tab) -> Id {
-        Id::new(tab.id)
-    }
-
-    // Returns the current `tab`'s title.
-    fn title(&mut self, tab: &mut Self::Tab) -> egui_dock::egui::WidgetText {
-        if tab.is_searching() {
-            tab.search
-                .as_ref()
-                .map(|s| format!("Searching: {}", &s.value))
-                .unwrap_or_default()
-                .into()
-        } else {
-            let path = tab.current_path.get_name_from_path();
-            path.into()
-        }
-    }
-    fn scroll_bars(&self, _tab: &Self::Tab) -> [bool; 2] {
-        [false, false]
-    }
-
-    /// Defines the contents of a given `tab`.
-    #[allow(clippy::too_many_lines)]
-    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::MyTabViewer::ui");
+    fn list_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
         let cmd = ui.command_pressed();
         if !matches!(&tab.current_path, CurrentPath::None) {
             tab.undoer
@@ -476,13 +445,32 @@ impl TabViewer for MyTabViewer<'_> {
         let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
 
         tui(ui, Id::new("file_grid").with(tab.id))
-            .reserve_available_space()
-            .style(taffy::Style {
-                padding: Rect {
-                    left: LengthPercentage::ZERO,
-                    right: LengthPercentage::ZERO,
-                    top: LengthPercentage::ZERO,
-                    bottom: LengthPercentage::ZERO,
+        .reserve_available_space()
+        .style(taffy::Style {
+            padding: Rect {
+                left: LengthPercentage::ZERO,
+                right: LengthPercentage::ZERO,
+                top: LengthPercentage::ZERO,
+                bottom: LengthPercentage::ZERO,
+            },
+            margin: Rect {
+                left: LengthPercentageAuto::ZERO,
+                right: LengthPercentageAuto::ZERO,
+                top: LengthPercentageAuto::ZERO,
+                bottom: LengthPercentageAuto::ZERO,
+            },
+            flex_direction: taffy::FlexDirection::Column,
+            size: percent(1.),
+            max_size: percent(1.),
+            ..Default::default()
+        })
+        .show(|tui| {
+            // ── Scrollable grid container ────────────────────────────────
+            tui.style(taffy::Style {
+                display: taffy::Display::Grid,
+                overflow: taffy::Point {
+                    x: taffy::Overflow::Hidden,
+                    y: taffy::Overflow::Scroll,
                 },
                 margin: Rect {
                     left: LengthPercentageAuto::ZERO,
@@ -490,475 +478,456 @@ impl TabViewer for MyTabViewer<'_> {
                     top: LengthPercentageAuto::ZERO,
                     bottom: LengthPercentageAuto::ZERO,
                 },
-                flex_direction: taffy::FlexDirection::Column,
-                size: percent(1.),
+                padding: Rect {
+                    left: LengthPercentage::ZERO,
+                    right: LengthPercentage::ZERO,
+                    top: LengthPercentage::ZERO,
+                    bottom: LengthPercentage::ZERO,
+                },
+                // 3 columns: Name (1fr, fills remaining), Modified (fixed), Size (fixed)
+                grid_template_columns: vec![fr(1.), length(COL_MODIFIED_W), length(COL_SIZE_W)],
+                size: taffy::Size {
+                    width: percent(1.),
+                    height: auto(),
+                },
                 max_size: percent(1.),
+                grid_auto_rows: vec![min_content()],
                 ..Default::default()
             })
-            .show(|tui| {
-                // ── Scrollable grid container ────────────────────────────────
-                tui.style(taffy::Style {
-                    display: taffy::Display::Grid,
-                    overflow: taffy::Point {
-                        x: taffy::Overflow::Hidden,
-                        y: taffy::Overflow::Scroll,
+            .add(|tui| {
+                // ── Virtual data rows ────────────────────────────────────
+                VirtualGridRowHelper::show(
+                    VirtualGridRowHelperParams {
+                        header_row_count,
+                        row_count: entries_len,
                     },
-                    margin: Rect {
-                        left: LengthPercentageAuto::ZERO,
-                        right: LengthPercentageAuto::ZERO,
-                        top: LengthPercentageAuto::ZERO,
-                        bottom: LengthPercentageAuto::ZERO,
-                    },
-                    padding: Rect {
-                        left: LengthPercentage::ZERO,
-                        right: LengthPercentage::ZERO,
-                        top: LengthPercentage::ZERO,
-                        bottom: LengthPercentage::ZERO,
-                    },
-                    // 3 columns: Name (1fr, fills remaining), Modified (fixed), Size (fixed)
-                    grid_template_columns: vec![fr(1.), length(COL_MODIFIED_W), length(COL_SIZE_W)],
-                    size: taffy::Size {
-                        width: percent(1.),
-                        height: auto(),
-                    },
-                    max_size: percent(1.),
-                    grid_auto_rows: vec![min_content()],
-                    ..Default::default()
-                })
-                .add(|tui| {
-                    // ── Virtual data rows ────────────────────────────────────
-                    VirtualGridRowHelper::show(
-                        VirtualGridRowHelperParams {
-                            header_row_count,
-                            row_count: entries_len,
-                        },
-                        tui,
-                        |tui, info| {
-                            #[cfg(feature = "profiling")]
-                            puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body");
+                    tui,
+                    |tui, info| {
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body");
 
-                            let mut idgen = info.id_gen();
-                            let grid_row_param = info.grid_row_setter();
+                        let mut idgen = info.id_gen();
+                        let grid_row_param = info.grid_row_setter();
 
-                            let row_index = info.idx;
-                            let index = tab.visible_entries[row_index];
-                            let val = &tab.list[index];
-                            let is_dir = !val.is_file();
-                            let indexed = row_index + 1;
+                        let row_index = info.idx;
+                        let index = tab.visible_entries[row_index];
+                        let val = &tab.list[index];
+                        let is_dir = !val.is_file();
+                        let indexed = row_index + 1;
 
-                            let is_hovered = row_index == opened_popup;
-                            let is_selected = selected_tabs.selected_fields.contains(&row_index);
+                        let is_hovered = row_index == opened_popup;
+                        let is_selected = selected_tabs.selected_fields.contains(&row_index);
 
-                            let bg_color = if is_selected {
-                                tui.egui_ui().style().visuals.selection.bg_fill
-                            } else if is_hovered {
-                                tui.egui_ui().style().visuals.widgets.hovered.bg_fill
-                            } else if row_index % 2 == 0 {
-                                tui.egui_ui().style().visuals.faint_bg_color
-                            } else {
-                                egui::Color32::TRANSPARENT
-                            };
-                            let height = length(text_height.max(self.assets.render_size()) * self.assets.row_height_multiplier());
-                            let min_size = taffy::Size {
-                                width: length(0.0),
-                                height,
-                            };
+                        let bg_color = if is_selected {
+                            tui.egui_ui().style().visuals.selection.bg_fill
+                        } else if is_hovered {
+                            tui.egui_ui().style().visuals.widgets.hovered.bg_fill
+                        } else if row_index % 2 == 0 {
+                            tui.egui_ui().style().visuals.faint_bg_color
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        let height = length(text_height.max(self.assets.render_size()) * self.assets.row_height_multiplier());
+                        let min_size = taffy::Size {
+                            width: length(0.0),
+                            height,
+                        };
 
-                            // ── Name column ───────────────────────────────
-                            let name_response = tui
-                                .id(idgen())
-                                .mut_style(&grid_row_param)
-                                .mut_style(|style| {
-                                    style.min_size = min_size.clone();
-                                    style.overflow.x = taffy::Overflow::Hidden;
-                                    style.align_items = Some(taffy::AlignItems::Stretch);
-                                })
-                                .add_with_background_ui(
-                                    |ui, container| {
-                                        ui.painter().rect_filled(
-                                            container.full_container(),
-                                            0.0,
-                                            bg_color,
-                                        );
-                                    },
-                                    |tui, ()| {
-                                        tui.mut_style(|style| {
-                                            style.padding =
-                                                Rect {
-                                                    left: LengthPercentage::length(10.0),
-                                                    right: LengthPercentage::length(10.0),
-                                                    top: LengthPercentage::ZERO,
-                                                    bottom: LengthPercentage::ZERO,
-                                                };
-                                            style.size.width = percent(1.);
-                                            style.overflow.x = taffy::Overflow::Hidden;
-                                            style.align_items =
-                                                Some(taffy::AlignItems::Center);
-                                        })
-                                        .ui(|ui: &mut Ui| {
-                                            #[cfg(feature = "profiling")]
-                                            puffin::profile_scope!(
-                                                "lwa_fm::MyTabViewer::ui::table_body::first_column"
-                                            );
-                                            let color = if is_dir {
-                                                Color32::LIGHT_GRAY
-                                            } else {
-                                                Color32::GRAY
+                        // ── Name column ───────────────────────────────
+                        let name_response = tui
+                            .id(idgen())
+                            .mut_style(&grid_row_param)
+                            .mut_style(|style| {
+                                style.min_size = min_size.clone();
+                                style.overflow.x = taffy::Overflow::Hidden;
+                                style.align_items = Some(taffy::AlignItems::Stretch);
+                            })
+                            .add_with_background_ui(
+                                |ui, container| {
+                                    ui.painter().rect_filled(
+                                        container.full_container(),
+                                        0.0,
+                                        bg_color,
+                                    );
+                                },
+                                |tui, ()| {
+                                    tui.mut_style(|style| {
+                                        style.padding =
+                                            Rect {
+                                                left: LengthPercentage::length(10.0),
+                                                right: LengthPercentage::length(10.0),
+                                                top: LengthPercentage::ZERO,
+                                                bottom: LengthPercentage::ZERO,
                                             };
+                                        style.size.width = percent(1.);
+                                        style.overflow.x = taffy::Overflow::Hidden;
+                                        style.align_items =
+                                            Some(taffy::AlignItems::Center);
+                                    })
+                                    .ui(|ui: &mut Ui| {
+                                        #[cfg(feature = "profiling")]
+                                        puffin::profile_scope!(
+                                            "lwa_fm::MyTabViewer::ui::table_body::first_column"
+                                        );
+                                        let color = if is_dir {
+                                            Color32::LIGHT_GRAY
+                                        } else {
+                                            Color32::GRAY
+                                        };
 
-                                             ui.with_layout(
-                                                 Layout::left_to_right(egui::Align::Center),
-                                                 |ui| {
-                                                      if let Some(texture) = self.assets.request_entry_texture(val) {
-                                                          let render_sz = self.assets.render_size_for(val);
-                                                          ui.add(
-                                                              egui::Image::new(&texture)
-                                                                  .fit_to_exact_size(Vec2::splat(render_sz)),
-                                                          );
-                                                      } else {
-                                                          ui.allocate_space(Vec2::splat(self.assets.render_size_for(val)));
-                                                      }
-                                                     if cmd && indexed < 10 {
-                                                         ui.add(
-                                                             egui::Label::new(
-                                                                LayoutJob::simple_format(
-                                                                    format!("[{indexed}]"),
-                                                                    TextFormat {
-                                                                        color: Color32::DARK_GRAY,
-                                                                        ..Default::default()
-                                                                    },
-                                                                ),
-                                                            )
-                                                            .wrap_mode(
-                                                                egui::TextWrapMode::Truncate,
-                                                            )
-                                                            .selectable(false)
-                                                            .sense(Sense::empty()),
-                                                        );
-                                                    }
-                                                    let (dir, file) = val.get_splitted_path();
-                                                    if is_searching || multiple_dirs {
-                                                        ui.add(
-                                                            egui::Label::new(
-                                                                LayoutJob::simple_singleline(
-                                                                    dir.into(),
-                                                                    FontId::default(),
-                                                                    Color32::DARK_GRAY,
-                                                                ),
-                                                            )
-                                                            .wrap_mode(
-                                                                egui::TextWrapMode::Truncate,
-                                                            )
-                                                            .selectable(false)
-                                                            .sense(Sense::empty()),
-                                                        );
-                                                    }
-
-                                                    let added_button = ui.add(
-                                                        egui::Label::new(
-                                                            LayoutJob::simple_singleline(
-                                                                file.into(),
-                                                                FontId::default(),
-                                                                color,
+                                         ui.with_layout(
+                                             Layout::left_to_right(egui::Align::Center),
+                                             |ui| {
+                                                  if let Some(texture) = self.assets.request_entry_texture(val) {
+                                                      let render_sz = self.assets.render_size_for(val);
+                                                      ui.add(
+                                                          egui::Image::new(&texture)
+                                                              .fit_to_exact_size(Vec2::splat(render_sz)),
+                                                      );
+                                                  } else {
+                                                      ui.allocate_space(Vec2::splat(self.assets.render_size_for(val)));
+                                                  }
+                                                 if cmd && indexed < 10 {
+                                                     ui.add(
+                                                         egui::Label::new(
+                                                            LayoutJob::simple_format(
+                                                                format!("[{indexed}]"),
+                                                                TextFormat {
+                                                                    color: Color32::DARK_GRAY,
+                                                                    ..Default::default()
+                                                                },
                                                             ),
                                                         )
-                                                        .wrap_mode(egui::TextWrapMode::Truncate)
+                                                        .wrap_mode(
+                                                            egui::TextWrapMode::Truncate,
+                                                        )
                                                         .selectable(false)
                                                         .sense(Sense::empty()),
                                                     );
+                                                }
+                                                let (dir, file) = val.get_splitted_path();
+                                                if is_searching || multiple_dirs {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            LayoutJob::simple_singleline(
+                                                                dir.into(),
+                                                                FontId::default(),
+                                                                Color32::DARK_GRAY,
+                                                            ),
+                                                        )
+                                                        .wrap_mode(
+                                                            egui::TextWrapMode::Truncate,
+                                                        )
+                                                        .selectable(false)
+                                                        .sense(Sense::empty()),
+                                                    );
+                                                }
 
-                                                    added_button.on_hover_ui(|ui| {
-                                                        let ext = val
-                                                            .get_path()
-                                                            .extension()
-                                                            .unwrap_or_default()
-                                                            .to_ascii_lowercase();
-                                                        if ext.eq(&OsStr::new("png"))
-                                                            || ext.eq(&OsStr::new("jpg"))
-                                                            || ext.eq(&OsStr::new("jpeg"))
-                                                        {
-                                                            let path = val.to_full_path_string();
-                                                            let path = format!("file://{path}");
-                                                            ui.add(
-                                                                egui::Image::new(path)
-                                                                    .maintain_aspect_ratio(true)
-                                                                    .max_size(Vec2::new(
-                                                                        300.0, 300.0,
-                                                                    )),
-                                                            );
-                                                        } else {
-                                                            ui.add(egui::Label::new(
-                                                                val.path.as_str(),
-                                                            ));
-                                                        }
-                                                    });
-                                                },
-                                            )
-                                            .response
-                                        })
-                                    },
-                                )
-                                .main;
+                                                let added_button = ui.add(
+                                                    egui::Label::new(
+                                                        LayoutJob::simple_singleline(
+                                                            file.into(),
+                                                            FontId::default(),
+                                                            color,
+                                                        ),
+                                                    )
+                                                    .wrap_mode(egui::TextWrapMode::Truncate)
+                                                    .selectable(false)
+                                                    .sense(Sense::empty()),
+                                                );
 
-                            // ── Modified column ───────────────────────────
-                            tui.id(idgen())
-                                .mut_style(&grid_row_param)
-                                .mut_style(|style| {
-                                    style.padding = Rect {
-                                        left: LengthPercentage::length(10.0),
-                                        right: LengthPercentage::length(10.0),
-                                        top: LengthPercentage::ZERO,
-                                        bottom: LengthPercentage::ZERO,
-                                    };
-                                    style.size = taffy::Size {
-                                        width: length(COL_MODIFIED_W),
-                                        height: auto(),
-                                    };
-                                    style.min_size = taffy::Size {
-                                        width: length(COL_MODIFIED_MIN),
-                                        height,
-                                    };
-                                    style.max_size = taffy::Size {
-                                        width: length(COL_MODIFIED_MAX),
-                                        height: auto(),
-                                    };
-                                    style.align_items = Some(taffy::AlignItems::Stretch);
-                                    // style.align_items = Some(taffy::AlignItems::Center);
-                                })
-                                .add_with_background_ui(
-                                    |ui, container| {
-                                        ui.painter().rect_filled(
-                                            container.full_container(),
-                                            0.0,
-                                            bg_color,
+                                                added_button.on_hover_ui(|ui| {
+                                                    let ext = val
+                                                        .get_path()
+                                                        .extension()
+                                                        .unwrap_or_default()
+                                                        .to_ascii_lowercase();
+                                                    if ext.eq(&OsStr::new("png"))
+                                                        || ext.eq(&OsStr::new("jpg"))
+                                                        || ext.eq(&OsStr::new("jpeg"))
+                                                    {
+                                                        let path = val.to_full_path_string();
+                                                        let path = format!("file://{path}");
+                                                        ui.add(
+                                                            egui::Image::new(path)
+                                                                .maintain_aspect_ratio(true)
+                                                                .max_size(Vec2::new(
+                                                                    300.0, 300.0,
+                                                                )),
+                                                        );
+                                                    } else {
+                                                        ui.add(egui::Label::new(
+                                                            val.path.as_str(),
+                                                        ));
+                                                    }
+                                                });
+                                            },
+                                        )
+                                        .response
+                                    })
+                                },
+                            )
+                            .main;
+
+                        // ── Modified column ───────────────────────────
+                        tui.id(idgen())
+                            .mut_style(&grid_row_param)
+                            .mut_style(|style| {
+                                style.padding = Rect {
+                                    left: LengthPercentage::length(10.0),
+                                    right: LengthPercentage::length(10.0),
+                                    top: LengthPercentage::ZERO,
+                                    bottom: LengthPercentage::ZERO,
+                                };
+                                style.size = taffy::Size {
+                                    width: length(COL_MODIFIED_W),
+                                    height: auto(),
+                                };
+                                style.min_size = taffy::Size {
+                                    width: length(COL_MODIFIED_MIN),
+                                    height,
+                                };
+                                style.max_size = taffy::Size {
+                                    width: length(COL_MODIFIED_MAX),
+                                    height: auto(),
+                                };
+                                style.align_items = Some(taffy::AlignItems::Stretch);
+                                // style.align_items = Some(taffy::AlignItems::Center);
+                            })
+                            .add_with_background_ui(
+                                |ui, container| {
+                                    ui.painter().rect_filled(
+                                        container.full_container(),
+                                        0.0,
+                                        bg_color,
+                                    );
+                                },
+                                |tui, ()| {
+                                    tui.mut_style(|style| {
+                                        style.size.width = percent(1.);
+                                    })
+                                    .ui(|ui: &mut Ui| {
+                                        #[cfg(feature = "profiling")]
+                                        puffin::profile_scope!(
+                                            "lwa_fm::MyTabViewer::ui::table_body::time_column"
                                         );
-                                    },
-                                    |tui, ()| {
-                                        tui.mut_style(|style| {
-                                            style.size.width = percent(1.);
-                                        })
-                                        .ui(|ui: &mut Ui| {
-                                            #[cfg(feature = "profiling")]
-                                            puffin::profile_scope!(
-                                                "lwa_fm::MyTabViewer::ui::table_body::time_column"
-                                            );
 
+                                        ui.with_layout(
+                                            Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.add(val.meta.since_modified);
+                                            },
+                                        )
+                                        .response
+                                    })
+                                },
+                            );
+
+                        // ── Size column ───────────────────────────────
+                        tui.id(idgen())
+                            .mut_style(&grid_row_param)
+                            .mut_style(|style| {
+                                style.padding = Rect {
+                                    left: LengthPercentage::length(10.0),
+                                    right: LengthPercentage::length(10.0),
+                                    top: LengthPercentage::ZERO,
+                                    bottom: LengthPercentage::ZERO,
+                                };
+                                style.size = taffy::Size {
+                                    width: length(COL_SIZE_W),
+                                    height: auto(),
+                                };
+                                style.min_size = taffy::Size {
+                                    width: length(COL_SIZE_MIN),
+                                    height,
+                                };
+                                style.max_size = taffy::Size {
+                                    width: length(COL_SIZE_MAX),
+                                    height: auto(),
+                                };
+                                style.align_items = Some(taffy::AlignItems::Stretch);
+                                // style.align_items = Some(taffy::AlignItems::Center);
+                            })
+                            .add_with_background_ui(
+                                |ui, container| {
+                                    ui.painter().rect_filled(
+                                        container.full_container(),
+                                        0.0,
+                                        bg_color,
+                                    );
+                                },
+                                |tui, ()| {
+                                    tui.mut_style(|style| {
+                                        style.size.width = percent(1.);
+                                    })
+                                    .ui(|ui: &mut Ui| {
+                                        #[cfg(feature = "profiling")]
+                                        puffin::profile_scope!(
+                                            "lwa_fm::MyTabViewer::ui::table_body::size_column"
+                                        );
+
+                                        if is_dir {
+                                            ui.allocate_response(
+                                                egui::Vec2::ZERO,
+                                                Sense::empty(),
+                                            )
+                                        } else {
                                             ui.with_layout(
                                                 Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    ui.add(val.meta.since_modified);
+                                                    draw_size(ui, val.meta.size);
                                                 },
                                             )
                                             .response
-                                        })
-                                    },
-                                );
-
-                            // ── Size column ───────────────────────────────
-                            tui.id(idgen())
-                                .mut_style(&grid_row_param)
-                                .mut_style(|style| {
-                                    style.padding = Rect {
-                                        left: LengthPercentage::length(10.0),
-                                        right: LengthPercentage::length(10.0),
-                                        top: LengthPercentage::ZERO,
-                                        bottom: LengthPercentage::ZERO,
-                                    };
-                                    style.size = taffy::Size {
-                                        width: length(COL_SIZE_W),
-                                        height: auto(),
-                                    };
-                                    style.min_size = taffy::Size {
-                                        width: length(COL_SIZE_MIN),
-                                        height,
-                                    };
-                                    style.max_size = taffy::Size {
-                                        width: length(COL_SIZE_MAX),
-                                        height: auto(),
-                                    };
-                                    style.align_items = Some(taffy::AlignItems::Stretch);
-                                    // style.align_items = Some(taffy::AlignItems::Center);
-                                })
-                                .add_with_background_ui(
-                                    |ui, container| {
-                                        ui.painter().rect_filled(
-                                            container.full_container(),
-                                            0.0,
-                                            bg_color,
-                                        );
-                                    },
-                                    |tui, ()| {
-                                        tui.mut_style(|style| {
-                                            style.size.width = percent(1.);
-                                        })
-                                        .ui(|ui: &mut Ui| {
-                                            #[cfg(feature = "profiling")]
-                                            puffin::profile_scope!(
-                                                "lwa_fm::MyTabViewer::ui::table_body::size_column"
-                                            );
-
-                                            if is_dir {
-                                                ui.allocate_response(
-                                                    egui::Vec2::ZERO,
-                                                    Sense::empty(),
-                                                )
-                                            } else {
-                                                ui.with_layout(
-                                                    Layout::right_to_left(egui::Align::Center),
-                                                    |ui| {
-                                                        draw_size(ui, val.meta.size);
-                                                    },
-                                                )
-                                                .response
-                                            }
-                                        })
-                                    },
-                                );
-
-                            // ── Row interaction sense (full row) ──────────
-                            // Build a rect that spans the full available width at the
-                            // same vertical position as the name cell.
-                            let available_width =
-                                tui.egui_ui().available_rect_before_wrap().width();
-                            let full_row_rect = egui::Rect::from_min_max(
-                                egui::pos2(name_response.rect.left(), name_response.rect.top()),
-                                egui::pos2(
-                                    name_response.rect.left() + available_width,
-                                    name_response.rect.bottom(),
-                                ),
-                            );
-                            let row_response = tui.egui_ui_mut().interact(
-                                full_row_rect,
-                                Id::new("row_sense_full").with(tab_id).with(row_index),
-                                Sense::click(),
+                                        }
+                                    })
+                                },
                             );
 
-                            row_results.push(RowResult {
-                                row_index,
-                                response: row_response,
-                            });
-                        },
-                    );
+                        // ── Row interaction sense (full row) ──────────
+                        // Build a rect that spans the full available width at the
+                        // same vertical position as the name cell.
+                        let available_width =
+                            tui.egui_ui().available_rect_before_wrap().width();
+                        let full_row_rect = egui::Rect::from_min_max(
+                            egui::pos2(name_response.rect.left(), name_response.rect.top()),
+                            egui::pos2(
+                                name_response.rect.left() + available_width,
+                                name_response.rect.bottom(),
+                            ),
+                        );
+                        let row_response = tui.egui_ui_mut().interact(
+                            full_row_rect,
+                            Id::new("row_sense_full").with(tab_id).with(row_index),
+                            Sense::click(),
+                        );
 
-                    // ── Sticky header row (grid row 1) ───────────────────────
-                    // Name header
-                    tui.sticky([false, true].into())
-                        .id(tid(("header_name", tab_id)))
-                        .mut_style(|style| {
-                            style.grid_row = style_helpers::line(1);
-                            style.grid_column = line(1);
-                            style.padding = length(4.);
-                            style.align_items = Some(taffy::AlignItems::Center);
-                            // Allow the Name cell to shrink with the column but
-                            // never below zero; text uses Extend so it is never
-                            // clipped to "…" regardless of the measured width.
-                            style.min_size.width = length(0.0);
+                        row_results.push(RowResult {
+                            row_index,
+                            response: row_response,
+                        });
+                    },
+                );
+
+                // ── Sticky header row (grid row 1) ───────────────────────
+                // Name header
+                tui.sticky([false, true].into())
+                    .id(tid(("header_name", tab_id)))
+                    .mut_style(|style| {
+                        style.grid_row = style_helpers::line(1);
+                        style.grid_column = line(1);
+                        style.padding = length(4.);
+                        style.align_items = Some(taffy::AlignItems::Center);
+                        // Allow the Name cell to shrink with the column but
+                        // never below zero; text uses Extend so it is never
+                        // clipped to "…" regardless of the measured width.
+                        style.min_size.width = length(0.0);
+                        style.overflow.x = taffy::Overflow::Hidden;
+                    })
+                    .add_with_background_color(|tui| {
+                        tui.mut_style(|style| {
+                            style.size.width = percent(1.);
                             style.overflow.x = taffy::Overflow::Hidden;
                         })
-                        .add_with_background_color(|tui| {
-                            tui.mut_style(|style| {
-                                style.size.width = percent(1.);
-                                style.overflow.x = taffy::Overflow::Hidden;
-                            })
-                            .ui(|ui: &mut Ui| {
+                        .ui(|ui: &mut Ui| {
+                            let res = ui.add(
+                                egui::Label::new("Name")
+                                    // Extend keeps the full text visible even
+                                    // when the column is narrow; the parent
+                                    // cell clips it via overflow:hidden.
+                                    .wrap_mode(egui::TextWrapMode::Extend)
+                                    .selectable(false)
+                                    .sense(Sense::click()),
+                            );
+                            if res.clicked() {
+                                new_sort = Some(Sort::Name);
+                            }
+                        });
+                    });
+
+                // Modified header
+                tui.sticky([false, true].into())
+                    .id(tid(("header_modified", tab_id)))
+                    .mut_style(|style| {
+                        style.grid_row = style_helpers::line(1);
+                        style.grid_column = line(2);
+                        style.padding = length(4.);
+                        style.align_items = Some(taffy::AlignItems::Center);
+                        style.justify_content = Some(taffy::JustifyContent::FlexEnd);
+                        style.size = taffy::Size {
+                            width: length(COL_MODIFIED_W),
+                            height: auto(),
+                        };
+                        style.min_size = taffy::Size {
+                            width: length(COL_MODIFIED_MIN),
+                            height: auto(),
+                        };
+                        style.max_size = taffy::Size {
+                            width: length(COL_MODIFIED_MAX),
+                            height: auto(),
+                        };
+                    })
+                    .add_with_background_color(|tui| {
+                        tui.mut_style(|style| {
+                            style.size.width = percent(1.);
+                        })
+                        .ui(|ui: &mut Ui| {
+                            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                                 let res = ui.add(
-                                    egui::Label::new("Name")
-                                        // Extend keeps the full text visible even
-                                        // when the column is narrow; the parent
-                                        // cell clips it via overflow:hidden.
+                                    egui::Label::new("Modified")
                                         .wrap_mode(egui::TextWrapMode::Extend)
                                         .selectable(false)
                                         .sense(Sense::click()),
                                 );
                                 if res.clicked() {
-                                    new_sort = Some(Sort::Name);
+                                    new_sort = Some(Sort::Modified);
                                 }
                             });
                         });
+                    });
 
-                    // Modified header
-                    tui.sticky([false, true].into())
-                        .id(tid(("header_modified", tab_id)))
-                        .mut_style(|style| {
-                            style.grid_row = style_helpers::line(1);
-                            style.grid_column = line(2);
-                            style.padding = length(4.);
-                            style.align_items = Some(taffy::AlignItems::Center);
-                            style.justify_content = Some(taffy::JustifyContent::FlexEnd);
-                            style.size = taffy::Size {
-                                width: length(COL_MODIFIED_W),
-                                height: auto(),
-                            };
-                            style.min_size = taffy::Size {
-                                width: length(COL_MODIFIED_MIN),
-                                height: auto(),
-                            };
-                            style.max_size = taffy::Size {
-                                width: length(COL_MODIFIED_MAX),
-                                height: auto(),
-                            };
+                // Size header
+                tui.sticky([false, true].into())
+                    .id(tid(("header_size", tab_id)))
+                    .mut_style(|style| {
+                        style.grid_row = style_helpers::line(1);
+                        style.grid_column = line(3);
+                        style.padding = length(4.);
+                        style.align_items = Some(taffy::AlignItems::Center);
+                        style.justify_content = Some(taffy::JustifyContent::FlexEnd);
+                        style.size = taffy::Size {
+                            width: length(COL_SIZE_W),
+                            height: auto(),
+                        };
+                        style.min_size = taffy::Size {
+                            width: length(COL_SIZE_MIN),
+                            height: auto(),
+                        };
+                        style.max_size = taffy::Size {
+                            width: length(COL_SIZE_MAX),
+                            height: auto(),
+                        };
+                    })
+                    .add_with_background_color(|tui| {
+                        tui.mut_style(|style| {
+                            style.size.width = percent(1.);
                         })
-                        .add_with_background_color(|tui| {
-                            tui.mut_style(|style| {
-                                style.size.width = percent(1.);
-                            })
-                            .ui(|ui: &mut Ui| {
-                                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let res = ui.add(
-                                        egui::Label::new("Modified")
-                                            .wrap_mode(egui::TextWrapMode::Extend)
-                                            .selectable(false)
-                                            .sense(Sense::click()),
-                                    );
-                                    if res.clicked() {
-                                        new_sort = Some(Sort::Modified);
-                                    }
-                                });
+                        .ui(|ui: &mut Ui| {
+                            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                                let res = ui.add(
+                                    egui::Label::new("Size")
+                                        .wrap_mode(egui::TextWrapMode::Extend)
+                                        .selectable(false)
+                                        .sense(Sense::click()),
+                                );
+                                if res.clicked() {
+                                    new_sort = Some(Sort::Size);
+                                }
                             });
                         });
-
-                    // Size header
-                    tui.sticky([false, true].into())
-                        .id(tid(("header_size", tab_id)))
-                        .mut_style(|style| {
-                            style.grid_row = style_helpers::line(1);
-                            style.grid_column = line(3);
-                            style.padding = length(4.);
-                            style.align_items = Some(taffy::AlignItems::Center);
-                            style.justify_content = Some(taffy::JustifyContent::FlexEnd);
-                            style.size = taffy::Size {
-                                width: length(COL_SIZE_W),
-                                height: auto(),
-                            };
-                            style.min_size = taffy::Size {
-                                width: length(COL_SIZE_MIN),
-                                height: auto(),
-                            };
-                            style.max_size = taffy::Size {
-                                width: length(COL_SIZE_MAX),
-                                height: auto(),
-                            };
-                        })
-                        .add_with_background_color(|tui| {
-                            tui.mut_style(|style| {
-                                style.size.width = percent(1.);
-                            })
-                            .ui(|ui: &mut Ui| {
-                                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let res = ui.add(
-                                        egui::Label::new("Size")
-                                            .wrap_mode(egui::TextWrapMode::Extend)
-                                            .selectable(false)
-                                            .sense(Sense::click()),
-                                    );
-                                    if res.clicked() {
-                                        new_sort = Some(Sort::Size);
-                                    }
-                                });
-                            });
-                        });
-                });
+                    });
             });
+        });
 
         // ── Process row interactions (post-tui, tab borrow is free again) ────
         for RowResult {
@@ -1183,6 +1152,51 @@ impl TabViewer for MyTabViewer<'_> {
             selected_tabs.selected_fields.push(new_value);
             selected_tabs.just_changed = true;
             ui.data_set_path(&tab.current_path, selected_tabs.clone());
+        }
+    }
+}
+
+impl TabViewer for MyTabViewer<'_> {
+    // This associated type is used to attach some data to each tab.
+    type Tab = TabData;
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
+    }
+
+    fn closeable(&mut self, _: &mut Self::Tab) -> bool {
+        self.closeable
+    }
+
+    fn id(&mut self, tab: &mut Self::Tab) -> Id {
+        Id::new(tab.id)
+    }
+
+    // Returns the current `tab`'s title.
+    fn title(&mut self, tab: &mut Self::Tab) -> egui_dock::egui::WidgetText {
+        if tab.is_searching() {
+            tab.search
+                .as_ref()
+                .map(|s| format!("Searching: {}", &s.value))
+                .unwrap_or_default()
+                .into()
+        } else {
+            let path = tab.current_path.get_name_from_path();
+            path.into()
+        }
+    }
+    fn scroll_bars(&self, _tab: &Self::Tab) -> [bool; 2] {
+        [false, false]
+    }
+
+    /// Defines the contents of a given `tab`.
+    #[allow(clippy::too_many_lines)]
+    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::MyTabViewer::ui");
+        match tab.display_type {
+            DisplayType::List => self.list_view(ui, tab),
+            DisplayType::Icons => self.grid_view(ui, tab),
         }
     }
 }

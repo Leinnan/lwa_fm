@@ -251,6 +251,7 @@ impl TabData {
     pub fn sort_entries(&mut self, sort_settings: &DirectoryViewSettings) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::sort_entries");
+        self.display_type = sort_settings.display_type;
         match sort_settings.sorting {
             Sort::Modified => {
                 if sort_settings.invert_sort {
