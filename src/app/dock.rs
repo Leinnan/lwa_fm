@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::{ffi::OsStr, path::PathBuf};
 
 use egui::Vec2;
 use egui_taffy::{
@@ -25,7 +25,7 @@ use egui_taffy::{
 use taffy::prelude::*;
 use taffy::style_helpers;
 
-use super::assets::AssetManager;
+use super::assets::{AssetManager, HoverPreview};
 use super::commands::ActionToPerform;
 use crate::app::command_palette::build_for_path;
 use crate::app::commands::{ModalWindow, TabAction, TabTarget};
@@ -742,29 +742,11 @@ impl MyTabViewer<'_> {
                                                 );
 
                                                 added_button.on_hover_ui(|ui| {
-                                                    let ext = val
-                                                        .get_path()
-                                                        .extension()
-                                                        .unwrap_or_default()
-                                                        .to_ascii_lowercase();
-                                                    if ext.eq(&OsStr::new("png"))
-                                                        || ext.eq(&OsStr::new("jpg"))
-                                                        || ext.eq(&OsStr::new("jpeg"))
-                                                    {
-                                                        let path = val.to_full_path_string();
-                                                        let path = format!("file://{path}");
-                                                        ui.add(
-                                                            egui::Image::new(path)
-                                                                .maintain_aspect_ratio(true)
-                                                                .max_size(Vec2::new(
-                                                                    300.0, 300.0,
-                                                                )),
-                                                        );
-                                                    } else {
-                                                        ui.add(egui::Label::new(
-                                                            val.path.as_str(),
-                                                        ));
-                                                    }
+                                                    Self::show_entry_hover_preview(
+                                                        self.assets,
+                                                        ui,
+                                                        val,
+                                                    );
                                                 });
                                             },
                                         )
@@ -1335,7 +1317,7 @@ impl MyTabViewer<'_> {
                 .sense(Sense::empty()),
         );
 
-        response.on_hover_ui(|ui| Self::show_entry_hover_preview(ui, entry))
+        response.on_hover_ui(|ui| Self::show_entry_hover_preview(self.assets, ui, entry))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1607,22 +1589,29 @@ impl MyTabViewer<'_> {
         }
     }
 
-    fn show_entry_hover_preview(ui: &mut Ui, entry: &DirEntry) {
-        let ext = entry
-            .get_path()
-            .extension()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if ext.eq(&OsStr::new("png")) || ext.eq(&OsStr::new("jpg")) || ext.eq(&OsStr::new("jpeg")) {
-            let path = entry.to_full_path_string();
-            let path = format!("file://{path}");
-            ui.add(
-                egui::Image::new(path)
-                    .maintain_aspect_ratio(true)
-                    .max_size(Vec2::new(300.0, 300.0)),
-            );
-        } else {
-            ui.add(egui::Label::new(entry.path.as_str()));
+    fn show_entry_hover_preview(assets: &mut AssetManager, ui: &mut Ui, entry: &DirEntry) {
+        match assets.request_hover_preview(entry) {
+            HoverPreview::ImageUri(path) => {
+                ui.add(
+                    egui::Image::new(path)
+                        .maintain_aspect_ratio(true)
+                        .max_size(Vec2::new(300.0, 300.0)),
+                );
+            }
+            HoverPreview::GifBytes { uri, bytes } => {
+                ui.add(
+                    egui::Image::from_bytes(uri, bytes)
+                        .maintain_aspect_ratio(true)
+                        .max_size(Vec2::new(300.0, 300.0)),
+                );
+            }
+            HoverPreview::Loading => {
+                ui.label("Loading preview...");
+                ui.label(entry.path.as_str());
+            }
+            HoverPreview::Fallback => {
+                ui.label(entry.path.as_str());
+            }
         }
     }
 }

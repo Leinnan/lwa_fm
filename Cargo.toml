@@ -39,7 +39,7 @@ eframe = { version = "0.34", default-features = false, features = [
     "wayland",       # To support Linux (and CI)
 ] }
 egui = "0.34"
-egui_extras = { version = "0.34", features = ["all_loaders"] }
+egui_extras = { version = "0.34", features = ["all_loaders", "gif"] }
 open = "5.3"
 walkdir = "2"
 sysinfo = "0.33"
