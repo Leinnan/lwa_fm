@@ -1126,7 +1126,6 @@ impl MyTabViewer<'_> {
                                         let mut success = move_result.is_ok();
                                         let _ = move_result.inspect_err(|e| {
                                             e.raw_os_error().inspect(|nr| {
-                                                // OSError: [WinError 17] The system cannot move the file to a different disk drive
                                                 if *nr == 17 {
                                                     let copy_success =
                                                         fs::copy(path, target_path.clone()).is_ok();
@@ -1136,7 +1135,16 @@ impl MyTabViewer<'_> {
                                                 }
                                             });
                                         });
-                                        if !success {
+                                        if success {
+                                            crate::app::database::invalidate_dir(&val_dir);
+                                            crate::app::database::invalidate_dir(&other);
+                                            crate::app::commands::COMMANDS_QUEUE.push(
+                                                ActionToPerform::TabAction(
+                                                    TabTarget::AllTabs,
+                                                    TabAction::RequestFilesRefresh,
+                                                ),
+                                            );
+                                        } else {
                                             toast!(
                                                 Error,
                                                 "Failed to move file {}",
@@ -1151,9 +1159,11 @@ impl MyTabViewer<'_> {
                     }
                     ui.separator();
                     if ui.button("Move to Trash").clicked() {
+                        let parent = PathBuf::from(val.get_splitted_path().0);
                         trash::delete(val.get_path()).unwrap_or_else(|_| {
                             toast!(Error, "Could not move it to trash.");
                         });
+                        crate::app::database::invalidate_dir(&parent);
                         ui.close();
                         TabAction::RequestFilesRefresh.schedule_active_tab();
                     }
@@ -1487,7 +1497,16 @@ impl MyTabViewer<'_> {
                                             }
                                         });
                                     });
-                                    if !success {
+                                    if success {
+                                        crate::app::database::invalidate_dir(&val_dir);
+                                        crate::app::database::invalidate_dir(&other);
+                                        crate::app::commands::COMMANDS_QUEUE.push(
+                                            ActionToPerform::TabAction(
+                                                TabTarget::AllTabs,
+                                                TabAction::RequestFilesRefresh,
+                                            ),
+                                        );
+                                    } else {
                                         toast!(
                                             Error,
                                             "Failed to move file {}",
@@ -1502,9 +1521,11 @@ impl MyTabViewer<'_> {
                 }
                 ui.separator();
                 if ui.button("Move to Trash").clicked() {
+                    let parent = PathBuf::from(val.get_splitted_path().0);
                     trash::delete(val.get_path()).unwrap_or_else(|_| {
                         toast!(Error, "Could not move it to trash.");
                     });
+                    crate::app::database::invalidate_dir(&parent);
                     ui.close();
                     TabAction::RequestFilesRefresh.schedule_active_tab();
                 }

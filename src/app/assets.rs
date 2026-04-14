@@ -1,10 +1,10 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, OnceLock};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
 
@@ -26,6 +26,7 @@ const TEXTURE_CAPACITY: usize = 512;
 const GIF_BYTES_CAPACITY: usize = 128;
 const VIDEO_GIF_FRAMES: u32 = 15;
 const VIDEO_GIF_FRAME_DELAY_MS: u16 = 600;
+const THUMBNAIL_WORKER_COUNT: usize = 3;
 
 static FFMPEG_READY: OnceLock<Result<(), String>> = OnceLock::new();
 
@@ -107,6 +108,116 @@ enum AssetJob {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetJobClass {
+    EntryVisual,
+    SidebarIcon,
+    HoverPreview,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduledAssetJob {
+    job: AssetJob,
+    class: AssetJobClass,
+    directory: Option<String>,
+    order: u64,
+}
+
+#[derive(Debug, Default)]
+struct JobSchedulerState {
+    active_directory: Option<String>,
+    queue: VecDeque<ScheduledAssetJob>,
+    next_order: u64,
+}
+
+#[derive(Debug, Default)]
+struct JobScheduler {
+    state: Mutex<JobSchedulerState>,
+    has_jobs: Condvar,
+}
+
+impl JobScheduler {
+    fn enqueue(&self, job: AssetJob, class: AssetJobClass, directory: Option<String>) {
+        {
+            let mut state = self.state.lock().expect("job scheduler mutex poisoned");
+            let order = state.next_order;
+            state.next_order = state.next_order.saturating_add(1);
+            state.queue.push_back(ScheduledAssetJob {
+                job,
+                class,
+                directory,
+                order,
+            });
+        }
+        self.has_jobs.notify_one();
+    }
+
+    fn set_active_directory(&self, directory: Option<String>) {
+        let mut changed = false;
+        {
+            let mut state = self.state.lock().expect("job scheduler mutex poisoned");
+            if state.active_directory != directory {
+                state.active_directory = directory;
+                changed = true;
+            }
+        }
+        if changed {
+            self.has_jobs.notify_all();
+        }
+    }
+
+    fn recv(&self) -> AssetJob {
+        let mut state = self.state.lock().expect("job scheduler mutex poisoned");
+        loop {
+            if let Some(index) = best_job_index(&state) {
+                return state
+                    .queue
+                    .remove(index)
+                    .expect("scheduled job index should remain valid")
+                    .job;
+            }
+            state = self
+                .has_jobs
+                .wait(state)
+                .expect("job scheduler mutex poisoned while waiting");
+        }
+    }
+}
+
+fn best_job_index(state: &JobSchedulerState) -> Option<usize> {
+    state
+        .queue
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, scheduled)| {
+            (
+                asset_job_rank(
+                    scheduled.class,
+                    scheduled.directory.as_deref(),
+                    state.active_directory.as_deref(),
+                ),
+                scheduled.order,
+            )
+        })
+        .map(|(index, _)| index)
+}
+
+fn asset_job_rank(
+    class: AssetJobClass,
+    directory: Option<&str>,
+    active_directory: Option<&str>,
+) -> u8 {
+    let is_active_directory = directory
+        .zip(active_directory)
+        .is_some_and(|(dir, active)| dir == active);
+    match (class, is_active_directory) {
+        (AssetJobClass::EntryVisual, true) => 0,
+        (AssetJobClass::EntryVisual, false) => 1,
+        (AssetJobClass::SidebarIcon, _) => 2,
+        (AssetJobClass::HoverPreview, _) => 3,
+    }
+}
+
 #[derive(Debug, Clone)]
 enum AssetJobResult {
     Ready {
@@ -134,7 +245,7 @@ pub struct AssetManager {
     gif_bytes: LruCache<String, Arc<[u8]>>,
     pending: HashSet<String>,
     failed: HashMap<String, Instant>,
-    sender: Sender<AssetJob>,
+    scheduler: Arc<JobScheduler>,
     receiver: Receiver<AssetJobResult>,
     icon_size: IconSize,
     per_dir_icon_size: HashMap<String, IconSize>,
@@ -205,24 +316,15 @@ impl PersistentGifStore {
 
 impl AssetManager {
     pub fn new() -> Self {
-        let (job_tx, job_rx) = mpsc::channel::<AssetJob>();
         let (result_tx, result_rx) = mpsc::channel::<AssetJobResult>();
-        let job_rx = Arc::new(std::sync::Mutex::new(job_rx));
+        let scheduler = Arc::new(JobScheduler::default());
 
-        for _ in 0..2 {
-            let worker_rx = Arc::clone(&job_rx);
+        for _ in 0..THUMBNAIL_WORKER_COUNT {
+            let worker_scheduler = Arc::clone(&scheduler);
             let worker_tx = result_tx.clone();
             thread::spawn(move || {
                 loop {
-                    let job = {
-                        let Ok(lock) = worker_rx.lock() else {
-                            return;
-                        };
-                        let Ok(job) = lock.recv() else {
-                            return;
-                        };
-                        job
-                    };
+                    let job = worker_scheduler.recv();
 
                     let result = match job {
                         AssetJob::Thumbnail {
@@ -277,12 +379,17 @@ impl AssetManager {
             ),
             pending: HashSet::new(),
             failed: HashMap::new(),
-            sender: job_tx,
+            scheduler,
             receiver: result_rx,
             icon_size: IconSize::default(),
             per_dir_icon_size: HashMap::new(),
             gif_store: PersistentGifStore::open(),
         }
+    }
+
+    pub fn set_active_directory(&self, path: Option<&Path>) {
+        let directory = path.map(|path| path.to_full_path_string());
+        self.scheduler.set_active_directory(directory);
     }
 
     pub fn poll_results(&mut self, ctx: &Context) {
@@ -368,19 +475,28 @@ impl AssetManager {
             }
             if !self.is_pending_or_failed(&cache_key) {
                 let cache_path = thumbnail_cache_path(path, size);
-                let _ = self.sender.send(AssetJob::Thumbnail {
-                    source_path: path.to_path_buf(),
-                    cache_path,
-                    request_key: cache_key.clone(),
-                    kind,
-                    icon_size: size,
-                });
+                self.scheduler.enqueue(
+                    AssetJob::Thumbnail {
+                        source_path: path.to_path_buf(),
+                        cache_path,
+                        request_key: cache_key.clone(),
+                        kind,
+                        icon_size: size,
+                    },
+                    AssetJobClass::EntryVisual,
+                    path.parent().map(|path| path.to_full_path_string()),
+                );
                 self.pending.insert(cache_key);
             }
-            return self.request_file_icon_texture(path, entry.is_file(), size);
+            return self.request_file_icon_texture(
+                path,
+                entry.is_file(),
+                size,
+                AssetJobClass::EntryVisual,
+            );
         }
 
-        self.request_file_icon_texture(path, entry.is_file(), size)
+        self.request_file_icon_texture(path, entry.is_file(), size, AssetJobClass::EntryVisual)
     }
 
     pub fn request_sidebar_texture(&mut self, path: &Path) -> Option<TextureHandle> {
@@ -408,11 +524,15 @@ impl AssetManager {
         } else {
             path.to_string_lossy().to_string()
         };
-        let _ = self.sender.send(AssetJob::SystemIcon {
-            request_key: cache_key.clone(),
-            lookup_arg,
-            icon_size: size,
-        });
+        self.scheduler.enqueue(
+            AssetJob::SystemIcon {
+                request_key: cache_key.clone(),
+                lookup_arg,
+                icon_size: size,
+            },
+            AssetJobClass::SidebarIcon,
+            path.parent().map(|path| path.to_full_path_string()),
+        );
         self.pending.insert(cache_key);
         None
     }
@@ -497,10 +617,14 @@ impl AssetManager {
             };
         }
         if !self.is_pending_or_failed(&request_key) {
-            let _ = self.sender.send(AssetJob::VideoGif {
-                source_path: path.to_path_buf(),
-                request_key: request_key.clone(),
-            });
+            self.scheduler.enqueue(
+                AssetJob::VideoGif {
+                    source_path: path.to_path_buf(),
+                    request_key: request_key.clone(),
+                },
+                AssetJobClass::HoverPreview,
+                path.parent().map(|path| path.to_full_path_string()),
+            );
             self.pending.insert(request_key);
         }
         HoverPreview::Loading
@@ -511,6 +635,7 @@ impl AssetManager {
         path: &Path,
         is_file: bool,
         size: IconSize,
+        class: AssetJobClass,
     ) -> Option<TextureHandle> {
         let key = if is_file {
             format!("{}{}", icon_key(path, false), size.cache_suffix())
@@ -531,11 +656,15 @@ impl AssetManager {
             directory_lookup_arg(path)
         };
 
-        let _ = self.sender.send(AssetJob::SystemIcon {
-            request_key: key.clone(),
-            lookup_arg,
-            icon_size: size,
-        });
+        self.scheduler.enqueue(
+            AssetJob::SystemIcon {
+                request_key: key.clone(),
+                lookup_arg,
+                icon_size: size,
+            },
+            class,
+            path.parent().map(|path| path.to_full_path_string()),
+        );
         self.pending.insert(key);
         None
     }
