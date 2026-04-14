@@ -222,6 +222,7 @@ impl AssetManager {
         }
     }
 
+    #[expect(dead_code, reason = "public API for future icon size UI controls")]
     pub fn set_icon_size(&mut self, size: IconSize) {
         if self.icon_size != size {
             self.icon_size = size;
@@ -231,14 +232,17 @@ impl AssetManager {
         }
     }
 
-    pub fn icon_size(&self) -> IconSize {
+    #[expect(dead_code, reason = "public API for future icon size UI controls")]
+    pub const fn icon_size(&self) -> IconSize {
         self.icon_size
     }
 
+    #[expect(dead_code, reason = "public API for future icon size UI controls")]
     pub fn set_icon_size_for_dir(&mut self, dir_path: &str, size: IconSize) {
         self.per_dir_icon_size.insert(dir_path.to_string(), size);
     }
 
+    #[expect(dead_code, reason = "public API for future icon size UI controls")]
     pub fn icon_size_for_dir(&self, dir_path: &str) -> IconSize {
         self.per_dir_icon_size
             .get(dir_path)
@@ -296,14 +300,9 @@ impl AssetManager {
         let lookup_arg = if is_dir {
             directory_lookup_arg(path)
         } else {
-            system_icon_lookup_arg(
-                icon_key(path, false)
-                    .strip_prefix(ICON_EXT_PREFIX)
-                    .unwrap_or("no_ext"),
-            )
+            path.to_string_lossy().to_string()
         };
         let _ = self.sender.send(AssetJob::SystemIcon {
-            cache_key: cache_key.clone(),
             request_key: cache_key.clone(),
             lookup_arg,
             icon_size: size,
@@ -367,17 +366,12 @@ impl AssetManager {
         }
 
         let lookup_arg = if is_file {
-            system_icon_lookup_arg(
-                icon_key(path, false)
-                    .strip_prefix(ICON_EXT_PREFIX)
-                    .unwrap_or("no_ext"),
-            )
+            path.to_string_lossy().to_string()
         } else {
             directory_lookup_arg(path)
         };
 
         let _ = self.sender.send(AssetJob::SystemIcon {
-            cache_key: key.clone(),
             request_key: key.clone(),
             lookup_arg,
             icon_size: size,
@@ -403,12 +397,8 @@ impl Default for AssetManager {
     }
 }
 
-pub fn asset_render_size() -> f32 {
-    IconSize::default().render_px()
-}
-
 impl AssetManager {
-    pub fn render_size(&self) -> f32 {
+    pub const fn render_size(&self) -> f32 {
         self.icon_size.render_px()
     }
 
@@ -416,19 +406,15 @@ impl AssetManager {
         self.effective_icon_size(entry).render_px()
     }
 
-    pub fn row_height_multiplier(&self) -> f32 {
+    pub const fn row_height_multiplier(&self) -> f32 {
         self.icon_size.row_height_multiplier()
     }
 }
 
 fn directory_icon_key(path: &Path) -> String {
-    let path_str = path.to_string_lossy();
-    let suffix = path_str.to_lowercase();
-    let hash = {
-        let mut h = DefaultHasher::new();
-        suffix.hash(&mut h);
-        h.finish()
-    };
+    let mut h = DefaultHasher::new();
+    path.to_string_lossy().to_lowercase().hash(&mut h);
+    let hash = h.finish();
     format!("{FOLDER_ICON_KEY}_{hash:016x}")
 }
 
@@ -438,9 +424,10 @@ fn icon_key(path: &Path, is_dir: bool) -> String {
     }
     path.extension()
         .and_then(std::ffi::OsStr::to_str)
-        .map(str::to_lowercase)
-        .map(|ext| format!("{ICON_EXT_PREFIX}{ext}"))
-        .unwrap_or_else(|| NO_EXT_ICON_KEY.to_string())
+        .map_or_else(
+            || NO_EXT_ICON_KEY.to_string(),
+            |ext| format!("{ICON_EXT_PREFIX}{}", ext.to_lowercase()),
+        )
 }
 
 #[cfg(target_os = "macos")]
@@ -451,14 +438,6 @@ fn directory_lookup_arg(path: &Path) -> String {
 #[cfg(not(target_os = "macos"))]
 fn directory_lookup_arg(_path: &Path) -> String {
     "folder".to_string()
-}
-
-fn system_icon_lookup_arg(lookup_key: &str) -> String {
-    match lookup_key {
-        "folder" => "folder".to_string(),
-        "no_ext" => "Makefile".to_string(),
-        ext => format!("file.{ext}"),
-    }
 }
 
 fn thumbnail_kind(path: &Path) -> Option<ThumbnailKind> {
@@ -517,17 +496,17 @@ fn load_or_generate_thumbnail(
     }
 
     Some(decoded_from_dynamic(
-        image,
+        &image,
         source_path.to_full_path_string(),
     ))
 }
 
 fn decode_image_file(path: &Path, name: String) -> Option<DecodedImage> {
     let image = image::open(path).ok()?;
-    Some(decoded_from_dynamic(image, name))
+    Some(decoded_from_dynamic(&image, name))
 }
 
-fn decoded_from_dynamic(image: image::DynamicImage, name: String) -> DecodedImage {
+fn decoded_from_dynamic(image: &image::DynamicImage, name: String) -> DecodedImage {
     let rgba = image.to_rgba8();
     let width = rgba.width() as usize;
     let height = rgba.height() as usize;
@@ -541,9 +520,21 @@ fn decoded_from_dynamic(image: image::DynamicImage, name: String) -> DecodedImag
 
 fn load_system_icon_image(lookup_arg: &str, icon_size: IconSize) -> Option<DecodedImage> {
     let px = icon_size.system_icon_px();
-    let bytes = systemicons::get_icon(lookup_arg, px).ok()?;
-    let image = image::load_from_memory(&bytes).ok()?;
-    Some(decoded_from_dynamic(image, lookup_arg.to_string()))
+    let bytes = match systemicons::get_icon(lookup_arg, px) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("systemicons::get_icon failed for {lookup_arg:?}: {e:?}");
+            return None;
+        }
+    };
+    let image = match image::load_from_memory(&bytes) {
+        Ok(img) => img,
+        Err(e) => {
+            log::warn!("image::load_from_memory failed for {lookup_arg:?}: {e}");
+            return None;
+        }
+    };
+    Some(decoded_from_dynamic(&image, lookup_arg.to_string()))
 }
 
 fn generate_video_thumbnail(
@@ -554,7 +545,7 @@ fn generate_video_thumbnail(
     ensure_ffmpeg().ok()?;
     let decode_px = icon_size.decode_px();
     let mut ffmpeg = FfmpegCommand::new()
-        .seek(&video_seek_timestamp(source_path))
+        .seek(video_seek_timestamp(source_path))
         .input(source_path.as_os_str().to_string_lossy())
         .frames(1)
         .args([
