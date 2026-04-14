@@ -18,6 +18,7 @@ use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 use std::{fs, path::PathBuf};
 
 pub(crate) mod assets;
@@ -585,6 +586,9 @@ impl eframe::App for App {
         TOASTS.write().show(&ctx);
         while let Some(action) = COMMANDS_QUEUE.pop() {
             self.handle_action(&ctx, action);
+        }
+        if self.watchers.is_active() {
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
         {
             #[cfg(feature = "profiling")]

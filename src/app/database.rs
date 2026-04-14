@@ -3,8 +3,9 @@ use bincode::config;
 use directories::ProjectDirs;
 use std::{
     collections::BTreeSet,
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::LazyLock,
+    sync::{LazyLock, Mutex},
     thread,
 };
 
@@ -17,12 +18,33 @@ pub static SLED_DIRS: LazyLock<sled::Db> = LazyLock::new(|| {
     sled::open(&dir).unwrap_or_else(|_| panic!("Failed to open database at {}", dir.display()))
 });
 
+static CACHE_GENERATIONS: LazyLock<Mutex<HashMap<Vec<u8>, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 fn cache_key(dir: &Path) -> Vec<u8> {
     dir.as_os_str().as_encoded_bytes().to_vec()
 }
 
+fn current_generation(path: &[u8]) -> u64 {
+    CACHE_GENERATIONS
+        .lock()
+        .expect("cache generation mutex poisoned")
+        .get(path)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn bump_generation(path: &[u8]) {
+    let mut generations = CACHE_GENERATIONS
+        .lock()
+        .expect("cache generation mutex poisoned");
+    let generation = generations.entry(path.to_vec()).or_default();
+    *generation += 1;
+}
+
 pub fn invalidate_dir(dir: &Path) {
     let path = cache_key(dir);
+    bump_generation(&path);
     if let Err(err) = SLED_DIRS.remove(path) {
         log::warn!("Failed to invalidate cache for {}: {err}", dir.display());
         return;
@@ -43,6 +65,7 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
     puffin::profile_scope!("lwa_fm::dir_handling::db_read");
     let config = config::standard();
     let path = cache_key(dir);
+    let generation = current_generation(&path);
     if let Ok(Some(data)) = SLED_DIRS.get(&path) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::db_read::deserialize");
@@ -64,6 +87,10 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
             log::info!("Data not saved");
             return;
         };
+        if current_generation(&path) != generation {
+            log::info!("Skipped stale cache write");
+            return;
+        }
         _ = SLED_DIRS.insert(path, data);
         log::info!("Data saved");
     });
