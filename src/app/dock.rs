@@ -372,7 +372,112 @@ struct RowResult {
 
 impl MyTabViewer<'_> {
     fn grid_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
-        // TODO
+        let cmd = ui.command_pressed();
+        if !matches!(&tab.current_path, CurrentPath::None) {
+            tab.undoer
+                .feed_state(ui.ctx().input(|input| input.time), &tab.current_path);
+        }
+        if ui.key_with_command_pressed(egui::Key::F) {
+            tab.toggle_search(ui.ctx());
+        }
+        if ui.key_with_command_pressed(egui::Key::H) {
+            let mut show_hidden =
+                ui.data_get_path_or_persisted::<DirectoryShowHidden>(&tab.current_path);
+            show_hidden.0 = !show_hidden.0;
+            ui.data_set_path(&tab.current_path, show_hidden.data);
+            ActionToPerform::ViewSettingsChanged(super::DataSource::Local).schedule();
+        }
+        if self.focused && ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
+            let Some(parent) = tab.current_path.parent() else {
+                return;
+            };
+            TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
+            return;
+        }
+
+        let shift_pressed = ui.input(egui::InputState::shift_pressed);
+        let favorites = ui.data_get_persisted::<Locations>().unwrap_or_default();
+        let tab_id = tab.id;
+        let mut selected_tabs = ui
+            .data_get_path::<Selected>(&tab.current_path)
+            .unwrap_or_default();
+        let opened_popup = ui
+            .ctx()
+            .data_get_tab::<PopupOpened>(tab_id)
+            .and_then(|d| {
+                if egui::Popup::is_id_open(ui.ctx(), d.0) {
+                    Some(d.1)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(usize::MAX);
+        let just_changed = if selected_tabs.just_changed {
+            selected_tabs.just_changed = false;
+            ui.data_set_path(&tab.current_path, selected_tabs.clone());
+            true
+        } else {
+            false
+        };
+
+        let entries_len = tab.visible_entries.len();
+        let tab_popup_id = Id::new(tab_id).with(1500);
+        let render_size = self.assets.render_size().max(32.0);
+        let tile_width = (render_size * 4.5).max(140.0);
+        let tile_height = (render_size + 70.0).max(120.0);
+        let item_spacing = ui.spacing().item_spacing;
+        let columns = ((ui.available_width() + item_spacing.x) / (tile_width + item_spacing.x))
+            .floor()
+            .max(1.0) as usize;
+        let row_count = entries_len.div_ceil(columns);
+
+        let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show_rows(ui, tile_height, row_count, |ui, row_range| {
+                for row in row_range {
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = item_spacing.x;
+
+                        for col in 0..columns {
+                            let row_index = row * columns + col;
+                            if row_index >= entries_len {
+                                break;
+                            }
+
+                            let index = tab.visible_entries[row_index];
+                            let val = &tab.list[index];
+                            let response = self.draw_grid_tile(
+                                ui,
+                                val,
+                                tile_width,
+                                tile_height,
+                                selected_tabs.selected_fields.contains(&row_index),
+                                row_index == opened_popup,
+                                cmd,
+                                row_index + 1,
+                            );
+                            row_results.push(RowResult {
+                                row_index,
+                                response,
+                            });
+                        }
+                    });
+                }
+            });
+
+        self.process_grid_interactions(
+            ui,
+            tab,
+            &mut selected_tabs,
+            shift_pressed,
+            just_changed,
+            tab_popup_id,
+            &favorites,
+            &row_results,
+        );
+        self.handle_grid_keyboard_navigation(ui, tab, &mut selected_tabs, shift_pressed, columns);
     }
     fn list_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
         let cmd = ui.command_pressed();
@@ -1117,11 +1222,13 @@ impl MyTabViewer<'_> {
             }
         });
         if let Some(change) = input_key {
+            let visible_len = tab.visible_entries.len();
+            if visible_len == 0 {
+                return;
+            }
             let new_value = match selected_tabs.selected_fields.last() {
                 Some(i) => match change {
-                    egui::Key::ArrowDown => {
-                        i.saturating_add(1).min(tab.list.len().saturating_sub(1))
-                    }
+                    egui::Key::ArrowDown => i.saturating_add(1).min(visible_len.saturating_sub(1)),
                     egui::Key::ArrowUp => i.saturating_sub(1),
                     egui::Key::ArrowLeft => {
                         if let Some(parent) = tab.current_path.parent() {
@@ -1130,16 +1237,14 @@ impl MyTabViewer<'_> {
                         return;
                     }
                     egui::Key::Enter | egui::Key::ArrowRight => {
-                        let Some(entry) = tab.list.get(*i) else {
+                        let Some(entry) = tab
+                            .visible_entries
+                            .get(*i)
+                            .and_then(|visible| tab.list.get(*visible))
+                        else {
                             return;
                         };
-                        if entry.is_file() {
-                            ActionToPerform::SystemOpen(entry.path.clone().into()).schedule();
-                        } else {
-                            TabAction::ChangePaths(entry.get_path().to_path_buf().into())
-                                .schedule_tab(tab_id);
-                            return;
-                        }
+                        Self::activate_entry(entry, tab_id, false);
                         *i
                     }
                     _ => return,
@@ -1152,6 +1257,372 @@ impl MyTabViewer<'_> {
             selected_tabs.selected_fields.push(new_value);
             selected_tabs.just_changed = true;
             ui.data_set_path(&tab.current_path, selected_tabs.clone());
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_grid_tile(
+        &mut self,
+        ui: &mut Ui,
+        entry: &DirEntry,
+        tile_width: f32,
+        tile_height: f32,
+        is_selected: bool,
+        is_popup_open: bool,
+        cmd: bool,
+        indexed: usize,
+    ) -> egui::Response {
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(tile_width, tile_height), Sense::click());
+        let visuals = &ui.style().visuals;
+        let hovered = response.hovered() || is_popup_open;
+        let bg_fill = if is_selected {
+            visuals.selection.bg_fill
+        } else if hovered {
+            visuals.widgets.hovered.bg_fill
+        } else {
+            visuals.faint_bg_color
+        };
+        let stroke = if is_selected {
+            visuals.selection.stroke
+        } else if hovered {
+            visuals.widgets.hovered.bg_stroke
+        } else {
+            visuals.widgets.noninteractive.bg_stroke
+        };
+
+        ui.painter().rect_filled(rect, 8.0, bg_fill);
+        ui.painter()
+            .rect_stroke(rect, 8.0, stroke, egui::StrokeKind::Inside);
+
+        let inner_rect = rect.shrink2(Vec2::new(8.0, 8.0));
+        let text_width = (inner_rect.width() - 4.0).max(0.0);
+        let mut child_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner_rect)
+                .layout(Layout::top_down(egui::Align::Center)),
+        );
+        child_ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+
+        let render_size = self.assets.render_size_for(entry).max(32.0);
+        child_ui.add_space(4.0);
+        if let Some(texture) = self.assets.request_entry_texture(entry) {
+            child_ui.add(egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(render_size)));
+        } else {
+            child_ui.allocate_space(Vec2::splat(render_size));
+        }
+
+        if cmd && indexed < 10 {
+            child_ui.add(
+                egui::Label::new(LayoutJob::simple_format(
+                    format!("[{indexed}]"),
+                    TextFormat {
+                        color: Color32::DARK_GRAY,
+                        ..Default::default()
+                    },
+                ))
+                .wrap_mode(egui::TextWrapMode::Wrap)
+                .selectable(false)
+                .sense(Sense::empty()),
+            );
+        }
+
+        child_ui.add_sized(
+            [text_width, 40.0],
+            egui::Label::new(entry.get_splitted_path().1)
+                .wrap_mode(egui::TextWrapMode::Wrap)
+                .selectable(false)
+                .sense(Sense::empty()),
+        );
+
+        response.on_hover_ui(|ui| Self::show_entry_hover_preview(ui, entry))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process_grid_interactions(
+        &mut self,
+        ui: &Ui,
+        tab: &TabData,
+        selected_tabs: &mut Selected,
+        shift_pressed: bool,
+        just_changed: bool,
+        tab_popup_id: Id,
+        favorites: &Locations,
+        row_results: &[RowResult],
+    ) {
+        for RowResult {
+            row_index,
+            response: row_response,
+        } in row_results
+        {
+            let row_index = *row_index;
+            let Some(index) = tab.visible_entries.get(row_index).copied() else {
+                continue;
+            };
+            let val = &tab.list[index];
+            let indexed = row_index + 1;
+
+            if row_response.double_clicked()
+                || convert_nr_to_egui_key(indexed)
+                    .is_some_and(|key| row_response.ctx.key_with_command_pressed(key))
+            {
+                Self::activate_entry(val, tab.id, row_response.ctx.shift_pressed());
+            } else if row_response.clicked() {
+                if !shift_pressed {
+                    selected_tabs.selected_fields.clear();
+                }
+                if !selected_tabs.selected_fields.contains(&row_index) {
+                    selected_tabs.selected_fields.push(row_index);
+                }
+                selected_tabs.just_changed = true;
+                row_response
+                    .ctx
+                    .data_set_path(&tab.current_path, selected_tabs.clone());
+            }
+
+            self.show_entry_context_menu(
+                row_response,
+                tab,
+                val,
+                row_index,
+                tab_popup_id,
+                favorites,
+            );
+
+            if just_changed
+                && let Some(v) = selected_tabs.selected_fields.last()
+                && *v == row_index
+            {
+                ui.scroll_to_rect(row_response.rect, Some(egui::Align::Center));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn show_entry_context_menu(
+        &self,
+        row_response: &egui::Response,
+        tab: &TabData,
+        val: &DirEntry,
+        row_index: usize,
+        tab_popup_id: Id,
+        favorites: &Locations,
+    ) {
+        let is_dir = !val.is_file();
+        let popup_id = tab_popup_id.with(row_index);
+        egui::Popup::context_menu(row_response)
+            .id(popup_id)
+            .show(|ui| {
+                ui.data_set_tab::<PopupOpened>(tab.id, PopupOpened(popup_id, row_index));
+                let options = build_for_path(&tab.current_path, val.get_path(), favorites);
+                for option in options {
+                    if ui.button(option.name.as_str()).clicked() {
+                        option.action.clone().schedule();
+                        ui.close();
+                    }
+                }
+                if !is_dir {
+                    if ui.button("Open").clicked() {
+                        ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
+                        ui.close();
+                        return;
+                    }
+                    #[cfg(windows)]
+                    if ui.button("Show in explorer").clicked() {
+                        crate::windows_tools::display_in_explorer(val.get_path()).unwrap_or_else(
+                            |_| {
+                                toast!(Error, "Could not open in explorer");
+                            },
+                        );
+                        ui.close();
+                    }
+                    let val_dir = PathBuf::from(val.get_splitted_path().0);
+                    let matching_dirs = self.tab_paths.iter().filter(|path| !val_dir.eq(*path));
+                    #[allow(clippy::collapsible_else_if)]
+                    if matching_dirs.clone().count() > 0 {
+                        ui.separator();
+                        ui.menu_button("Move to", |ui| {
+                            for other in matching_dirs {
+                                let other = PathBuf::from(
+                                    std::fs::canonicalize(other)
+                                        .unwrap_or_else(|_| val.get_path().to_path_buf())
+                                        .to_fixed_string(),
+                                );
+
+                                if ui
+                                    .button(format!(
+                                        "{}",
+                                        &other.file_name().expect("Failed").to_string_lossy()
+                                    ))
+                                    .on_hover_text(other.display().to_string())
+                                    .clicked()
+                                {
+                                    let path = val.get_path();
+                                    let filename = path.file_name().expect("NO FILENAME");
+                                    let target_path = other.join(filename);
+                                    println!("{}", &target_path.display());
+                                    let move_result = fs::rename(path, &target_path);
+                                    let mut success = move_result.is_ok();
+                                    let _ = move_result.inspect_err(|e| {
+                                        e.raw_os_error().inspect(|nr| {
+                                            if *nr == 17 {
+                                                let copy_success =
+                                                    fs::copy(path, target_path.clone()).is_ok();
+                                                if copy_success {
+                                                    success = fs::remove_file(path).is_ok();
+                                                }
+                                            }
+                                        });
+                                    });
+                                    if !success {
+                                        toast!(
+                                            Error,
+                                            "Failed to move file {}",
+                                            filename.to_string_lossy()
+                                        );
+                                    }
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                }
+                ui.separator();
+                if ui.button("Move to Trash").clicked() {
+                    trash::delete(val.get_path()).unwrap_or_else(|_| {
+                        toast!(Error, "Could not move it to trash.");
+                    });
+                    ui.close();
+                    TabAction::RequestFilesRefresh.schedule_active_tab();
+                }
+                if ui.button("Copy path to clipboard").clicked() {
+                    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+                        toast!(Error, "Failed to read the clipboard.");
+                        return;
+                    };
+                    clipboard.set_text(val.path.clone()).unwrap_or_else(|_| {
+                        toast!(Error, "Failed to update the clipboard.");
+                    });
+                    ui.close();
+                }
+                if ui.button("Rename").clicked() {
+                    ui.data_mut(|w| {
+                        w.insert_temp(egui::Id::new(ModalWindow::Rename), val.clone());
+                    });
+                    ActionToPerform::ToggleModalWindow(ModalWindow::Rename).schedule();
+                    ui.close();
+                }
+
+                #[cfg(windows)]
+                {
+                    ui.separator();
+                    if ui.button("Properties").clicked() {
+                        crate::windows_tools::open_properties(val.get_path());
+                        ui.close();
+                    }
+                }
+            });
+    }
+
+    fn handle_grid_keyboard_navigation(
+        &self,
+        ui: &Ui,
+        tab: &TabData,
+        selected_tabs: &mut Selected,
+        shift_pressed: bool,
+        columns: usize,
+    ) {
+        if !self.focused || !self.active_tab.eq(&tab.id) {
+            return;
+        }
+
+        let input_key = ui.input(|i| {
+            if i.key_pressed(egui::Key::ArrowDown) {
+                Some(egui::Key::ArrowDown)
+            } else if i.key_pressed(egui::Key::ArrowUp) {
+                Some(egui::Key::ArrowUp)
+            } else if i.key_pressed(egui::Key::ArrowLeft) {
+                Some(egui::Key::ArrowLeft)
+            } else if i.key_pressed(egui::Key::ArrowRight) {
+                Some(egui::Key::ArrowRight)
+            } else if i.key_pressed(egui::Key::Enter) {
+                Some(egui::Key::Enter)
+            } else {
+                None
+            }
+        });
+
+        let visible_len = tab.visible_entries.len();
+        if visible_len == 0 {
+            return;
+        }
+
+        let Some(change) = input_key else {
+            return;
+        };
+        let current = selected_tabs
+            .selected_fields
+            .last()
+            .copied()
+            .filter(|index| *index < visible_len)
+            .unwrap_or_default();
+        let new_value = match change {
+            egui::Key::ArrowDown => current.saturating_add(columns).min(visible_len - 1),
+            egui::Key::ArrowUp => current.saturating_sub(columns),
+            egui::Key::ArrowLeft => current.saturating_sub(1),
+            egui::Key::ArrowRight => current.saturating_add(1).min(visible_len - 1),
+            egui::Key::Enter => {
+                let Some(entry) = tab
+                    .visible_entries
+                    .get(current)
+                    .and_then(|visible| tab.list.get(*visible))
+                else {
+                    return;
+                };
+                Self::activate_entry(entry, tab.id, false);
+                current
+            }
+            _ => return,
+        };
+
+        if !shift_pressed {
+            selected_tabs.selected_fields.clear();
+        }
+        if !selected_tabs.selected_fields.contains(&new_value) {
+            selected_tabs.selected_fields.push(new_value);
+        }
+        selected_tabs.just_changed = true;
+        ui.data_set_path(&tab.current_path, selected_tabs.clone());
+    }
+
+    fn activate_entry(entry: &DirEntry, tab_id: u32, open_in_new_tab: bool) {
+        if entry.is_file() {
+            ActionToPerform::SystemOpen(entry.path.clone().into()).schedule();
+        } else if let Ok(path) = std::fs::canonicalize(entry.get_path()) {
+            if open_in_new_tab {
+                ActionToPerform::NewTab(path).schedule();
+            } else {
+                TabAction::ChangePaths(path.into()).schedule_tab(tab_id);
+            }
+        }
+    }
+
+    fn show_entry_hover_preview(ui: &mut Ui, entry: &DirEntry) {
+        let ext = entry
+            .get_path()
+            .extension()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if ext.eq(&OsStr::new("png")) || ext.eq(&OsStr::new("jpg")) || ext.eq(&OsStr::new("jpeg")) {
+            let path = entry.to_full_path_string();
+            let path = format!("file://{path}");
+            ui.add(
+                egui::Image::new(path)
+                    .maintain_aspect_ratio(true)
+                    .max_size(Vec2::new(300.0, 300.0)),
+            );
+        } else {
+            ui.add(egui::Label::new(entry.path.as_str()));
         }
     }
 }
@@ -1388,6 +1859,14 @@ mod tests {
         }
     }
 
+    fn populated_tabs_with_display(display_type: DisplayType) -> MyTabs {
+        let mut tabs = populated_tabs();
+        tabs.get_current_tab()
+            .expect("missing active tab")
+            .display_type = display_type;
+        tabs
+    }
+
     /// Draw one frame of the dock view, seeding galley pools and draining commands.
     fn draw_frame(ctx: &egui::Context, my_tabs: &mut MyTabs) {
         let mut assets = crate::app::assets::AssetManager::default();
@@ -1491,6 +1970,18 @@ mod tests {
 
         harness.run_steps(12);
         harness.snapshot("dock_view_empty_tab");
+    }
+
+    #[test]
+    fn test_dock_view_icons_smoke() {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 500.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs),
+                populated_tabs_with_display(DisplayType::Icons),
+            );
+
+        harness.run_steps(12);
     }
 
     // ── Unit: DirEntry constructed from real fs has correct entry type ────────
