@@ -90,7 +90,95 @@ pub struct App {
     assets: AssetManager,
 }
 
-impl App {}
+impl App {
+    fn reconcile_tab_watchers(&mut self, tab_id: u32) {
+        let (old_watcher_specs, new_watcher_specs) = {
+            let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                return;
+            };
+            let old_watcher_specs = tab.active_watch_specs.clone();
+            let new_watcher_specs = tab.watcher_specs();
+            tab.active_watch_specs = new_watcher_specs.clone();
+            (old_watcher_specs, new_watcher_specs)
+        };
+
+        let old_specs_by_path = old_watcher_specs
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let new_specs_by_path = new_watcher_specs
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        let removed_watchers = old_specs_by_path
+            .keys()
+            .filter(|path| !new_specs_by_path.contains_key(*path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let added_watchers = new_specs_by_path
+            .iter()
+            .filter(|(path, _)| !old_specs_by_path.contains_key(*path))
+            .map(|(path, mode)| (path.clone(), *mode))
+            .collect::<Vec<_>>();
+        let restarted_watchers = new_specs_by_path
+            .iter()
+            .filter_map(|(path, new_mode)| {
+                old_specs_by_path.get(path).and_then(|old_mode| {
+                    if old_mode == new_mode {
+                        None
+                    } else {
+                        Some((path.clone(), *new_mode))
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        self.watchers.stop_many(removed_watchers);
+        self.watchers
+            .stop_many(restarted_watchers.iter().map(|(path, _)| path.clone()));
+        self.watchers.start_many(added_watchers);
+        self.watchers.start_many(restarted_watchers);
+    }
+
+    fn process_file_system_changes(&mut self, ctx: &egui::Context) {
+        self.watchers.check_for_new_watchers();
+        let changed_directories = self.watchers.check_for_file_system_events();
+        if changed_directories.is_empty() {
+            return;
+        }
+
+        self.assets
+            .invalidate_directories(changed_directories.iter().cloned());
+        crate::app::database::invalidate_dirs(changed_directories.iter().cloned());
+
+        let tab_ids = self.tabs.get_tab_ids();
+        let affected_tabs = tab_ids
+            .into_iter()
+            .filter(|tab_id| {
+                self.tabs
+                    .get_tab_by_id(*tab_id)
+                    .is_some_and(|tab| tab.should_refresh_for_directories(&changed_directories))
+            })
+            .collect::<Vec<_>>();
+
+        for tab_id in affected_tabs {
+            self.handle_action(
+                ctx,
+                ActionToPerform::TabAction(
+                    TabTarget::TabWithId(tab_id),
+                    TabAction::RequestFilesRefresh,
+                ),
+            );
+        }
+    }
+
+    fn drain_command_queue(&mut self, ctx: &egui::Context) {
+        while let Some(action) = COMMANDS_QUEUE.pop() {
+            self.handle_action(ctx, action);
+        }
+    }
+}
 
 #[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
 pub enum Sort {
@@ -249,7 +337,12 @@ impl App {
                     }
                     return;
                 }
-                let Some(tab) = self.tabs.try_get_tab_by_target(target) else {
+                let tab_id = match target {
+                    TabTarget::ActiveTab => self.tabs.get_current_index(),
+                    TabTarget::TabWithId(id) => Some(id),
+                    TabTarget::AllTabs => None,
+                };
+                let Some(tab_id) = tab_id else {
                     return;
                 };
                 match action {
@@ -259,54 +352,12 @@ impl App {
                             "lwa_fm::handle_action::ChangePaths: {}",
                             path.get_name_from_path()
                         );
-                        let old_watcher_specs = tab.watcher_specs();
-
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
                         path.print_from_lua();
                         tab.set_path(path);
-                        let new_watcher_specs = tab.watcher_specs();
                         let refreshed_path = tab.current_path.get_path();
-
-                        let old_specs_by_path = old_watcher_specs
-                            .iter()
-                            .cloned()
-                            .collect::<std::collections::BTreeMap<_, _>>();
-                        let new_specs_by_path = new_watcher_specs
-                            .iter()
-                            .cloned()
-                            .collect::<std::collections::BTreeMap<_, _>>();
-
-                        let removed_watchers = old_specs_by_path
-                            .keys()
-                            .filter(|path| !new_specs_by_path.contains_key(*path))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        let added_watchers = new_specs_by_path
-                            .iter()
-                            .filter(|(path, _)| !old_specs_by_path.contains_key(*path))
-                            .map(|(path, mode)| (path.clone(), *mode))
-                            .collect::<Vec<_>>();
-                        let restarted_watchers = new_specs_by_path
-                            .iter()
-                            .filter_map(|(path, new_mode)| {
-                                old_specs_by_path.get(path).and_then(|old_mode| {
-                                    if old_mode != new_mode {
-                                        Some((path.clone(), *new_mode))
-                                    } else {
-                                        None
-                                    }
-                                })
-                            })
-                            .collect::<Vec<_>>();
-
-                        self.watchers.stop_many(removed_watchers);
-                        self.watchers.stop_many(
-                            restarted_watchers
-                                .iter()
-                                .map(|(path, _)| path.clone())
-                                .collect::<Vec<_>>(),
-                        );
-                        self.watchers.start_many(added_watchers);
-                        self.watchers.start_many(restarted_watchers);
 
                         if let Some(new_path) = refreshed_path {
                             crate::app::database::invalidate_dir(&new_path);
@@ -329,18 +380,28 @@ impl App {
                         }
                         self.handle_action(
                             ctx,
-                            ActionToPerform::TabAction(target, TabAction::RequestFilesRefresh),
+                            ActionToPerform::TabAction(
+                                TabTarget::TabWithId(tab_id),
+                                TabAction::RequestFilesRefresh,
+                            ),
                         );
                     }
                     commands::TabAction::FilterChanged => {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!("lwa_fm::handle_action::FilterChanged");
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
                         tab.update_settings(ctx);
                         tab.update_visible_entries();
                     }
                     commands::TabAction::RequestFilesRefresh => {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles");
+                        self.reconcile_tab_watchers(tab_id);
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
                         tab.update_settings(ctx);
                         tab.refresh_list();
                         dock::populate_time_pool(
@@ -356,12 +417,18 @@ impl App {
                         // });
                         self.handle_action(
                             ctx,
-                            ActionToPerform::TabAction(target, TabAction::FilesSort),
+                            ActionToPerform::TabAction(
+                                TabTarget::TabWithId(tab_id),
+                                TabAction::FilesSort,
+                            ),
                         );
                     }
                     commands::TabAction::FilesSort => {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!("lwa_fm::handle_action::FilesSort");
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
 
                         let settings = ctx
                             .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
@@ -369,6 +436,9 @@ impl App {
                         tab.update_visible_entries();
                     }
                     commands::TabAction::SearchInFavorites(start) => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
                         let favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
                         if favorites.locations.is_empty() {
                             return;
@@ -377,7 +447,7 @@ impl App {
                             self.handle_action(
                                 ctx,
                                 ActionToPerform::TabAction(
-                                    target,
+                                    TabTarget::TabWithId(tab_id),
                                     TabAction::ChangePaths(CurrentPath::Multiple(
                                         favorites.paths(),
                                     )),
@@ -484,6 +554,8 @@ impl eframe::App for App {
         #[cfg(feature = "profiling")]
         puffin::profile_function!("my_update");
         self.assets.poll_results(&ctx);
+        self.drain_command_queue(&ctx);
+        self.process_file_system_changes(&ctx);
         let active_directory = self.tabs.get_current_path();
         self.assets
             .set_active_directory(active_directory.as_deref());
@@ -580,33 +652,9 @@ impl eframe::App for App {
         }
 
         TOASTS.write().show(&ctx);
-        while let Some(action) = COMMANDS_QUEUE.pop() {
-            self.handle_action(&ctx, action);
-        }
+        self.drain_command_queue(&ctx);
         if self.watchers.is_active() {
             ctx.request_repaint_after(Duration::from_millis(200));
-        }
-        {
-            #[cfg(feature = "profiling")]
-            puffin::profile_scope!("lwa_fm::MyTabs::ui::check_for_new_watchers");
-            self.watchers.check_for_new_watchers();
-        }
-        {
-            #[cfg(feature = "profiling")]
-            puffin::profile_scope!("lwa_fm::MyTabs::ui::check_for_file_system_events");
-            let changed_directories = self.watchers.check_for_file_system_events();
-            if !changed_directories.is_empty() {
-                self.assets
-                    .invalidate_directories(changed_directories.iter().cloned());
-                crate::app::database::invalidate_dirs(changed_directories);
-                self.handle_action(
-                    &ctx,
-                    ActionToPerform::TabAction(
-                        commands::TabTarget::AllTabs,
-                        TabAction::RequestFilesRefresh,
-                    ),
-                );
-            }
         }
     }
 }

@@ -12,16 +12,8 @@ use notify::{
     event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode},
 };
 
+use crate::helper::normalize_path;
 use crate::toast;
-
-#[derive(Debug, Clone)]
-pub enum FileSystemEvent {
-    Created(PathBuf),
-    Modified(PathBuf),
-    Deleted(PathBuf),
-    Renamed { from: PathBuf, to: PathBuf },
-    Error(String),
-}
 
 #[derive(Debug, Default)]
 pub struct DirectoryWatchers {
@@ -112,7 +104,7 @@ impl DirectoryWatchers {
 
     #[inline]
     fn insert_started_watcher(&mut self, watcher: DirectoryWatcher, _mode: RecursiveMode) {
-        let Some(path) = watcher.current_path.as_ref().cloned() else {
+        let Some(path) = watcher.current_path.clone() else {
             return;
         };
         let ref_count = self.take_pending_ref_count(&path);
@@ -138,6 +130,7 @@ impl DirectoryWatchers {
     pub fn start(&mut self, path: PathBuf, mode: RecursiveMode) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::DirectoryWatchers::start");
+        let path = normalize_path(&path);
         if let Some(watched) = self.watchers.get_mut(&path) {
             watched.ref_count += 1;
             return;
@@ -204,53 +197,8 @@ impl DirectoryWatchers {
         puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_file_system_events");
         let mut changed_directories = BTreeSet::new();
         for watched in self.watchers.values_mut() {
-            while let Some(event) = watched.watcher.try_recv_event() {
-                match event {
-                    FileSystemEvent::Created(path) => {
-                        if let Some(file_name) = path.file_name() {
-                            toast!(Info, "File created: {}", file_name.to_string_lossy());
-                        }
-                        if let Some(parent) = parent_dir_for_event_path(&path) {
-                            _ = changed_directories.insert(parent);
-                        }
-                    }
-                    FileSystemEvent::Modified(path) => {
-                        if let Some(file_name) = path.file_name() {
-                            toast!(Info, "File modified: {}", file_name.to_string_lossy());
-                        }
-                        if let Some(parent) = parent_dir_for_event_path(&path) {
-                            _ = changed_directories.insert(parent);
-                        }
-                    }
-                    FileSystemEvent::Deleted(path) => {
-                        if let Some(file_name) = path.file_name() {
-                            toast!(Warning, "File deleted: {}", file_name.to_string_lossy());
-                        }
-                        if let Some(parent) = parent_dir_for_event_path(&path) {
-                            _ = changed_directories.insert(parent);
-                        }
-                    }
-                    FileSystemEvent::Renamed { from, to } => {
-                        if let (Some(from_name), Some(to_name)) = (from.file_name(), to.file_name())
-                        {
-                            toast!(
-                                Info,
-                                "File renamed: {} → {}",
-                                from_name.to_string_lossy(),
-                                to_name.to_string_lossy()
-                            );
-                        }
-                        if let Some(parent) = parent_dir_for_event_path(&from) {
-                            _ = changed_directories.insert(parent);
-                        }
-                        if let Some(parent) = parent_dir_for_event_path(&to) {
-                            _ = changed_directories.insert(parent);
-                        }
-                    }
-                    FileSystemEvent::Error(err) => {
-                        toast!(Error, "File system error: {}", err);
-                    }
-                }
+            while let Some(directories) = watched.watcher.try_recv_event() {
+                changed_directories.extend(directories);
             }
         }
         changed_directories
@@ -260,7 +208,7 @@ impl DirectoryWatchers {
 #[derive(Debug)]
 pub struct DirectoryWatcher {
     watcher: RecommendedWatcher,
-    receiver: Receiver<FileSystemEvent>,
+    receiver: Receiver<BTreeSet<PathBuf>>,
     current_path: Option<PathBuf>,
 }
 
@@ -280,21 +228,22 @@ impl DirectoryWatcher {
         // Spawn a thread to process raw notify events and convert them to our custom events
         let event_tx = tx;
         thread::spawn(move || {
-            let mut rename_from: Option<PathBuf> = None;
+            let mut pending_renames: HashMap<usize, BTreeSet<PathBuf>> = HashMap::new();
 
             for res in internal_rx {
                 match res {
                     Ok(event) => {
-                        let fs_events = Self::process_event(event, &mut rename_from);
-                        for fs_event in fs_events {
-                            if let Err(e) = event_tx.send(fs_event) {
-                                eprintln!("Failed to send processed file system event: {e}");
-                                break;
-                            }
+                        let changed_dirs = Self::process_event(event, &mut pending_renames);
+                        if changed_dirs.is_empty() {
+                            continue;
+                        }
+                        if let Err(err) = event_tx.send(changed_dirs) {
+                            eprintln!("Failed to send processed file system event: {err}");
+                            break;
                         }
                     }
                     Err(e) => {
-                        let _ = event_tx.send(FileSystemEvent::Error(e.to_string()));
+                        toast!(Error, "File system error: {e}");
                     }
                 }
             }
@@ -311,6 +260,7 @@ impl DirectoryWatcher {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::watch_directory");
         let path = path.as_ref().to_path_buf();
+        let path = normalize_path(&path);
 
         self.watcher
             .watch(&path, mode)
@@ -330,17 +280,20 @@ impl DirectoryWatcher {
     }
 
     #[inline]
-    pub fn try_recv_event(&self) -> Option<FileSystemEvent> {
+    pub fn try_recv_event(&self) -> Option<BTreeSet<PathBuf>> {
         self.receiver.try_recv().ok()
     }
 
     #[allow(dead_code)]
-    pub fn recv_event_timeout(&self, timeout: Duration) -> Option<FileSystemEvent> {
+    pub fn recv_event_timeout(&self, timeout: Duration) -> Option<BTreeSet<PathBuf>> {
         self.receiver.recv_timeout(timeout).ok()
     }
 
-    fn process_event(event: Event, rename_from: &mut Option<PathBuf>) -> Vec<FileSystemEvent> {
-        let mut events = Vec::new();
+    fn process_event(
+        event: Event,
+        pending_renames: &mut HashMap<usize, BTreeSet<PathBuf>>,
+    ) -> BTreeSet<PathBuf> {
+        let tracker = event.attrs.tracker();
         let Event {
             kind,
             paths,
@@ -349,69 +302,54 @@ impl DirectoryWatcher {
 
         match kind {
             EventKind::Create(CreateKind::File | CreateKind::Folder) => {
-                for path in paths {
-                    events.push(FileSystemEvent::Created(path));
-                }
-            }
-            EventKind::Modify(ModifyKind::Data(DataChange::Content)) => {
-                for path in paths {
-                    events.push(FileSystemEvent::Modified(path));
-                }
+                parent_dirs_for_paths(paths)
             }
             EventKind::Remove(RemoveKind::File | RemoveKind::Folder) => {
-                for path in paths {
-                    events.push(FileSystemEvent::Deleted(path));
-                }
+                parent_dirs_for_paths(paths)
             }
             EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-                if let Some(path) = paths.into_iter().next() {
-                    *rename_from = Some(path);
+                let directories = parent_dirs_for_paths(paths);
+                if let Some(tracker) = tracker {
+                    pending_renames
+                        .entry(tracker)
+                        .or_default()
+                        .extend(directories.iter().cloned());
+                    if pending_renames.len() > 256 {
+                        pending_renames.clear();
+                    }
                 }
+                directories
             }
             EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-                let mut paths = paths.into_iter();
-                if let Some(to) = paths.next() {
-                    if let Some(from) = rename_from.take() {
-                        events.push(FileSystemEvent::Renamed { from, to });
-                    } else {
-                        events.push(FileSystemEvent::Modified(to));
-                    }
+                let mut directories = parent_dirs_for_paths(paths);
+                if let Some(tracker) = tracker
+                    && let Some(pending) = pending_renames.remove(&tracker)
+                {
+                    directories.extend(pending);
                 }
-                for path in paths {
-                    events.push(FileSystemEvent::Modified(path));
-                }
+                directories
             }
-            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-                if paths.len() >= 2 {
-                    let mut paths = paths.into_iter();
-                    if let (Some(from), Some(to)) = (paths.next(), paths.next()) {
-                        events.push(FileSystemEvent::Renamed { from, to });
-                    }
-                }
-            }
-            EventKind::Modify(ModifyKind::Name(_)) => {
-                if paths.len() >= 2 {
-                    let mut paths = paths.into_iter();
-                    if let (Some(from), Some(to)) = (paths.next(), paths.next()) {
-                        events.push(FileSystemEvent::Renamed { from, to });
-                    }
-                } else {
-                    for path in paths {
-                        events.push(FileSystemEvent::Modified(path));
-                    }
-                }
-            }
-            _ => {
-                // Handle other events or ignore them
-            }
+            EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Modify(ModifyKind::Data(DataChange::Content))
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Metadata(_))
+            | EventKind::Modify(ModifyKind::Any)
+            | EventKind::Modify(ModifyKind::Other)
+            | EventKind::Any => parent_dirs_for_paths(paths),
+            _ => BTreeSet::new(),
         }
-
-        events
     }
 }
 
 fn parent_dir_for_event_path(path: &Path) -> Option<PathBuf> {
-    path.parent().map(Path::to_path_buf)
+    path.parent().map(normalize_path)
+}
+
+fn parent_dirs_for_paths(paths: Vec<PathBuf>) -> BTreeSet<PathBuf> {
+    paths
+        .into_iter()
+        .filter_map(|path| parent_dir_for_event_path(&path))
+        .collect()
 }
 
 impl Default for DirectoryWatcher {
@@ -422,15 +360,17 @@ impl Default for DirectoryWatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{DirectoryWatcher, FileSystemEvent, parent_dir_for_event_path};
+    use super::{DirectoryWatcher, parent_dir_for_event_path};
+    use crate::helper::normalize_path;
     use notify::{
         Event, EventKind,
         event::{ModifyKind, RenameMode},
     };
+    use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
 
     #[test]
-    fn rename_mode_any_becomes_renamed_event() {
+    fn rename_mode_any_invalidates_both_parents() {
         let event = Event {
             kind: EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
             paths: vec![
@@ -440,15 +380,13 @@ mod tests {
             attrs: Default::default(),
         };
 
-        let mut rename_from = None;
-        let events = DirectoryWatcher::process_event(event, &mut rename_from);
+        let mut pending = HashMap::new();
+        let directories = DirectoryWatcher::process_event(event, &mut pending);
 
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
-            FileSystemEvent::Renamed { from, to }
-                if from == Path::new("/tmp/from.txt") && to == Path::new("/tmp/to.txt")
-        ));
+        assert_eq!(
+            directories,
+            BTreeSet::from([normalize_path(Path::new("/tmp"))])
+        );
     }
 
     #[test]
@@ -459,14 +397,39 @@ mod tests {
             attrs: Default::default(),
         };
 
-        let mut rename_from = None;
-        let events = DirectoryWatcher::process_event(event, &mut rename_from);
+        let mut pending = HashMap::new();
+        let directories = DirectoryWatcher::process_event(event, &mut pending);
 
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
-            FileSystemEvent::Modified(path) if path == Path::new("/tmp/to.txt")
-        ));
+        assert_eq!(
+            directories,
+            BTreeSet::from([normalize_path(Path::new("/tmp"))])
+        );
+    }
+
+    #[test]
+    fn tracker_pairs_from_and_to_directories() {
+        let mut pending = HashMap::new();
+        let from = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path(Path::new("/tmp/source/file.txt").to_path_buf())
+            .set_tracker(7);
+        let to = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path(Path::new("/tmp/dest/file.txt").to_path_buf())
+            .set_tracker(7);
+
+        let from_directories = DirectoryWatcher::process_event(from, &mut pending);
+        let to_directories = DirectoryWatcher::process_event(to, &mut pending);
+
+        assert_eq!(
+            from_directories,
+            BTreeSet::from([normalize_path(Path::new("/tmp/source"))])
+        );
+        assert_eq!(
+            to_directories,
+            BTreeSet::from([
+                normalize_path(Path::new("/tmp/source")),
+                normalize_path(Path::new("/tmp/dest"))
+            ])
+        );
     }
 
     #[test]

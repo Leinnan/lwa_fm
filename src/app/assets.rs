@@ -558,17 +558,20 @@ impl AssetManager {
     }
 
     pub fn invalidate_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
-        let directories: Vec<String> = directories
-            .into_iter()
-            .map(|path| path.to_full_path_string())
-            .collect();
+        let directories: Vec<PathBuf> = directories.into_iter().collect();
         if directories.is_empty() {
             return;
         }
 
         let matches_dir = |key: &str| -> bool {
             let entry_path = key.strip_prefix("sidebar:").unwrap_or(key);
-            directories.iter().any(|dir| entry_path.starts_with(dir))
+            let entry_path = Path::new(entry_path);
+            directories.iter().any(|dir| {
+                crate::helper::path_starts_with_dir(entry_path, dir)
+                    || entry_path
+                        .parent()
+                        .is_some_and(|parent| crate::helper::path_starts_with_dir(parent, dir))
+            })
         };
 
         let keys_to_remove: Vec<String> = self

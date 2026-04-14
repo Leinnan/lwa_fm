@@ -8,23 +8,45 @@ use std::process::{Child, Command, Stdio};
 use egui::util::id_type_map::{SerializableAny, TypeId};
 use egui::{Context, Id, InputState, Ui};
 
-use crate::app::Data;
 use crate::app::dock::CurrentPath;
+use crate::app::Data;
 
 pub trait PathHelper {
     fn to_full_path(&self) -> Option<PathBuf>;
     fn to_full_path_string(&self) -> String;
 }
 
+#[must_use]
+pub fn normalize_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
+}
+
+#[must_use]
+pub fn normalize_path_string(path: &Path) -> String {
+    normalize_path(path)
+        .to_string_lossy()
+        .replace("\\\\?\\", "")
+}
+
+#[must_use]
+pub fn path_starts_with_dir(path: &Path, directory: &Path) -> bool {
+    normalize_path(path).starts_with(normalize_path(directory))
+}
+
 impl<T: AsRef<Path>> PathHelper for T {
     fn to_full_path(&self) -> Option<PathBuf> {
-        std::fs::canonicalize(self).ok()
+        Some(normalize_path(self.as_ref()))
     }
     fn to_full_path_string(&self) -> String {
-        self.to_full_path().map_or_else(
-            || self.as_ref().to_string_lossy().replace("\\\\?\\", ""),
-            |p| p.to_string_lossy().replace("\\\\?\\", ""),
-        )
+        normalize_path_string(self.as_ref())
     }
 }
 

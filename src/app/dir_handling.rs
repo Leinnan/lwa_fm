@@ -16,7 +16,7 @@ use crate::{
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
     },
-    helper::DataHolder,
+    helper::{DataHolder, normalize_path},
 };
 pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
     std::sync::LazyLock::new(|| build_collator(false));
@@ -35,8 +35,30 @@ impl TabData {
         } else {
             RecursiveMode::NonRecursive
         };
+        let mut specs = BTreeSet::new();
+        for root in roots {
+            let root = normalize_path(root);
+            specs.insert((root.clone(), mode));
+            if mode == RecursiveMode::Recursive {
+                for linked_root in linked_watch_roots(&root, self.search_depth()) {
+                    specs.insert((linked_root, mode));
+                }
+            }
+        }
+        specs.into_iter().collect()
+    }
 
-        roots.iter().cloned().map(|path| (path, mode)).collect()
+    pub fn search_depth(&self) -> usize {
+        self.search.as_ref().map_or(1, |search| search.depth)
+    }
+
+    pub fn should_refresh_for_directories(&self, changed_directories: &BTreeSet<PathBuf>) -> bool {
+        self.watcher_specs().iter().any(|(root, mode)| {
+            changed_directories.iter().any(|changed| match mode {
+                RecursiveMode::Recursive => changed.starts_with(root),
+                RecursiveMode::NonRecursive => changed == root,
+            })
+        })
     }
 
     pub fn set_path(&mut self, path: impl Into<CurrentPath>) -> &CurrentPath {
@@ -204,7 +226,7 @@ impl TabData {
             CurrentPath::One(path_buf) => &[path_buf.clone()],
             CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
         };
-        let depth = self.search.as_ref().map_or(1, |search| search.depth);
+        let depth = self.search_depth();
 
         for d in directories {
             #[cfg(feature = "profiling")]
@@ -319,6 +341,28 @@ impl TabData {
             self.search.as_ref().map_or(1, |search| search.depth) > 1
         }
     }
+}
+
+fn linked_watch_roots(root: &Path, depth: usize) -> BTreeSet<PathBuf> {
+    let mut linked_roots = BTreeSet::new();
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .min_depth(1)
+        .max_depth(depth)
+        .into_iter()
+        .flatten()
+    {
+        if !entry.path_is_symlink() {
+            continue;
+        }
+        let Ok(target) = std::fs::canonicalize(entry.path()) else {
+            continue;
+        };
+        if target.is_dir() {
+            linked_roots.insert(normalize_path(&target));
+        }
+    }
+    linked_roots
 }
 
 pub fn get_directories(path: &Path, show_hidden: bool) -> BTreeSet<Cow<'static, str>> {

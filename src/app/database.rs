@@ -1,4 +1,7 @@
-use crate::data::files::{DirContent, DirEntry};
+use crate::{
+    data::files::{DirContent, DirEntry},
+    helper::normalize_path,
+};
 use bincode::config;
 use directories::ProjectDirs;
 use std::{
@@ -22,7 +25,7 @@ static CACHE_GENERATIONS: LazyLock<Mutex<HashMap<Vec<u8>, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn cache_key(dir: &Path) -> Vec<u8> {
-    dir.as_os_str().as_encoded_bytes().to_vec()
+    normalize_path(dir).as_os_str().as_encoded_bytes().to_vec()
 }
 
 fn current_generation(path: &[u8]) -> u64 {

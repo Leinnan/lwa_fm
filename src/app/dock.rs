@@ -220,6 +220,7 @@ impl CurrentPath {
 pub struct TabData {
     pub list: Vec<DirEntry>,
     pub visible_entries: Vec<usize>,
+    pub active_watch_specs: Vec<(PathBuf, notify::RecursiveMode)>,
     pub current_path: CurrentPath,
     pub show_hidden: bool,
     pub display_type: DisplayType,
@@ -334,6 +335,7 @@ impl TabData {
             id: get_id(),
             list: vec![],
             visible_entries: vec![],
+            active_watch_specs: vec![],
             current_path: CurrentPath::None,
             show_hidden: false,
             display_type: DisplayType::default(),
