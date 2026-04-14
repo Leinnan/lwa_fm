@@ -402,9 +402,9 @@ impl App {
     pub(crate) fn bottom_panel(&mut self, ctx: &Context) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::bottom_panel");
-        let mut sort_changed = false;
-        egui::TopBottomPanel::bottom("bottomPanel")
-            .frame(egui::Frame::canvas(&ctx.style()))
+        let mut setting_changed = false;
+        egui::Panel::bottom("bottomPanel")
+            .frame(egui::Frame::canvas(&ctx.global_style()))
             .show(ctx, |ui| {
                 ui.with_layout(Layout::right_to_left(eframe::emath::Align::Min), |ui| {
                     let spacing = ui.spacing().item_spacing;
@@ -437,8 +437,22 @@ impl App {
                         let mut settings: DirectoryViewSettings =
                             ui.data_get_path_or_persisted(&active_tab.current_path).data;
                         let old_value = settings.sorting;
+                        let old_value_display = settings.display_type;
                         let mut display_hidden_changed: bool = false;
-
+                        egui::ComboBox::from_label("Icons")
+                            .selected_text(format!("{:?}", settings.display_type))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut settings.display_type,
+                                    crate::app::DisplayType::List,
+                                    "List",
+                                );
+                                ui.selectable_value(
+                                    &mut settings.display_type,
+                                    crate::app::DisplayType::Icons,
+                                    "Icons",
+                                );
+                            });
                         egui::ComboBox::from_label("")
                             .selected_text(format!("↕ {:?}", settings.sorting))
                             .show_ui(ui, |ui| {
@@ -459,7 +473,7 @@ impl App {
                                 ui.selectable_value(&mut settings.sorting, Sort::Random, "Random");
                                 ui.separator();
 
-                                sort_changed |= ui
+                                setting_changed |= ui
                                     .toggle_value(&mut settings.invert_sort, "Inverted Sorting")
                                     .changed();
                                 let mut show_hidden = ui
@@ -470,14 +484,15 @@ impl App {
                                 display_hidden_changed = ui
                                     .toggle_value(&mut show_hidden.0, "Display hidden files")
                                     .changed();
-                                sort_changed |= display_hidden_changed;
+                                setting_changed |= display_hidden_changed;
                                 if display_hidden_changed {
                                     TabAction::RequestFilesRefresh.schedule_tab(active_tab.id);
                                     ui.data_set_path(&active_tab.current_path, show_hidden);
                                 }
                             });
-                        sort_changed |= old_value != settings.sorting;
-                        if !display_hidden_changed && sort_changed {
+                        setting_changed |= old_value != settings.sorting;
+                        setting_changed |= old_value_display != settings.display_type;
+                        if !display_hidden_changed && setting_changed {
                             ui.data_set_path(&active_tab.current_path, settings);
                         }
                         ui.spacing_mut().item_spacing = spacing;
@@ -485,7 +500,7 @@ impl App {
                 });
             });
 
-        if sort_changed {
+        if setting_changed {
             ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Local).schedule();
         }
     }

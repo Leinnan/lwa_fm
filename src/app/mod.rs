@@ -101,6 +101,13 @@ pub enum Sort {
     Random,
 }
 
+#[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
+pub enum DisplayType {
+    #[default]
+    List,
+    Icons,
+}
+
 #[derive(Deserialize, Serialize, Default, Debug, Clone)]
 pub struct Search {
     pub value: String,
