@@ -152,7 +152,6 @@ impl TabData {
 
     pub fn refresh_list(&mut self) {
         self.read_dir();
-        self.update_visible_entries();
         // if self.is_searching() {
         //     self.read_dir_filter();
         // } else {

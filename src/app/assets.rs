@@ -249,7 +249,7 @@ pub struct AssetManager {
     receiver: Receiver<AssetJobResult>,
     icon_size: IconSize,
     per_dir_icon_size: HashMap<String, IconSize>,
-    gif_store: PersistentGifStore,
+    gif_store: Option<PersistentGifStore>,
 }
 
 pub enum HoverPreview {
@@ -383,7 +383,7 @@ impl AssetManager {
             receiver: result_rx,
             icon_size: IconSize::default(),
             per_dir_icon_size: HashMap::new(),
-            gif_store: PersistentGifStore::open(),
+            gif_store: None,
         }
     }
 
@@ -422,7 +422,7 @@ impl AssetManager {
                 }) => {
                     self.pending.remove(&request_key);
                     self.failed.remove(&request_key);
-                    self.gif_store.persist(&source_path, &gif_bytes);
+                    self.gif_store().persist(&source_path, &gif_bytes);
                     self.gif_bytes.put(request_key, gif_bytes);
                     received_any = true;
                 }
@@ -612,7 +612,7 @@ impl AssetManager {
                 bytes: bytes.clone(),
             };
         }
-        if let Some(bytes) = self.gif_store.get(path) {
+        if let Some(bytes) = self.gif_store().get(path) {
             self.gif_bytes.put(request_key.clone(), bytes.clone());
             return HoverPreview::GifBytes {
                 uri: Cow::Owned(format!("bytes://{request_key}.gif")),
@@ -631,6 +631,10 @@ impl AssetManager {
             self.pending.insert(request_key);
         }
         HoverPreview::Loading
+    }
+
+    fn gif_store(&mut self) -> &mut PersistentGifStore {
+        self.gif_store.get_or_insert_with(PersistentGifStore::open)
     }
 
     fn request_file_icon_texture(

@@ -357,11 +357,6 @@ impl App {
                         };
                         path.print_from_lua();
                         tab.set_path(path);
-                        let refreshed_path = tab.current_path.get_path();
-
-                        if let Some(new_path) = refreshed_path {
-                            crate::app::database::invalidate_dir(&new_path);
-                        }
                         if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
                             let new_data = match tab.current_path.single_path() {
                                 Some(p) => {
@@ -404,11 +399,6 @@ impl App {
                         };
                         tab.update_settings(ctx);
                         tab.refresh_list();
-                        dock::populate_time_pool(
-                            tab.list.iter().map(|e| e.meta.since_modified),
-                            ctx,
-                        );
-                        dock::populate_sizes_pool(tab.list.iter().map(|e| e.meta.size), ctx);
 
                         // _ = thread::spawn(move || {
                         //     thread::sleep(Duration::from_secs_f32(0.2));

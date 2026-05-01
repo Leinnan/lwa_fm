@@ -815,6 +815,10 @@ impl MyTabViewer<'_> {
                                         ui.with_layout(
                                             Layout::right_to_left(egui::Align::Center),
                                             |ui| {
+                                                populate_time_pool(
+                                                    std::iter::once(val.meta.since_modified),
+                                                    ui.ctx(),
+                                                );
                                                 ui.add(val.meta.since_modified);
                                             },
                                         )
@@ -875,6 +879,10 @@ impl MyTabViewer<'_> {
                                             ui.with_layout(
                                                 Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
+                                                    populate_sizes_pool(
+                                                        std::iter::once(val.meta.size),
+                                                        ui.ctx(),
+                                                    );
                                                     draw_size(ui, val.meta.size);
                                                 },
                                             )
