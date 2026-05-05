@@ -1,4 +1,5 @@
 use crate::app::{DataSource, dock::CurrentPath};
+use crate::data::files::DirEntry;
 use crossbeam::queue::SegQueue;
 use std::{borrow::Cow, fmt::Display, path::PathBuf, str::FromStr};
 
@@ -34,6 +35,11 @@ pub enum TabAction {
     SearchInFavorites(bool),
     /// Search filter changed
     FilterChanged,
+    /// Background thread has finished loading directory entries.
+    FilesLoaded {
+        list: Vec<DirEntry>,
+        visible_entries: Vec<usize>,
+    },
 }
 
 impl TabAction {
@@ -114,6 +120,7 @@ impl From<&ActionToPerform> for Cow<'static, str> {
                     }
                 }
                 TabAction::FilterChanged => Cow::Borrowed("Filter changed"),
+                TabAction::FilesLoaded { .. } => Cow::Borrowed("Files loaded"),
             },
             ActionToPerform::AddToFavorites(_) => Cow::Borrowed("Add to favorites"),
             ActionToPerform::RemoveFromFavorites(_) => Cow::Borrowed("Remove from favorites"),

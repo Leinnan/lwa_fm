@@ -398,20 +398,42 @@ impl App {
                             return;
                         };
                         tab.update_settings(ctx);
-                        tab.refresh_list();
 
-                        // _ = thread::spawn(move || {
-                        //     thread::sleep(Duration::from_secs_f32(0.2));
-                        //     COMMANDS_QUEUE
-                        //         .push(ActionToPerform::TabAction(target, TabAction::FilesSort));
-                        // });
-                        self.handle_action(
-                            ctx,
-                            ActionToPerform::TabAction(
+                        let directories: Vec<PathBuf> = match &tab.current_path {
+                            CurrentPath::None => vec![],
+                            CurrentPath::One(path_buf) => vec![path_buf.clone()],
+                            CurrentPath::Multiple(path_bufs) => path_bufs.clone(),
+                        };
+                        let depth = tab.search_depth();
+                        let show_hidden = tab.show_hidden;
+                        let search = tab.search.clone();
+                        let current_path = tab.current_path.clone();
+
+                        let settings =
+                            ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&current_path);
+
+                        tab.loading = true;
+
+                        std::thread::spawn(move || {
+                            let mut list = crate::app::dir_handling::read_directory(
+                                &directories,
+                                depth,
+                                show_hidden,
+                            );
+                            crate::app::dir_handling::sort_entries_vec(&mut list, &settings.data);
+                            let visible_entries = crate::app::dir_handling::filter_visible_entries(
+                                &list,
+                                show_hidden,
+                                search.as_ref(),
+                            );
+                            COMMANDS_QUEUE.push(ActionToPerform::TabAction(
                                 TabTarget::TabWithId(tab_id),
-                                TabAction::FilesSort,
-                            ),
-                        );
+                                TabAction::FilesLoaded {
+                                    list,
+                                    visible_entries,
+                                },
+                            ));
+                        });
                     }
                     commands::TabAction::FilesSort => {
                         #[cfg(feature = "profiling")]
@@ -424,6 +446,17 @@ impl App {
                             .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
                         tab.sort_entries(&settings.data);
                         tab.update_visible_entries();
+                    }
+                    commands::TabAction::FilesLoaded {
+                        list,
+                        visible_entries,
+                    } => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        tab.list = list;
+                        tab.visible_entries = visible_entries;
+                        tab.loading = false;
                     }
                     commands::TabAction::SearchInFavorites(start) => {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {

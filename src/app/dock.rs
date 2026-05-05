@@ -225,6 +225,7 @@ pub struct TabData {
     pub show_hidden: bool,
     pub display_type: DisplayType,
     pub search: Option<Search>,
+    pub loading: bool,
     // pub watcher: Option<DirectoryWatcher>,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
@@ -340,6 +341,7 @@ impl TabData {
             show_hidden: false,
             display_type: DisplayType::default(),
             search: None,
+            loading: false,
             // watcher: DirectoryWatcher::new().ok(),
             undoer: Undoer::default(),
             top_display_path,
@@ -401,6 +403,14 @@ impl MyTabViewer<'_> {
                 return;
             };
             TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
+            return;
+        }
+
+        if tab.loading {
+            ui.centered_and_justified(|ui| {
+                ui.spinner();
+                ui.label("Loading...");
+            });
             return;
         }
 
@@ -515,6 +525,15 @@ impl MyTabViewer<'_> {
             TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
             return;
         }
+
+        if tab.loading {
+            ui.centered_and_justified(|ui| {
+                ui.spinner();
+                ui.label("Loading...");
+            });
+            return;
+        }
+
         let shift_pressed = ui.input(|i| i.shift_pressed());
         let favorites = ui.data_get_persisted::<Locations>().unwrap_or_default();
 

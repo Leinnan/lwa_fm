@@ -104,7 +104,7 @@ impl CommandPalette {
     pub fn ui(&self, ctx: &egui::Context) {
         let mut action = None;
         let modal = Modal::new("Commands".into())
-            .frame(egui::Frame::canvas(&ctx.style()))
+            .frame(egui::Frame::canvas(&ctx.global_style()))
             .show(ctx, |ui| {
                 ui.vertical_centered_justified(|ui| {
                     ui.heading("Run Command");

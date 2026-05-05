@@ -12,10 +12,11 @@ use rayon::slice::ParallelSliceMut;
 
 use crate::{
     app::{
-        database,
+        Search, database,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
     },
+    data::files::DirEntry,
     helper::{DataHolder, normalize_path},
 };
 pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
@@ -150,187 +151,21 @@ impl TabData {
     //     should_refresh
     // }
 
-    pub fn refresh_list(&mut self) {
-        self.read_dir();
-        // if self.is_searching() {
-        //     self.read_dir_filter();
-        // } else {
-        //     self.read_dir();
-        // }
-    }
-
     pub fn update_visible_entries(&mut self) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!(
             "dir_handling::update_visible_entries",
             self.list.len().to_string()
         );
-        self.visible_entries.clear();
-        let is_searching = self.is_searching();
-        let case_sensitive = self
-            .search
-            .as_ref()
-            .is_some_and(|search| search.case_sensitive);
-        let search = self
-            .search
-            .as_ref()
-            .map(|search| search.value.as_str())
-            .unwrap_or_default();
-        let search_len = search.len();
-        let collator = build_collator(case_sensitive);
-        for (i, entry) in self.list.iter().enumerate() {
-            if !self.show_hidden {
-                let name = entry.get_splitted_path().1;
-                if name.starts_with(".") || name.starts_with("$") {
-                    continue;
-                }
-            }
-            if is_searching {
-                let name = entry.get_splitted_path().1;
-                if search_len > name.len() {
-                    continue;
-                }
-                let chars = name.as_bytes();
-                let mut found = false;
-                for i in 0..=(name.len() - search_len) {
-                    if collator.compare_utf8(search.as_bytes(), &chars[i..i + search_len])
-                        == Ordering::Equal
-                    {
-                        found = true;
-                        log::error!(
-                            "MATCH: {}",
-                            name[i..i + search_len].escape_debug().to_string()
-                        );
-                        break;
-                    }
-                }
-                if !found {
-                    if name.contains(search) {
-                        log::error!("WTF: {}", name);
-                    } else {
-                        continue;
-                    }
-                }
-            }
-            self.visible_entries.push(i);
-        }
-    }
-
-    fn read_dir(&mut self) {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::dir_handling::read_dir");
-        self.list.clear();
-        let directories: &[PathBuf] = match &self.current_path {
-            CurrentPath::None => &[],
-            CurrentPath::One(path_buf) => &[path_buf.clone()],
-            CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
-        };
-        let depth = self.search_depth();
-
-        for d in directories {
-            #[cfg(feature = "profiling")]
-            puffin::profile_scope!("lwa_fm::dir_handling::read_dir::with_hidden::mapping");
-            database::read_dir(d, &mut self.list);
-            if depth > 1 {
-                for dir in walkdir::WalkDir::new(d)
-                    .follow_links(true)
-                    .min_depth(1)
-                    .max_depth(depth)
-                    .into_iter()
-                    .flatten()
-                    .filter(|e| e.file_type().is_dir())
-                {
-                    if !self.show_hidden {
-                        let mut parent = dir.path().parent();
-                        let mut depth = 0;
-                        let mut skip = false;
-                        while let Some(p) = parent {
-                            if p.iter().last().is_some_and(|f| {
-                                f.to_string_lossy().starts_with(".")
-                                    || f.to_string_lossy().starts_with("$")
-                            }) {
-                                skip = true;
-                                break;
-                            }
-                            depth += 1;
-                            if depth >= dir.depth() {
-                                break;
-                            }
-                            parent = p.parent();
-                        }
-                        if skip {
-                            continue;
-                        }
-                    }
-                    database::read_dir(dir.path(), &mut self.list);
-                }
-            }
-        }
-        self.list.dedup_by_key(|k| k.meta);
+        self.visible_entries =
+            filter_visible_entries(&self.list, self.show_hidden, self.search.as_ref());
     }
 
     pub fn sort_entries(&mut self, sort_settings: &DirectoryViewSettings) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::sort_entries");
         self.display_type = sort_settings.display_type;
-        match sort_settings.sorting {
-            Sort::Modified => {
-                if sort_settings.invert_sort {
-                    self.list.par_sort_unstable_by(|a, b| {
-                        let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(b.meta.modified_at.cmp(&a.meta.modified_at))
-                    });
-                } else {
-                    self.list.par_sort_unstable_by(|a, b| {
-                        let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(a.meta.modified_at.cmp(&b.meta.modified_at))
-                    });
-                }
-            }
-            Sort::Name => {
-                if sort_settings.invert_sort {
-                    self.list
-                        .par_sort_unstable_by(|a, b| b.sort_key.compare(&a.sort_key));
-                } else {
-                    self.list
-                        .par_sort_unstable_by(|a, b| a.sort_key.compare(&b.sort_key));
-                }
-            }
-            Sort::Created => {
-                if sort_settings.invert_sort {
-                    self.list.par_sort_unstable_by(|a, b| {
-                        let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(b.meta.created_at.cmp(&a.meta.created_at))
-                    });
-                } else {
-                    self.list.par_sort_unstable_by(|a, b| {
-                        let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(a.meta.created_at.cmp(&b.meta.created_at))
-                    });
-                }
-            }
-            Sort::Size => {
-                if sort_settings.invert_sort {
-                    self.list.par_sort_unstable_by(|a, b| {
-                        let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(b.meta.size.cmp(&a.meta.size))
-                    });
-                } else {
-                    self.list.par_sort_unstable_by(|a, b| {
-                        let file_type_cmp = a.is_file().cmp(&b.is_file());
-                        file_type_cmp.then(a.meta.size.cmp(&b.meta.size))
-                    });
-                }
-            }
-            Sort::Random => {
-                use rand::seq::SliceRandom;
-                use rand::thread_rng;
-                let mut rng = thread_rng();
-
-                self.list.shuffle(&mut rng);
-                return;
-            }
-        };
+        sort_entries_vec(&mut self.list, sort_settings);
     }
 
     pub fn deep_or_multiple_paths(&self) -> bool {
@@ -340,6 +175,152 @@ impl TabData {
             self.search.as_ref().map_or(1, |search| search.depth) > 1
         }
     }
+}
+
+pub fn read_directory(paths: &[PathBuf], depth: usize, show_hidden: bool) -> Vec<DirEntry> {
+    let mut list = Vec::new();
+    for d in paths {
+        database::read_dir(d, &mut list);
+        if depth > 1 {
+            for dir in walkdir::WalkDir::new(d)
+                .follow_links(true)
+                .min_depth(1)
+                .max_depth(depth)
+                .into_iter()
+                .flatten()
+                .filter(|e| e.file_type().is_dir())
+            {
+                if !show_hidden {
+                    let mut parent = dir.path().parent();
+                    let mut parent_depth = 0;
+                    let mut skip = false;
+                    while let Some(p) = parent {
+                        if p.iter().next_back().is_some_and(|f| {
+                            f.to_string_lossy().starts_with('.')
+                                || f.to_string_lossy().starts_with('$')
+                        }) {
+                            skip = true;
+                            break;
+                        }
+                        parent_depth += 1;
+                        if parent_depth >= dir.depth() {
+                            break;
+                        }
+                        parent = p.parent();
+                    }
+                    if skip {
+                        continue;
+                    }
+                }
+                database::read_dir(dir.path(), &mut list);
+            }
+        }
+    }
+    list.dedup_by_key(|k| k.meta);
+    list
+}
+
+pub fn sort_entries_vec(entries: &mut [DirEntry], settings: &DirectoryViewSettings) {
+    match settings.sorting {
+        Sort::Modified => {
+            if settings.invert_sort {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = a.is_file().cmp(&b.is_file());
+                    file_type_cmp.then(b.meta.modified_at.cmp(&a.meta.modified_at))
+                });
+            } else {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = a.is_file().cmp(&b.is_file());
+                    file_type_cmp.then(a.meta.modified_at.cmp(&b.meta.modified_at))
+                });
+            }
+        }
+        Sort::Name => {
+            if settings.invert_sort {
+                entries.par_sort_unstable_by(|a, b| b.sort_key.compare(&a.sort_key));
+            } else {
+                entries.par_sort_unstable_by(|a, b| a.sort_key.compare(&b.sort_key));
+            }
+        }
+        Sort::Created => {
+            if settings.invert_sort {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = a.is_file().cmp(&b.is_file());
+                    file_type_cmp.then(b.meta.created_at.cmp(&a.meta.created_at))
+                });
+            } else {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = a.is_file().cmp(&b.is_file());
+                    file_type_cmp.then(a.meta.created_at.cmp(&b.meta.created_at))
+                });
+            }
+        }
+        Sort::Size => {
+            if settings.invert_sort {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = a.is_file().cmp(&b.is_file());
+                    file_type_cmp.then(b.meta.size.cmp(&a.meta.size))
+                });
+            } else {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = a.is_file().cmp(&b.is_file());
+                    file_type_cmp.then(a.meta.size.cmp(&b.meta.size))
+                });
+            }
+        }
+        Sort::Random => {
+            use rand::seq::SliceRandom;
+            use rand::thread_rng;
+            let mut rng = thread_rng();
+            entries.shuffle(&mut rng);
+        }
+    }
+}
+
+pub fn filter_visible_entries(
+    entries: &[DirEntry],
+    show_hidden: bool,
+    search: Option<&Search>,
+) -> Vec<usize> {
+    let mut visible = Vec::new();
+    let is_searching = search.is_some();
+    let case_sensitive = search.is_some_and(|s| s.case_sensitive);
+    let search_value = search.map(|s| s.value.as_str()).unwrap_or_default();
+    let search_len = search_value.len();
+    let collator = build_collator(case_sensitive);
+    for (i, entry) in entries.iter().enumerate() {
+        if !show_hidden {
+            let name = entry.get_splitted_path().1;
+            if name.starts_with('.') || name.starts_with('$') {
+                continue;
+            }
+        }
+        if is_searching {
+            let name = entry.get_splitted_path().1;
+            if search_len > name.len() {
+                continue;
+            }
+            let chars = name.as_bytes();
+            let mut found = false;
+            for j in 0..=(name.len() - search_len) {
+                if collator.compare_utf8(search_value.as_bytes(), &chars[j..j + search_len])
+                    == Ordering::Equal
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                if name.contains(search_value) {
+                    log::error!("WTF: {name}");
+                } else {
+                    continue;
+                }
+            }
+        }
+        visible.push(i);
+    }
+    visible
 }
 
 fn linked_watch_roots(root: &Path, depth: usize) -> BTreeSet<PathBuf> {
