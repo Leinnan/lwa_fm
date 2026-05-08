@@ -77,6 +77,9 @@ impl TabData {
         self.show_hidden = data_source
             .data_get_path_or_persisted::<DirectoryShowHidden>(&self.current_path)
             .0;
+        let view_settings =
+            data_source.data_get_path_or_persisted::<DirectoryViewSettings>(&self.current_path);
+        self.display_type = view_settings.data.display_type;
         if let Some(path) = self.current_path.get_path() {
             self.top_display_path.build(&path, self.show_hidden);
         }

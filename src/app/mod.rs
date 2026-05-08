@@ -506,6 +506,16 @@ impl App {
             }
             ActionToPerform::ViewSettingsChanged(_) => {
                 TabAction::FilesSort.schedule_active_tab();
+                let Some(active_path) = self.tabs.get_current_path() else {
+                    return;
+                };
+                for tab_id in self.tabs.get_tab_ids() {
+                    if let Some(tab) = self.tabs.get_tab_by_id(tab_id)
+                        && tab.current_path.single_path() == Some(active_path.clone())
+                    {
+                        TabAction::FilesSort.schedule_tab(tab_id);
+                    }
+                }
             }
             ActionToPerform::ToggleModalWindow(modal_window) => {
                 if let Some(modal) = &self.display_modal {
