@@ -198,11 +198,55 @@ impl DisplayType {
     }
 }
 
+#[derive(Deserialize, Serialize, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchTermType {
+    #[default]
+    Plain,
+    Glob,
+    Regex,
+}
+
+#[derive(Deserialize, Serialize, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchMode {
+    #[default]
+    All,
+    Any,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct SearchTerm {
+    pub pattern: String,
+    pub term_type: SearchTermType,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct SavedSearch {
+    pub name: String,
+    pub search: Search,
+}
+
+#[derive(Deserialize, Serialize, Default, Debug, Clone)]
+pub struct SavedSearches {
+    pub searches: Vec<SavedSearch>,
+}
+
 #[derive(Deserialize, Serialize, Default, Debug, Clone)]
 pub struct Search {
     pub value: String,
     pub depth: usize,
     pub case_sensitive: bool,
+    #[serde(default)]
+    pub term_type: SearchTermType,
+    #[serde(default)]
+    pub extra_dirs: Vec<PathBuf>,
+    #[serde(default)]
+    pub terms: Vec<SearchTerm>,
+    #[serde(default)]
+    pub match_mode: MatchMode,
+    #[serde(skip)]
+    pub new_dir_input: String,
+    #[serde(skip)]
+    pub save_name_input: String,
 }
 
 #[derive(Deserialize, Serialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -351,7 +395,8 @@ impl App {
                         };
                         path.print_from_lua();
                         tab.set_path(path);
-                        tab.refresh_generation += 1;
+                        tab.refresh_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
                             let new_data = match tab.current_path.single_path() {
                                 Some(p) => {
@@ -392,18 +437,24 @@ impl App {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
                         };
-                        tab.refresh_generation += 1;
+                        tab.refresh_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         if tab.loading {
                             tab.pending_refresh = true;
                             return;
                         }
                         tab.update_settings(ctx);
 
-                        let directories: Vec<PathBuf> = match &tab.current_path {
+                        let mut directories: Vec<PathBuf> = match &tab.current_path {
                             CurrentPath::None => vec![],
                             CurrentPath::One(path_buf) => vec![path_buf.clone()],
                             CurrentPath::Multiple(path_bufs) => path_bufs.clone(),
                         };
+                        if let Some(search) = &tab.search {
+                            directories.extend(search.extra_dirs.iter().cloned());
+                            directories.sort();
+                            directories.dedup();
+                        }
                         let depth = tab.search_depth();
                         let show_hidden = tab.show_hidden;
                         let search = tab.search.clone();
@@ -413,9 +464,14 @@ impl App {
                             ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&current_path);
 
                         tab.loading = true;
-                        let generation = tab.refresh_generation;
+                        let refresh_gen = std::sync::Arc::clone(&tab.refresh_generation);
+                        let generation = refresh_gen.load(std::sync::atomic::Ordering::SeqCst);
 
                         std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            if refresh_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                                return;
+                            }
                             let mut list = crate::app::dir_handling::read_directory(
                                 &directories,
                                 depth,
@@ -457,7 +513,11 @@ impl App {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
                         };
-                        if tab.refresh_generation != generation {
+                        if tab
+                            .refresh_generation
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            != generation
+                        {
                             tab.loading = false;
                             if tab.pending_refresh {
                                 tab.pending_refresh = false;
@@ -501,6 +561,93 @@ impl App {
                             };
                             self.handle_action(ctx, previous_path_action);
                         }
+                    }
+                    commands::TabAction::AddSearchDir(path) => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        if let Some(search) = &mut tab.search {
+                            if path.is_dir() && !search.extra_dirs.contains(&path) {
+                                search.extra_dirs.push(path);
+                            }
+                        }
+                        TabAction::RequestFilesRefresh.schedule_tab(tab_id);
+                    }
+                    commands::TabAction::RemoveSearchDir(index) => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        if let Some(search) = &mut tab.search
+                            && index < search.extra_dirs.len()
+                        {
+                            search.extra_dirs.remove(index);
+                        }
+                        TabAction::RequestFilesRefresh.schedule_tab(tab_id);
+                    }
+                    commands::TabAction::AddSearchTerm(term) => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        if let Some(search) = &mut tab.search {
+                            search.terms.push(term);
+                        }
+                        TabAction::FilterChanged.schedule_tab(tab_id);
+                    }
+                    commands::TabAction::RemoveSearchTerm(index) => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        if let Some(search) = &mut tab.search
+                            && index < search.terms.len()
+                        {
+                            search.terms.remove(index);
+                        }
+                        TabAction::FilterChanged.schedule_tab(tab_id);
+                    }
+                    commands::TabAction::SetMatchMode(mode) => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        if let Some(search) = &mut tab.search {
+                            search.match_mode = mode;
+                        }
+                        TabAction::FilterChanged.schedule_tab(tab_id);
+                    }
+                    commands::TabAction::SaveSearch(name) => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        if let Some(search) = &tab.search {
+                            let mut saved = ctx
+                                .data_get_persisted::<SavedSearches>()
+                                .unwrap_or_default();
+                            saved.searches.retain(|s| s.name != name);
+                            saved.searches.push(SavedSearch {
+                                name: name.clone(),
+                                search: search.clone(),
+                            });
+                            ctx.data_set_persisted(saved);
+                            toast!(Success, "Saved search: {name}");
+                        }
+                    }
+                    commands::TabAction::LoadSavedSearch(name) => {
+                        let saved = ctx
+                            .data_get_persisted::<SavedSearches>()
+                            .unwrap_or_default();
+                        if let Some(ss) = saved.searches.iter().find(|s| s.name == name) {
+                            let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                                return;
+                            };
+                            tab.search = Some(ss.search.clone());
+                            TabAction::RequestFilesRefresh.schedule_tab(tab_id);
+                        }
+                    }
+                    commands::TabAction::DeleteSavedSearch(name) => {
+                        let mut saved = ctx
+                            .data_get_persisted::<SavedSearches>()
+                            .unwrap_or_default();
+                        saved.searches.retain(|s| s.name != name);
+                        ctx.data_set_persisted(saved);
                     }
                 }
             }

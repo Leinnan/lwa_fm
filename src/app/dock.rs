@@ -16,6 +16,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui::Vec2;
 use egui_taffy::{
@@ -232,7 +233,7 @@ pub struct TabData {
     pub display_type: DisplayType,
     pub search: Option<Search>,
     pub loading: bool,
-    pub(crate) refresh_generation: u64,
+    pub(crate) refresh_generation: Arc<AtomicU64>,
     pub(crate) pending_refresh: bool,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
@@ -330,9 +331,15 @@ impl TabData {
         match &self.search {
             Some(Search {
                 value,
+                terms,
                 depth: _,
                 case_sensitive: _,
-            }) => !value.is_empty(),
+                term_type: _,
+                extra_dirs: _,
+                match_mode: _,
+                new_dir_input: _,
+                save_name_input: _,
+            }) => !value.is_empty() || !terms.is_empty(),
             None => false,
         }
     }
@@ -349,7 +356,7 @@ impl TabData {
             display_type: DisplayType::default(),
             search: None,
             loading: false,
-            refresh_generation: 0,
+            refresh_generation: Arc::new(AtomicU64::new(0)),
             pending_refresh: false,
             undoer: Undoer::default(),
             top_display_path,

@@ -7,6 +7,7 @@ use std::{
 use super::{ActionToPerform, App, Sort};
 use crate::{
     app::{
+        MatchMode, SearchTerm, SearchTermType,
         commands::TabAction,
         dir_handling::get_directories_recursive,
         directory_path_info::DirectoryPathInfo,
@@ -265,15 +266,112 @@ impl App {
                                     let mut search_changed = is_searching != search_visible;
                                     let mut search_target_changed = false;
                                     if let Some(search) = &mut current_tab.search {
+                                        let saved_searches = ui
+                                            .data_get_persisted::<crate::app::SavedSearches>()
+                                            .unwrap_or_default();
+                                        ui.menu_button("📋", |ui| {
+                                            if saved_searches.searches.is_empty() {
+                                                ui.label("No saved searches");
+                                            } else {
+                                                ui.label("Load saved:");
+                                                for ss in &saved_searches.searches {
+                                                    ui.horizontal(|ui| {
+                                                        if ui
+                                                            .button("▶")
+                                                            .on_hover_text("Load")
+                                                            .clicked()
+                                                        {
+                                                            TabAction::LoadSavedSearch(
+                                                                ss.name.clone(),
+                                                            )
+                                                            .schedule_tab(current_tab.id);
+                                                            ui.close_menu();
+                                                        }
+                                                        if ui
+                                                            .button("🗑")
+                                                            .on_hover_text("Delete")
+                                                            .clicked()
+                                                        {
+                                                            TabAction::DeleteSavedSearch(
+                                                                ss.name.clone(),
+                                                            )
+                                                            .schedule_tab(current_tab.id);
+                                                            ui.close_menu();
+                                                        }
+                                                        ui.label(&ss.name);
+                                                    });
+                                                }
+                                                ui.separator();
+                                            }
+                                            ui.label("Save current as:");
+                                            ui.add(
+                                                egui::TextEdit::singleline(
+                                                    &mut search.save_name_input,
+                                                )
+                                                .hint_text("name...")
+                                                .desired_width(100.0),
+                                            );
+                                            if ui.button("Save").clicked()
+                                                && !search.save_name_input.trim().is_empty()
+                                            {
+                                                TabAction::SaveSearch(
+                                                    search.save_name_input.trim().to_string(),
+                                                )
+                                                .schedule_tab(current_tab.id);
+                                                search.save_name_input.clear();
+                                                ui.close_menu();
+                                            }
+                                        });
                                         search_changed |= ui
                                             .toggle_value(&mut search.case_sensitive, "🇨")
                                             .on_hover_text("Case sensitive")
                                             .changed();
+                                        let previous_type = search.term_type;
+                                        egui::ComboBox::from_id_salt("search_term_type")
+                                            .width(80.0)
+                                            .selected_text(match search.term_type {
+                                                SearchTermType::Plain => "Plain",
+                                                SearchTermType::Glob => "Glob",
+                                                SearchTermType::Regex => "Regex",
+                                            })
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut search.term_type,
+                                                    SearchTermType::Plain,
+                                                    "Plain",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut search.term_type,
+                                                    SearchTermType::Glob,
+                                                    "Glob",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut search.term_type,
+                                                    SearchTermType::Regex,
+                                                    "Regex",
+                                                );
+                                            });
+                                        search_changed |= search.term_type != previous_type;
                                         let search_input = ui.add(
                                             egui::TextEdit::singleline(&mut search.value)
                                                 .hint_text("Search"),
                                         );
                                         search_changed |= search_input.changed();
+                                        if ui
+                                            .add_enabled(
+                                                !search.value.is_empty(),
+                                                egui::Button::new("+"),
+                                            )
+                                            .on_hover_text("Add as search term")
+                                            .clicked()
+                                        {
+                                            TabAction::AddSearchTerm(SearchTerm {
+                                                pattern: std::mem::take(&mut search.value),
+                                                term_type: search.term_type,
+                                            })
+                                            .schedule_tab(current_tab.id);
+                                            search_changed = true;
+                                        }
                                         search_target_changed |= ui
                                             .add(
                                                 egui::Slider::new(&mut search.depth, 1..=7)
@@ -284,6 +382,149 @@ impl App {
                                             )
                                             .on_hover_text("Search depth")
                                             .changed();
+                                        {
+                                            let showing = current_tab.visible_entries.len();
+                                            let total = current_tab.list.len();
+                                            if showing != total {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{showing}/{total}"
+                                                    ))
+                                                    .color(egui::Color32::GRAY),
+                                                );
+                                            }
+                                        }
+                                        let has_advanced = !search.terms.is_empty()
+                                            || !search.extra_dirs.is_empty();
+                                        ui.menu_button(
+                                            egui::RichText::new(format!(
+                                                "⚙{}",
+                                                if has_advanced { " ●" } else { "" }
+                                            )),
+                                            |ui| {
+                                                if !search.terms.is_empty() {
+                                                    ui.add_enabled_ui(false, |ui| {
+                                                        ui.label("Match mode:");
+                                                    });
+                                                    if ui
+                                                        .selectable_label(
+                                                            search.match_mode == MatchMode::All,
+                                                            "AND",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        search.match_mode = MatchMode::All;
+                                                        search_changed = true;
+                                                    }
+                                                    if ui
+                                                        .selectable_label(
+                                                            search.match_mode == MatchMode::Any,
+                                                            "OR",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        search.match_mode = MatchMode::Any;
+                                                        search_changed = true;
+                                                    }
+                                                    ui.add_enabled_ui(false, |ui| {
+                                                        ui.label("Current terms:");
+                                                    });
+                                                    let mut term_to_remove: Option<usize> = None;
+                                                    for (i, term) in search.terms.iter().enumerate()
+                                                    {
+                                                        ui.horizontal(|ui| {
+                                                            let color = match term.term_type {
+                                                                SearchTermType::Glob => {
+                                                                    egui::Color32::GREEN
+                                                                }
+                                                                SearchTermType::Regex => {
+                                                                    egui::Color32::LIGHT_BLUE
+                                                                }
+                                                                SearchTermType::Plain => {
+                                                                    egui::Color32::WHITE
+                                                                }
+                                                            };
+                                                            ui.label(
+                                                                egui::RichText::new(&term.pattern)
+                                                                    .color(color),
+                                                            );
+                                                            if ui.button("✕").clicked() {
+                                                                term_to_remove = Some(i);
+                                                            }
+                                                        });
+                                                    }
+                                                    if let Some(i) = term_to_remove {
+                                                        TabAction::RemoveSearchTerm(i)
+                                                            .schedule_tab(current_tab.id);
+                                                        search_changed = true;
+                                                        ui.close_menu();
+                                                    }
+                                                    ui.separator();
+                                                }
+                                                ui.add_enabled_ui(false, |ui| {
+                                                    ui.label("Search directories:");
+                                                });
+                                                if !search.extra_dirs.is_empty() {
+                                                    let mut dir_to_remove: Option<usize> = None;
+                                                    for (i, dir) in
+                                                        search.extra_dirs.iter().enumerate()
+                                                    {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(
+                                                                dir.file_name()
+                                                                    .map(|n| n.to_string_lossy())
+                                                                    .unwrap_or_else(|| {
+                                                                        dir.to_string_lossy()
+                                                                    }),
+                                                            )
+                                                            .on_hover_text(dir.to_string_lossy());
+                                                            if ui.button("✕").clicked() {
+                                                                dir_to_remove = Some(i);
+                                                            }
+                                                        });
+                                                    }
+                                                    if let Some(i) = dir_to_remove {
+                                                        TabAction::RemoveSearchDir(i)
+                                                            .schedule_tab(current_tab.id);
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                                let dir_edit = ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut search.new_dir_input,
+                                                    )
+                                                    .hint_text("Add path...")
+                                                    .desired_width(180.0),
+                                                );
+                                                if (dir_edit.lost_focus()
+                                                    && ui
+                                                        .input(|i| i.key_pressed(egui::Key::Enter)))
+                                                    || ui
+                                                        .button("+")
+                                                        .on_hover_text("Add directory")
+                                                        .clicked()
+                                                {
+                                                    let path =
+                                                        PathBuf::from(search.new_dir_input.trim());
+                                                    if !path.as_os_str().is_empty() {
+                                                        TabAction::AddSearchDir(path)
+                                                            .schedule_tab(current_tab.id);
+                                                        search.new_dir_input.clear();
+                                                    }
+                                                }
+                                                if !search.terms.is_empty()
+                                                    || !search.extra_dirs.is_empty()
+                                                {
+                                                    ui.separator();
+                                                    if ui.button("✕ Clear all").clicked() {
+                                                        search.terms.clear();
+                                                        search.extra_dirs.clear();
+                                                        search_changed = true;
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            },
+                                        );
                                         let favorites = ui
                                             .data_get_persisted::<Locations>()
                                             .unwrap_or_default();

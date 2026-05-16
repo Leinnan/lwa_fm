@@ -12,7 +12,7 @@ use rayon::slice::ParallelSliceMut;
 
 use crate::{
     app::{
-        Search, database,
+        MatchMode, Search, SearchTermType, database,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
     },
@@ -103,6 +103,10 @@ impl TabData {
     pub fn deep_or_multiple_paths(&self) -> bool {
         self.current_path.multiple_paths()
             || self.search.as_ref().map_or(1, |search| search.depth) > 1
+            || self
+                .search
+                .as_ref()
+                .is_some_and(|s| !s.extra_dirs.is_empty())
     }
 }
 
@@ -206,17 +210,134 @@ pub fn sort_entries_vec(entries: &mut [DirEntry], settings: &DirectoryViewSettin
     }
 }
 
+enum CompiledTerm {
+    Plain(String),
+    Glob(glob::Pattern),
+    Regex(regex::Regex),
+}
+
+impl CompiledTerm {
+    fn matches(&self, name: &str, case_sensitive: bool) -> bool {
+        match self {
+            Self::Plain(pattern) => {
+                if case_sensitive {
+                    name.contains(pattern.as_str())
+                } else {
+                    name.to_lowercase().contains(pattern.as_str())
+                }
+            }
+            Self::Glob(pattern) => pattern.matches(name),
+            Self::Regex(re) => re.is_match(name),
+        }
+    }
+}
+
+fn compile_term(
+    pattern: &str,
+    term_type: SearchTermType,
+    case_sensitive: bool,
+) -> Option<CompiledTerm> {
+    match term_type {
+        SearchTermType::Plain => {
+            if case_sensitive {
+                Some(CompiledTerm::Plain(pattern.to_string()))
+            } else {
+                Some(CompiledTerm::Plain(pattern.to_lowercase()))
+            }
+        }
+        SearchTermType::Glob => glob::Pattern::new(pattern).ok().map(CompiledTerm::Glob),
+        SearchTermType::Regex => regex::Regex::new(pattern).ok().map(CompiledTerm::Regex),
+    }
+}
+
+struct CompiledSearch {
+    terms: Vec<CompiledTerm>,
+    mode: MatchMode,
+    has_plain: bool,
+}
+
+impl CompiledSearch {
+    fn matches(
+        &self,
+        name: &str,
+        case_sensitive: bool,
+        collator: &Option<CollatorBorrowed<'_>>,
+    ) -> bool {
+        let matches_one = |term: &CompiledTerm| -> bool {
+            match term {
+                CompiledTerm::Plain(pattern) => {
+                    let search_len = pattern.len();
+                    if search_len > name.len() {
+                        return false;
+                    }
+                    let chars = name.as_bytes();
+                    let mut found = false;
+                    if let Some(collator) = collator {
+                        for j in 0..=(name.len() - search_len) {
+                            if collator.compare_utf8(pattern.as_bytes(), &chars[j..j + search_len])
+                                == Ordering::Equal
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !found && name.contains(pattern.as_str()) {
+                        log::error!("WTF: {name}");
+                    }
+                    found
+                }
+                CompiledTerm::Glob(glob) => glob.matches(name),
+                CompiledTerm::Regex(re) => re.is_match(name),
+            }
+        };
+        match self.mode {
+            MatchMode::All => self.terms.iter().all(matches_one),
+            MatchMode::Any => self.terms.iter().any(matches_one),
+        }
+    }
+}
+
 pub fn filter_visible_entries(
     entries: &[DirEntry],
     show_hidden: bool,
     search: Option<&Search>,
 ) -> Vec<usize> {
     let mut visible = Vec::new();
-    let is_searching = search.is_some();
     let case_sensitive = search.is_some_and(|s| s.case_sensitive);
-    let search_value = search.map(|s| s.value.as_str()).unwrap_or_default();
-    let search_len = search_value.len();
-    let collator = build_collator(case_sensitive);
+    let compiled_search = search.and_then(|s| {
+        let terms: Vec<CompiledTerm> = if !s.terms.is_empty() {
+            s.terms
+                .iter()
+                .filter_map(|st| compile_term(&st.pattern, st.term_type, case_sensitive))
+                .collect()
+        } else if !s.value.is_empty() {
+            compile_term(&s.value, s.term_type, case_sensitive)
+                .into_iter()
+                .collect()
+        } else {
+            return None;
+        };
+        if terms.is_empty() {
+            return None;
+        }
+        let has_plain = s
+            .terms
+            .iter()
+            .any(|st| st.term_type == SearchTermType::Plain)
+            || (s.terms.is_empty() && s.term_type == SearchTermType::Plain);
+        Some(CompiledSearch {
+            terms,
+            mode: s.match_mode,
+            has_plain,
+        })
+    });
+    let is_searching = compiled_search.is_some();
+    let collator = if is_searching && compiled_search.as_ref().is_some_and(|cs| cs.has_plain) {
+        Some(build_collator(case_sensitive))
+    } else {
+        None
+    };
     for (i, entry) in entries.iter().enumerate() {
         if !show_hidden {
             let name = entry.get_splitted_path().1;
@@ -224,27 +345,10 @@ pub fn filter_visible_entries(
                 continue;
             }
         }
-        if is_searching {
+        if let Some(ref cs) = compiled_search {
             let name = entry.get_splitted_path().1;
-            if search_len > name.len() {
+            if !cs.matches(name, case_sensitive, &collator) {
                 continue;
-            }
-            let chars = name.as_bytes();
-            let mut found = false;
-            for j in 0..=(name.len() - search_len) {
-                if collator.compare_utf8(search_value.as_bytes(), &chars[j..j + search_len])
-                    == Ordering::Equal
-                {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                if name.contains(search_value) {
-                    log::error!("WTF: {name}");
-                } else {
-                    continue;
-                }
             }
         }
         visible.push(i);

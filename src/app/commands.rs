@@ -1,4 +1,4 @@
-use crate::app::{DataSource, dock::CurrentPath};
+use crate::app::{DataSource, MatchMode, SearchTerm, dock::CurrentPath};
 use crate::data::files::DirEntry;
 use crossbeam::queue::SegQueue;
 use std::{borrow::Cow, fmt::Display, path::PathBuf, str::FromStr};
@@ -35,6 +35,22 @@ pub enum TabAction {
     SearchInFavorites(bool),
     /// Search filter changed
     FilterChanged,
+    /// Add a directory to search scope
+    AddSearchDir(PathBuf),
+    /// Remove a directory from search scope by index
+    RemoveSearchDir(usize),
+    /// Add a search term
+    AddSearchTerm(SearchTerm),
+    /// Remove a search term by index
+    RemoveSearchTerm(usize),
+    /// Set match mode for multi-term search
+    SetMatchMode(MatchMode),
+    /// Save current search configuration
+    SaveSearch(String),
+    /// Load a saved search by name
+    LoadSavedSearch(String),
+    /// Delete a saved search by name
+    DeleteSavedSearch(String),
     /// Background thread has finished loading directory entries.
     FilesLoaded {
         list: Vec<DirEntry>,
@@ -121,6 +137,14 @@ impl From<&ActionToPerform> for Cow<'static, str> {
                     }
                 }
                 TabAction::FilterChanged => Cow::Borrowed("Filter changed"),
+                TabAction::AddSearchDir(_) => Cow::Borrowed("Add search dir"),
+                TabAction::RemoveSearchDir(_) => Cow::Borrowed("Remove search dir"),
+                TabAction::AddSearchTerm(_) => Cow::Borrowed("Add search term"),
+                TabAction::RemoveSearchTerm(_) => Cow::Borrowed("Remove search term"),
+                TabAction::SetMatchMode(_) => Cow::Borrowed("Set match mode"),
+                TabAction::SaveSearch(_) => Cow::Borrowed("Save search"),
+                TabAction::LoadSavedSearch(_) => Cow::Borrowed("Load search"),
+                TabAction::DeleteSavedSearch(_) => Cow::Borrowed("Delete search"),
                 TabAction::FilesLoaded { .. } => Cow::Borrowed("Files loaded"),
             },
             ActionToPerform::AddToFavorites(_) => Cow::Borrowed("Add to favorites"),
