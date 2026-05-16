@@ -68,8 +68,6 @@ impl TabData {
         if let Some(path) = self.current_path.get_path() {
             self.top_display_path.build(&path, self.show_hidden);
         }
-        // self.start_watching_directory();
-        // self.action_to_perform = Some(ActionToPerform::RequestFilesRefresh);
         &self.current_path
     }
 
@@ -84,75 +82,6 @@ impl TabData {
             self.top_display_path.build(&path, self.show_hidden);
         }
     }
-
-    // /// Start watching the current directory for changes
-    // pub fn start_watching_directory(&mut self) {
-    //     #[cfg(feature = "profiling")]
-    //     puffin::profile_scope!("lwa_fm::dir_handling::start_watching_directory");
-    //     let Some(ref mut watcher) = self.watcher else {
-    //         return;
-    //     };
-    //     match &self.current_path {
-    //         CurrentPath::One(path_buf) => {
-    //             if let Err(e) = watcher.watch_directory(path_buf) {
-    //                 toast!(Error, "Failed to watch directory: {}", e);
-    //             }
-    //         }
-    //         _ => {
-    //             watcher.stop_watching();
-    //         }
-    //     }
-    // }
-
-    // #[allow(unused)]
-    // /// Stop watching the current directory
-    // pub fn stop_watching_directory(&mut self) {
-    //     if let Some(ref mut watcher) = self.watcher {
-    //         watcher.stop_watching();
-    //     }
-    // }
-    // /// Check for file system events and handle them
-    // pub fn check_for_file_system_events(&mut self) -> bool {
-    //     let mut should_refresh = false;
-    //     if let Some(ref mut watcher) = self.watcher {
-    //         // Process all pending events
-    //         while let Some(event) = watcher.try_recv_event() {
-    //             should_refresh = true;
-    //             match event {
-    //                 FileSystemEvent::Created(path) => {
-    //                     if let Some(file_name) = path.file_name() {
-    //                         toast!(Info, "File created: {}", file_name.to_string_lossy());
-    //                     }
-    //                 }
-    //                 FileSystemEvent::Modified(path) => {
-    //                     if let Some(file_name) = path.file_name() {
-    //                         toast!(Info, "File modified: {}", file_name.to_string_lossy());
-    //                     }
-    //                 }
-    //                 FileSystemEvent::Deleted(path) => {
-    //                     if let Some(file_name) = path.file_name() {
-    //                         toast!(Warning, "File deleted: {}", file_name.to_string_lossy());
-    //                     }
-    //                 }
-    //                 FileSystemEvent::Renamed { from, to } => {
-    //                     if let (Some(from_name), Some(to_name)) = (from.file_name(), to.file_name())
-    //                     {
-    //                         toast!(
-    //                             Info,
-    //                             "File renamed: {} → {}",
-    //                             from_name.to_string_lossy(),
-    //                             to_name.to_string_lossy()
-    //                         );
-    //                     }
-    //                 }
-    //                 FileSystemEvent::Error(err) => {
-    //                     toast!(Error, "File system error: {}", err);
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     should_refresh
-    // }
 
     pub fn update_visible_entries(&mut self) {
         #[cfg(feature = "profiling")]
@@ -172,11 +101,8 @@ impl TabData {
     }
 
     pub fn deep_or_multiple_paths(&self) -> bool {
-        if self.current_path.multiple_paths() {
-            return true;
-        } else {
-            self.search.as_ref().map_or(1, |search| search.depth) > 1
-        }
+        self.current_path.multiple_paths()
+            || self.search.as_ref().map_or(1, |search| search.depth) > 1
     }
 }
 
@@ -219,7 +145,7 @@ pub fn read_directory(paths: &[PathBuf], depth: usize, show_hidden: bool) -> Vec
             }
         }
     }
-    list.dedup_by_key(|k| k.meta);
+    list.dedup_by(|a, b| a.path == b.path);
     list
 }
 

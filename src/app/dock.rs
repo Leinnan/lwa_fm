@@ -48,6 +48,9 @@ pub fn populate_time_pool(components: impl Iterator<Item = ElapsedTime>, ui: &Co
     TIME_POOL.with_borrow_mut(|pool| {
         for component in components {
             if !pool.contains_key(&component) {
+                if pool.len() >= 512 {
+                    pool.clear();
+                }
                 let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
                     component.to_string(),
                     FontId::default(),
@@ -63,7 +66,7 @@ pub fn populate_time_pool(components: impl Iterator<Item = ElapsedTime>, ui: &Co
                 _ = pool.insert(component, galley);
             }
         }
-    })
+    });
 }
 
 thread_local! {
@@ -73,8 +76,11 @@ pub fn populate_sizes_pool(components: impl Iterator<Item = u32>, ui: &Context) 
     SIZES_POOL.with_borrow_mut(|pool| {
         for component in components {
             if !pool.contains_key(&component) {
+                if pool.len() >= 512 {
+                    pool.clear();
+                }
                 let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-                    crate::helper::format_bytes_simple(component as u64),
+                    crate::helper::format_bytes_simple(u64::from(component)),
                     FontId::default(),
                     Color32::DARK_GRAY,
                 )))
@@ -88,7 +94,7 @@ pub fn populate_sizes_pool(components: impl Iterator<Item = u32>, ui: &Context) 
                 _ = pool.insert(component, galley);
             }
         }
-    })
+    });
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Default, Hash)]
@@ -226,7 +232,6 @@ pub struct TabData {
     pub display_type: DisplayType,
     pub search: Option<Search>,
     pub loading: bool,
-    // pub watcher: Option<DirectoryWatcher>,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
     pub top_display_path: TopDisplayPath,
@@ -342,7 +347,6 @@ impl TabData {
             display_type: DisplayType::default(),
             search: None,
             loading: false,
-            // watcher: DirectoryWatcher::new().ok(),
             undoer: Undoer::default(),
             top_display_path,
         };

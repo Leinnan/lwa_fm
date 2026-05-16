@@ -39,12 +39,6 @@ thread_local! {
         Lua::new()
     });
 }
-// fn print_from_lua() {
-//     LUA_INSTANCE.with_borrow(|lua| match lua.load("print(\"Hello!\")").exec() {
-//         Ok(_) => println!("Lua print executed successfully"),
-//         Err(err) => println!("Lua print failed: {}", err),
-//     });
-// }
 
 pub static TOASTS: std::sync::LazyLock<egui::mutex::RwLock<egui_notify::Toasts>> =
     std::sync::LazyLock::new(|| {
@@ -397,6 +391,9 @@ impl App {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
                         };
+                        if tab.loading {
+                            return;
+                        }
                         tab.update_settings(ctx);
 
                         let directories: Vec<PathBuf> = match &tab.current_path {

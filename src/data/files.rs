@@ -4,7 +4,9 @@ use crate::{
     helper::PathHelper,
 };
 use bincode::{Decode, Encode};
-use rayon::iter::{IntoParallelRefIterator, ParallelBridge, ParallelExtend, ParallelIterator};
+use rayon::iter::{
+    IntoParallelIterator, IntoParallelRefIterator, ParallelExtend, ParallelIterator,
+};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, fs::FileType, path::Path};
 
@@ -58,14 +60,9 @@ impl SortKey {
     }
     #[inline]
     pub fn new_path(base_path: &str, is_file: bool) -> Self {
-        let path = if base_path.len() > 15 {
-            base_path.split_at(15).0
-        } else {
-            base_path
-        };
         let mut sort_key = Vec::with_capacity(30);
-        _ = COLLATER.write_sort_key_to(path, &mut sort_key);
-        let sort_key = sort_key.try_into().unwrap_or_else(|_| empty());
+        _ = COLLATER.write_sort_key_to(base_path, &mut sort_key);
+        let sort_key = sort_key.try_into().unwrap_or(empty());
         Self { is_file, sort_key }
     }
 }
@@ -87,15 +84,18 @@ impl DirContent {
         let Ok(paths) = paths else {
             return None;
         };
-        let entries: Vec<DirEntryData> = paths
-            .par_bridge()
-            .filter_map(|e| {
-                #[cfg(feature = "profiling")]
-                puffin::profile_scope!("lwa_fm::dir_handling::db_read::db_mapping::entry");
-                let e = e.ok()?;
-                e.try_into().ok()
-            })
-            .collect();
+        let dir_entries: Vec<std::fs::DirEntry> = paths.filter_map(Result::ok).collect();
+        let entries: Vec<DirEntryData> = if dir_entries.len() > 100 {
+            dir_entries
+                .into_par_iter()
+                .filter_map(|e| e.try_into().ok())
+                .collect()
+        } else {
+            dir_entries
+                .into_iter()
+                .filter_map(|e| e.try_into().ok())
+                .collect()
+        };
         Some(Self {
             path: dir.to_full_path_string(),
             entries,
@@ -105,11 +105,18 @@ impl DirContent {
     #[inline]
     pub fn populate(&self, entries: &mut Vec<DirEntry>) {
         let file_name_index = self.path.len() + 1;
-        entries.par_extend(self.entries.par_iter().map(|e| DirEntry {
-            meta: e.meta,
-            path: format!("{}{}{}", self.path, std::path::MAIN_SEPARATOR, &e.file_name),
-            file_name_index,
-            sort_key: e.sort_key,
+        let prefix = self.path.as_str();
+        entries.par_extend(self.entries.par_iter().map(|e| {
+            let mut path = String::with_capacity(self.path.len() + 1 + e.file_name.len());
+            path.push_str(prefix);
+            path.push(std::path::MAIN_SEPARATOR);
+            path.push_str(&e.file_name);
+            DirEntry {
+                meta: e.meta,
+                path,
+                file_name_index,
+                sort_key: e.sort_key,
+            }
         }));
     }
 }
@@ -138,7 +145,7 @@ pub struct DirEntry {
     pub meta: DirEntryMetaData,
     pub path: String,
     file_name_index: usize,
-    pub sort_key: SortKey, // pub sort_key: SmallVec<[u8; 40]>,
+    pub sort_key: SortKey,
 }
 
 impl DirEntry {
@@ -256,9 +263,6 @@ impl TryFrom<std::fs::DirEntry> for DirEntry {
             meta
         };
 
-        // let mut sort_key = SmallVec::<[u8; 40]>::new();
-        // let _ =
-        //     COLLATER.write_sort_key_utf8_to(value.file_name().as_encoded_bytes(), &mut sort_key);
         let path: String = {
             #[cfg(feature = "profiling")]
             puffin::profile_scope!("lwa_fm::dir_handling::conversion::from_std::string");
@@ -289,9 +293,6 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
         let meta: DirEntryMetaData = meta.into();
         let path = value.path().to_full_path_string();
         let file_name_index = path.len() - value.file_name().len();
-        // let mut sort_key = SmallVec::<[u8; 40]>::new();
-        // let _ =
-        //     COLLATER.write_sort_key_utf8_to(value.file_name().as_encoded_bytes(), &mut sort_key);
         let file_name = value.file_name().to_str().ok_or(())?;
         let sort_key = SortKey::new_path(file_name, meta.entry_type.eq(&EntryType::File));
         Ok(Self {

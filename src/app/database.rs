@@ -1,16 +1,19 @@
-use crate::{
-    data::files::{DirContent, DirEntry},
-    helper::normalize_path,
-};
+use crate::data::files::{DirContent, DirEntry};
 use bincode::config;
 use directories::ProjectDirs;
 use std::{
     collections::BTreeSet,
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     sync::{LazyLock, Mutex},
     thread,
 };
+
+const MAX_CACHE_SIZE_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
+const EVICT_CHECK_INTERVAL: u64 = 1000;
+
+static CACHE_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub static SLED_DIRS: LazyLock<sled::Db> = LazyLock::new(|| {
     let path = ProjectDirs::from("com", "Crayen", "Files2").expect("");
@@ -24,8 +27,9 @@ pub static SLED_DIRS: LazyLock<sled::Db> = LazyLock::new(|| {
 static CACHE_GENERATIONS: LazyLock<Mutex<HashMap<Vec<u8>, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+// All callers pass already-normalized paths (from user navigation or file system watchers).
 fn cache_key(dir: &Path) -> Vec<u8> {
-    normalize_path(dir).as_os_str().as_encoded_bytes().to_vec()
+    dir.as_os_str().as_encoded_bytes().to_vec()
 }
 
 fn current_generation(path: &[u8]) -> u64 {
@@ -96,5 +100,26 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
         }
         _ = SLED_DIRS.insert(path, data);
         log::info!("Data saved");
+        maybe_evict_cache();
     });
+}
+
+fn maybe_evict_cache() {
+    let count = CACHE_INSERT_COUNT.fetch_add(1, Ordering::Relaxed);
+    if !count.is_multiple_of(EVICT_CHECK_INTERVAL) {
+        return;
+    }
+    if let Ok(size) = SLED_DIRS.size_on_disk()
+        && size > MAX_CACHE_SIZE_BYTES
+    {
+        log::warn!("Sled cache size {size} exceeds {MAX_CACHE_SIZE_BYTES}, clearing");
+        if let Err(e) = SLED_DIRS.clear() {
+            log::error!("Failed to clear sled cache: {e}");
+            return;
+        }
+        if let Ok(mut generations) = CACHE_GENERATIONS.lock() {
+            generations.clear();
+        }
+        log::info!("Sled cache cleared");
+    }
 }
