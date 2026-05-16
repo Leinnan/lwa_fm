@@ -39,6 +39,7 @@ pub enum TabAction {
     FilesLoaded {
         list: Vec<DirEntry>,
         visible_entries: Vec<usize>,
+        generation: u64,
     },
 }
 

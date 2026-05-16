@@ -351,6 +351,7 @@ impl App {
                         };
                         path.print_from_lua();
                         tab.set_path(path);
+                        tab.refresh_generation += 1;
                         if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
                             let new_data = match tab.current_path.single_path() {
                                 Some(p) => {
@@ -391,7 +392,9 @@ impl App {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
                         };
+                        tab.refresh_generation += 1;
                         if tab.loading {
+                            tab.pending_refresh = true;
                             return;
                         }
                         tab.update_settings(ctx);
@@ -410,6 +413,7 @@ impl App {
                             ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&current_path);
 
                         tab.loading = true;
+                        let generation = tab.refresh_generation;
 
                         std::thread::spawn(move || {
                             let mut list = crate::app::dir_handling::read_directory(
@@ -428,6 +432,7 @@ impl App {
                                 TabAction::FilesLoaded {
                                     list,
                                     visible_entries,
+                                    generation,
                                 },
                             ));
                         });
@@ -447,13 +452,26 @@ impl App {
                     commands::TabAction::FilesLoaded {
                         list,
                         visible_entries,
+                        generation,
                     } => {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
                         };
+                        if tab.refresh_generation != generation {
+                            tab.loading = false;
+                            if tab.pending_refresh {
+                                tab.pending_refresh = false;
+                                TabAction::RequestFilesRefresh.schedule_tab(tab_id);
+                            }
+                            return;
+                        }
                         tab.list = list;
                         tab.visible_entries = visible_entries;
                         tab.loading = false;
+                        if tab.pending_refresh {
+                            tab.pending_refresh = false;
+                            TabAction::RequestFilesRefresh.schedule_tab(tab_id);
+                        }
                     }
                     commands::TabAction::SearchInFavorites(start) => {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {

@@ -232,6 +232,8 @@ pub struct TabData {
     pub display_type: DisplayType,
     pub search: Option<Search>,
     pub loading: bool,
+    pub(crate) refresh_generation: u64,
+    pub(crate) pending_refresh: bool,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
     pub top_display_path: TopDisplayPath,
@@ -347,6 +349,8 @@ impl TabData {
             display_type: DisplayType::default(),
             search: None,
             loading: false,
+            refresh_generation: 0,
+            pending_refresh: false,
             undoer: Undoer::default(),
             top_display_path,
         };
@@ -838,11 +842,12 @@ impl MyTabViewer<'_> {
                                         ui.with_layout(
                                             Layout::right_to_left(egui::Align::Center),
                                             |ui| {
+                                                let elapsed = val.meta.modified_at.elapsed();
                                                 populate_time_pool(
-                                                    std::iter::once(val.meta.since_modified),
+                                                    std::iter::once(elapsed),
                                                     ui.ctx(),
                                                 );
-                                                ui.add(val.meta.since_modified);
+                                                ui.add(elapsed);
                                             },
                                         )
                                         .response
@@ -2068,7 +2073,7 @@ mod tests {
         assets.poll_results(ctx);
         // Seed the pre-computed galley pools so time / size widgets render.
         for (_, tab) in my_tabs.dock_state.iter_all_tabs() {
-            populate_time_pool(tab.list.iter().map(|e| e.meta.since_modified), ctx);
+            populate_time_pool(tab.list.iter().map(|e| e.meta.modified_at.elapsed()), ctx);
             populate_sizes_pool(tab.list.iter().map(|e| e.meta.size), ctx);
         }
 
