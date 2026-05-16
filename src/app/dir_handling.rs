@@ -3,6 +3,7 @@ use std::{
     cmp::Ordering,
     collections::BTreeSet,
     path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
 };
 
 use notify::RecursiveMode;
@@ -12,7 +13,7 @@ use rayon::slice::ParallelSliceMut;
 
 use crate::{
     app::{
-        MatchMode, Search, SearchTermType, database,
+        Data, MatchMode, Search, SearchTermType, database,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
     },
@@ -24,26 +25,66 @@ pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
 
 use super::{Sort, dock::TabData};
 
+fn resolve_path_setting<T, F, R>(path: &CurrentPath, data_source: &impl DataHolder, extract: F) -> R
+where
+    T: 'static
+        + Clone
+        + Default
+        + std::any::Any
+        + egui::util::id_type_map::SerializableAny
+        + Send
+        + Sync,
+    F: Fn(crate::app::Data<T>) -> R,
+    R: Default,
+{
+    match path {
+        CurrentPath::One(single) => {
+            extract(data_source.data_get_path_or_persisted::<T>(&CurrentPath::One(single.clone())))
+        }
+        CurrentPath::Multiple(paths) => {
+            for p in paths {
+                let data =
+                    data_source.data_get_path_or_persisted::<T>(&CurrentPath::One(p.clone()));
+                if data.is_local() {
+                    return extract(data);
+                }
+            }
+            extract(Data::default())
+        }
+        CurrentPath::None => extract(Data::default()),
+    }
+}
+
 impl TabData {
     pub fn watcher_specs(&self) -> Vec<(PathBuf, RecursiveMode)> {
-        let roots: &[PathBuf] = match &self.current_path {
-            CurrentPath::None => &[],
-            CurrentPath::One(path_buf) => std::slice::from_ref(path_buf),
-            CurrentPath::Multiple(path_bufs) => path_bufs.as_slice(),
-        };
         let mode = if self.search.as_ref().map_or(1, |search| search.depth) > 1 {
             RecursiveMode::Recursive
         } else {
             RecursiveMode::NonRecursive
         };
+        let depth = self.search_depth();
         let mut specs = BTreeSet::new();
-        for root in roots {
+        let mut add_root = |root: &PathBuf| {
             let root = normalize_path(root);
             specs.insert((root.clone(), mode));
             if mode == RecursiveMode::Recursive {
-                for linked_root in linked_watch_roots(&root, self.search_depth()) {
+                for linked_root in linked_watch_roots(&root, depth) {
                     specs.insert((linked_root, mode));
                 }
+            }
+        };
+        match &self.current_path {
+            CurrentPath::None => {}
+            CurrentPath::One(path_buf) => add_root(path_buf),
+            CurrentPath::Multiple(path_bufs) => {
+                for root in path_bufs {
+                    add_root(root);
+                }
+            }
+        }
+        if let Some(search) = &self.search {
+            for extra in &search.extra_dirs {
+                add_root(extra);
             }
         }
         specs.into_iter().collect()
@@ -72,12 +113,16 @@ impl TabData {
     }
 
     pub fn update_settings(&mut self, data_source: &impl DataHolder) {
-        self.show_hidden = data_source
-            .data_get_path_or_persisted::<DirectoryShowHidden>(&self.current_path)
-            .0;
-        let view_settings =
-            data_source.data_get_path_or_persisted::<DirectoryViewSettings>(&self.current_path);
-        self.display_type = view_settings.data.display_type;
+        self.show_hidden = resolve_path_setting::<DirectoryShowHidden, _, _>(
+            &self.current_path,
+            data_source,
+            |d: Data<DirectoryShowHidden>| d.data.0,
+        );
+        self.display_type = resolve_path_setting::<DirectoryViewSettings, _, _>(
+            &self.current_path,
+            data_source,
+            |d: Data<DirectoryViewSettings>| d.data.display_type,
+        );
         if let Some(path) = self.current_path.get_path() {
             self.top_display_path.build(&path, self.show_hidden);
         }
@@ -110,11 +155,20 @@ impl TabData {
     }
 }
 
-pub fn read_directory(paths: &[PathBuf], depth: usize, show_hidden: bool) -> Vec<DirEntry> {
+pub fn read_directory(
+    paths: &[PathBuf],
+    depth: usize,
+    show_hidden: bool,
+    cancel: &AtomicBool,
+) -> Vec<DirEntry> {
     let mut list = Vec::new();
     for d in paths {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return list;
+        }
         database::read_dir(d, &mut list);
         if depth > 1 {
+            let mut subdir_count = 0u64;
             for dir in walkdir::WalkDir::new(d)
                 .follow_links(true)
                 .min_depth(1)
@@ -146,6 +200,12 @@ pub fn read_directory(paths: &[PathBuf], depth: usize, show_hidden: bool) -> Vec
                     }
                 }
                 database::read_dir(dir.path(), &mut list);
+                subdir_count += 1;
+                if subdir_count.is_multiple_of(128)
+                    && cancel.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return list;
+                }
             }
         }
     }
@@ -260,8 +320,8 @@ impl CompiledSearch {
     fn matches(
         &self,
         name: &str,
-        case_sensitive: bool,
-        collator: &Option<CollatorBorrowed<'_>>,
+        _case_sensitive: bool,
+        collator: Option<&CollatorBorrowed<'_>>,
     ) -> bool {
         let matches_one = |term: &CompiledTerm| -> bool {
             match term {
@@ -273,7 +333,13 @@ impl CompiledSearch {
                     let chars = name.as_bytes();
                     let mut found = false;
                     if let Some(collator) = collator {
-                        for j in 0..=(name.len() - search_len) {
+                        for (j, _) in name.char_indices() {
+                            if j + search_len > name.len() {
+                                break;
+                            }
+                            if !name.is_char_boundary(j + search_len) {
+                                continue;
+                            }
                             if collator.compare_utf8(pattern.as_bytes(), &chars[j..j + search_len])
                                 == Ordering::Equal
                             {
@@ -283,7 +349,7 @@ impl CompiledSearch {
                         }
                     }
                     if !found && name.contains(pattern.as_str()) {
-                        log::error!("WTF: {name}");
+                        log::debug!("Collator missed match for {name:?} containing {pattern:?}");
                     }
                     found
                 }
@@ -347,7 +413,7 @@ pub fn filter_visible_entries(
         }
         if let Some(ref cs) = compiled_search {
             let name = entry.get_splitted_path().1;
-            if !cs.matches(name, case_sensitive, &collator) {
+            if !cs.matches(name, case_sensitive, collator.as_ref()) {
                 continue;
             }
         }

@@ -54,7 +54,6 @@ pub enum TabAction {
     /// Background thread has finished loading directory entries.
     FilesLoaded {
         list: Vec<DirEntry>,
-        visible_entries: Vec<usize>,
         generation: u64,
     },
 }

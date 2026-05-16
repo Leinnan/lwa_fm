@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use egui::Vec2;
 use egui_taffy::{
@@ -113,7 +113,7 @@ impl UserData for CurrentPath {
         methods.add_method("print_path", |c, this, ()| {
             let path = this.get_name_from_path();
             let full_path: Cow<'static, str> = match this {
-                CurrentPath::One(path_buf) => path_buf
+                Self::One(path_buf) => path_buf
                     .to_full_path()
                     .map(|p| Cow::Owned(p.to_string_lossy().to_string())),
                 _ => None,
@@ -235,6 +235,7 @@ pub struct TabData {
     pub loading: bool,
     pub(crate) refresh_generation: Arc<AtomicU64>,
     pub(crate) pending_refresh: bool,
+    pub(crate) cancel_token: Arc<AtomicBool>,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
     pub top_display_path: TopDisplayPath,
@@ -358,6 +359,7 @@ impl TabData {
             loading: false,
             refresh_generation: Arc::new(AtomicU64::new(0)),
             pending_refresh: false,
+            cancel_token: Arc::new(AtomicBool::new(false)),
             undoer: Undoer::default(),
             top_display_path,
         };
@@ -459,13 +461,19 @@ impl MyTabViewer<'_> {
         let tile_width = GRID_TILE_WIDTH;
         let tile_height = GRID_TILE_HEIGHT;
         let item_spacing = ui.spacing().item_spacing;
-        let content_width = (ui.available_width() - GRID_VIEW_PADDING * 2.0).max(tile_width);
+        let content_width = GRID_VIEW_PADDING
+            .mul_add(-2.0, ui.available_width())
+            .max(tile_width);
         let columns = ((content_width + item_spacing.x) / (tile_width + item_spacing.x))
             .floor()
             .max(1.0) as usize;
-        let used_width =
-            columns as f32 * tile_width + (columns.saturating_sub(1)) as f32 * item_spacing.x;
-        let side_padding = GRID_VIEW_PADDING + ((content_width - used_width).max(0.0) * 0.5);
+        let used_width = (columns as f32).mul_add(
+            tile_width,
+            (columns.saturating_sub(1)) as f32 * item_spacing.x,
+        );
+        let side_padding = (content_width - used_width)
+            .max(0.0)
+            .mul_add(0.5, GRID_VIEW_PADDING);
         let row_count = entries_len.div_ceil(columns);
 
         let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
@@ -549,7 +557,7 @@ impl MyTabViewer<'_> {
             return;
         }
 
-        let shift_pressed = ui.input(|i| i.shift_pressed());
+        let shift_pressed = ui.input(super::super::helper::KeyWithCommandPressed::shift_pressed);
         let favorites = ui.data_get_persisted::<Locations>().unwrap_or_default();
 
         let is_searching = tab.is_searching();
@@ -690,7 +698,7 @@ impl MyTabViewer<'_> {
                             .id(idgen())
                             .mut_style(&grid_row_param)
                             .mut_style(|style| {
-                                style.min_size = min_size.clone();
+                                style.min_size = min_size;
                                 style.overflow.x = taffy::Overflow::Hidden;
                                 style.align_items = Some(taffy::AlignItems::Stretch);
                             })

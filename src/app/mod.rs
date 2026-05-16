@@ -21,7 +21,7 @@ use std::str::FromStr;
 use std::time::Duration;
 use std::{fs, path::PathBuf};
 
-pub(crate) mod assets;
+pub mod assets;
 mod central_panel;
 pub mod command_palette;
 pub mod commands;
@@ -194,7 +194,7 @@ pub enum DisplayType {
 impl DisplayType {
     /// returns if it is a list
     pub const fn is_list(&self) -> bool {
-        matches!(self, DisplayType::List)
+        matches!(self, Self::List)
     }
 }
 
@@ -439,6 +439,8 @@ impl App {
                         };
                         tab.refresh_generation
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        tab.cancel_token
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         if tab.loading {
                             tab.pending_refresh = true;
                             return;
@@ -457,39 +459,39 @@ impl App {
                         }
                         let depth = tab.search_depth();
                         let show_hidden = tab.show_hidden;
-                        let search = tab.search.clone();
                         let current_path = tab.current_path.clone();
 
                         let settings =
                             ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&current_path);
 
                         tab.loading = true;
+                        tab.cancel_token
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
                         let refresh_gen = std::sync::Arc::clone(&tab.refresh_generation);
                         let generation = refresh_gen.load(std::sync::atomic::Ordering::SeqCst);
+                        let cancel = std::sync::Arc::clone(&tab.cancel_token);
 
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_millis(200));
                             if refresh_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
                                 return;
                             }
+                            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                                return;
+                            }
                             let mut list = crate::app::dir_handling::read_directory(
                                 &directories,
                                 depth,
                                 show_hidden,
+                                &cancel,
                             );
+                            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                                return;
+                            }
                             crate::app::dir_handling::sort_entries_vec(&mut list, &settings.data);
-                            let visible_entries = crate::app::dir_handling::filter_visible_entries(
-                                &list,
-                                show_hidden,
-                                search.as_ref(),
-                            );
                             COMMANDS_QUEUE.push(ActionToPerform::TabAction(
                                 TabTarget::TabWithId(tab_id),
-                                TabAction::FilesLoaded {
-                                    list,
-                                    visible_entries,
-                                    generation,
-                                },
+                                TabAction::FilesLoaded { list, generation },
                             ));
                         });
                     }
@@ -505,11 +507,7 @@ impl App {
                         tab.sort_entries(&settings.data);
                         tab.update_visible_entries();
                     }
-                    commands::TabAction::FilesLoaded {
-                        list,
-                        visible_entries,
-                        generation,
-                    } => {
+                    commands::TabAction::FilesLoaded { list, generation } => {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
                         };
@@ -526,7 +524,7 @@ impl App {
                             return;
                         }
                         tab.list = list;
-                        tab.visible_entries = visible_entries;
+                        tab.update_visible_entries();
                         tab.loading = false;
                         if tab.pending_refresh {
                             tab.pending_refresh = false;
@@ -566,10 +564,11 @@ impl App {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
                         };
-                        if let Some(search) = &mut tab.search {
-                            if path.is_dir() && !search.extra_dirs.contains(&path) {
-                                search.extra_dirs.push(path);
-                            }
+                        if let Some(search) = &mut tab.search
+                            && path.is_dir()
+                            && !search.extra_dirs.contains(&path)
+                        {
+                            search.extra_dirs.push(path);
                         }
                         TabAction::RequestFilesRefresh.schedule_tab(tab_id);
                     }

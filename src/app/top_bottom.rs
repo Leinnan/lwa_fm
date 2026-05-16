@@ -269,16 +269,19 @@ impl App {
                                         let saved_searches = ui
                                             .data_get_persisted::<crate::app::SavedSearches>()
                                             .unwrap_or_default();
-                                        ui.menu_button("📋", |ui| {
+                                        ui.menu_button("Saved", |ui| {
                                             if saved_searches.searches.is_empty() {
-                                                ui.label("No saved searches");
+                                                ui.label("No saved searches.");
+                                                ui.label(
+                                                    "Type a search, enter a name below, and Save.",
+                                                );
                                             } else {
                                                 ui.label("Load saved:");
                                                 for ss in &saved_searches.searches {
                                                     ui.horizontal(|ui| {
                                                         if ui
-                                                            .button("▶")
-                                                            .on_hover_text("Load")
+                                                            .button("Load")
+                                                            .on_hover_text("Load this saved search")
                                                             .clicked()
                                                         {
                                                             TabAction::LoadSavedSearch(
@@ -288,8 +291,10 @@ impl App {
                                                             ui.close_menu();
                                                         }
                                                         if ui
-                                                            .button("🗑")
-                                                            .on_hover_text("Delete")
+                                                            .button("✕")
+                                                            .on_hover_text(
+                                                                "Delete this saved search",
+                                                            )
                                                             .clicked()
                                                         {
                                                             TabAction::DeleteSavedSearch(
@@ -304,14 +309,16 @@ impl App {
                                                 ui.separator();
                                             }
                                             ui.label("Save current as:");
-                                            ui.add(
+                                            let name_edit = ui.add(
                                                 egui::TextEdit::singleline(
                                                     &mut search.save_name_input,
                                                 )
                                                 .hint_text("name...")
                                                 .desired_width(100.0),
                                             );
-                                            if ui.button("Save").clicked()
+                                            let enter_pressed = name_edit.lost_focus()
+                                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                            if (ui.button("Save").clicked() || enter_pressed)
                                                 && !search.save_name_input.trim().is_empty()
                                             {
                                                 TabAction::SaveSearch(
@@ -385,7 +392,12 @@ impl App {
                                         {
                                             let showing = current_tab.visible_entries.len();
                                             let total = current_tab.list.len();
-                                            if showing != total {
+                                            if current_tab.loading {
+                                                ui.label(
+                                                    egui::RichText::new("Loading...")
+                                                        .color(egui::Color32::GRAY),
+                                                );
+                                            } else if showing != total {
                                                 ui.label(
                                                     egui::RichText::new(format!(
                                                         "{showing}/{total}"
@@ -470,13 +482,10 @@ impl App {
                                                         search.extra_dirs.iter().enumerate()
                                                     {
                                                         ui.horizontal(|ui| {
-                                                            ui.label(
-                                                                dir.file_name()
-                                                                    .map(|n| n.to_string_lossy())
-                                                                    .unwrap_or_else(|| {
-                                                                        dir.to_string_lossy()
-                                                                    }),
-                                                            )
+                                                            ui.label(dir.file_name().map_or_else(
+                                                                || dir.to_string_lossy(),
+                                                                |n| n.to_string_lossy(),
+                                                            ))
                                                             .on_hover_text(dir.to_string_lossy());
                                                             if ui.button("✕").clicked() {
                                                                 dir_to_remove = Some(i);

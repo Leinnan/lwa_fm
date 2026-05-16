@@ -329,12 +329,13 @@ impl DirectoryWatcher {
                 }
                 directories
             }
-            EventKind::Modify(ModifyKind::Name(_))
-            | EventKind::Modify(ModifyKind::Data(DataChange::Content))
-            | EventKind::Modify(ModifyKind::Data(_))
-            | EventKind::Modify(ModifyKind::Metadata(_))
-            | EventKind::Modify(ModifyKind::Any)
-            | EventKind::Modify(ModifyKind::Other)
+            EventKind::Modify(
+                ModifyKind::Name(_)
+                | ModifyKind::Data(DataChange::Content | _)
+                | ModifyKind::Metadata(_)
+                | ModifyKind::Any
+                | ModifyKind::Other,
+            )
             | EventKind::Any => parent_dirs_for_paths(paths),
             _ => BTreeSet::new(),
         }
