@@ -298,11 +298,15 @@ impl TabData {
                 TabAction::RequestFilesRefresh.schedule_tab(self.id);
             }
         } else {
-            self.search = Some(
-                data_source
-                    .data_get_tab::<Search>(self.id)
-                    .unwrap_or_default(),
-            );
+            let search = data_source
+                .data_get_tab::<Search>(self.id)
+                .unwrap_or_default();
+            let restored_depth = search.depth;
+            let is_multiple = self.current_path.multiple_paths();
+            self.search = Some(search);
+            if is_multiple || restored_depth > 1 {
+                TabAction::RequestFilesRefresh.schedule_tab(self.id);
+            }
         }
     }
 }

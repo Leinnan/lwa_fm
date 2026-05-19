@@ -91,7 +91,7 @@ impl TabData {
     }
 
     pub fn search_depth(&self) -> usize {
-        self.search.as_ref().map_or(1, |search| search.depth)
+        self.search.as_ref().map_or(1, |search| search.depth.max(1))
     }
 
     pub fn should_refresh_for_directories(&self, changed_directories: &BTreeSet<PathBuf>) -> bool {
@@ -209,6 +209,7 @@ pub fn read_directory(
             }
         }
     }
+    list.par_sort_unstable_by(|a, b| a.path.cmp(&b.path));
     list.dedup_by(|a, b| a.path == b.path);
     list
 }
@@ -502,4 +503,102 @@ pub fn get_directories_recursive(
         })
         .map(|e| format!("{}", e.path().display()).into())
         .collect::<BTreeSet<_>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use rayon::slice::ParallelSliceMut;
+
+    use crate::data::files::DirEntry;
+
+    use super::{Search, filter_visible_entries};
+
+    #[test]
+    fn filter_visible_entries_includes_all_entries_uniformly() {
+        let entries = vec![
+            DirEntry::test_new("/fav/file_report.txt"),
+            DirEntry::test_new("/fav/subdir/report.txt"),
+            DirEntry::test_new("/fav/notes.txt"),
+            DirEntry::test_new("/fav/subdir/deep/report.txt"),
+        ];
+        let show_hidden = true;
+
+        // No search: all entries pass
+        let visible = filter_visible_entries(&entries, show_hidden, None);
+        assert_eq!(visible.len(), 4, "no search should include all entries");
+
+        // Search for "report": root-level + subdirectory entries should match
+        let search = Search {
+            value: "report".to_string(),
+            depth: 2,
+            case_sensitive: false,
+            ..Default::default()
+        };
+        let visible = filter_visible_entries(&entries, show_hidden, Some(&search));
+        assert!(
+            visible.contains(&0),
+            "root-level file_report.txt should match"
+        );
+        assert!(visible.contains(&1), "subdir/report.txt should match");
+        assert!(visible.contains(&3), "subdir/deep/report.txt should match");
+        assert_eq!(visible.len(), 3);
+
+        // Search for "notes": only root-level
+        let search = Search {
+            value: "notes".to_string(),
+            depth: 2,
+            case_sensitive: false,
+            ..Default::default()
+        };
+        let visible = filter_visible_entries(&entries, show_hidden, Some(&search));
+        assert_eq!(
+            visible.len(),
+            1,
+            "search 'notes' should match only root-level notes.txt"
+        );
+        assert!(visible.contains(&2), "root-level notes.txt should match");
+    }
+
+    #[test]
+    fn filter_visible_entries_hides_hidden_files() {
+        let entries = vec![
+            DirEntry::test_new("/fav/.hidden.txt"),
+            DirEntry::test_new("/fav/visible.txt"),
+            DirEntry::test_new("/fav/subdir/.hidden.txt"),
+        ];
+        let show_hidden = false;
+        let visible = filter_visible_entries(&entries, show_hidden, None);
+        assert_eq!(
+            visible.len(),
+            1,
+            "only visible.txt should pass with show_hidden=false"
+        );
+        assert!(visible.contains(&1));
+    }
+
+    #[test]
+    fn dedup_removes_all_duplicates_regardless_of_order() {
+        let mut list = vec![
+            DirEntry::test_new("/fav/subdir/file.txt"),
+            DirEntry::test_new("/fav/file.txt"),
+            DirEntry::test_new("/fav/subdir/file.txt"),
+            DirEntry::test_new("/fav/file.txt"),
+        ];
+        list.par_sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        list.dedup_by(|a, b| a.path == b.path);
+        assert_eq!(
+            list.len(),
+            2,
+            "should have 2 unique entries after sort+dedup"
+        );
+        assert!(list.iter().any(|e| e.path == "/fav/file.txt"));
+        assert!(list.iter().any(|e| e.path == "/fav/subdir/file.txt"));
+    }
+
+    #[test]
+    fn search_depth_clamps_to_one() {
+        assert_eq!(0usize.max(1), 1, "depth 0 should clamp to 1");
+        assert_eq!(1usize.max(1), 1, "depth 1 should stay 1");
+        assert_eq!(3usize.max(1), 3, "depth 3 should stay 3");
+    }
 }

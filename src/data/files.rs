@@ -327,4 +327,21 @@ impl DirEntry {
     pub fn get_splitted_path(&self) -> (&str, &str) {
         self.path.split_at(self.file_name_index)
     }
+
+    #[cfg(test)]
+    pub fn test_new(path: &str) -> Self {
+        let file_name_index = path.rfind(std::path::MAIN_SEPARATOR).map_or(0, |i| i + 1);
+        Self {
+            meta: DirEntryMetaData {
+                entry_type: EntryType::File,
+                created_at: Default::default(),
+                modified_at: Default::default(),
+                since_modified: Default::default(),
+                size: 0,
+            },
+            path: path.to_string(),
+            file_name_index,
+            sort_key: SortKey::new_path(&path[file_name_index..], true),
+        }
+    }
 }
