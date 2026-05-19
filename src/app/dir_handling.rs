@@ -3,7 +3,7 @@ use std::{
     cmp::Ordering,
     collections::BTreeSet,
     path::{Path, PathBuf},
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
 };
 
 use notify::RecursiveMode;
@@ -161,57 +161,85 @@ pub fn read_directory(
     show_hidden: bool,
     cancel: &AtomicBool,
 ) -> Vec<DirEntry> {
+    #[cfg(feature = "profiling")]
+    puffin::profile_scope!("lwa_fm::dir_handling::read_directory");
     let mut list = Vec::new();
     for d in paths {
-        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::dir_handling::read_directory::root", d.to_string_lossy().as_ref());
+        if cancel.load(AtomicOrdering::SeqCst) {
             return list;
         }
         database::read_dir(d, &mut list);
         if depth > 1 {
-            let mut subdir_count = 0u64;
-            for dir in walkdir::WalkDir::new(d)
-                .follow_links(true)
-                .min_depth(1)
-                .max_depth(depth)
-                .into_iter()
-                .flatten()
-                .filter(|e| e.file_type().is_dir())
+            // Collect subdirectory paths first (fast non-blocking walk)
+            let subdirs = {
+                #[cfg(feature = "profiling")]
+                puffin::profile_scope!("lwa_fm::dir_handling::read_directory::collect_subdirs");
+                walkdir::WalkDir::new(d)
+                    .follow_links(true)
+                    .min_depth(1)
+                    .max_depth(depth)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_type().is_dir())
+                    .filter(|e| show_hidden || !is_hidden_dir(e))
+                    .map(|e| e.path().to_path_buf())
+                    .take_while(|_| !cancel.load(AtomicOrdering::SeqCst))
+                    .collect::<Vec<PathBuf>>()
+            };
+
+            if cancel.load(AtomicOrdering::SeqCst) {
+                return list;
+            }
+
+            // Read subdirectories in parallel using rayon
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("lwa_fm::dir_handling::read_directory::parallel_read", subdirs.len().to_string().as_str());
             {
-                if !show_hidden {
-                    let mut parent = dir.path().parent();
-                    let mut parent_depth = 0;
-                    let mut skip = false;
-                    while let Some(p) = parent {
-                        if p.iter().next_back().is_some_and(|f| {
-                            f.to_string_lossy().starts_with('.')
-                                || f.to_string_lossy().starts_with('$')
-                        }) {
-                            skip = true;
-                            break;
-                        }
-                        parent_depth += 1;
-                        if parent_depth >= dir.depth() {
-                            break;
-                        }
-                        parent = p.parent();
+                use std::sync::Mutex;
+                let list_mutex = Mutex::new(&mut list);
+                use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+                subdirs.par_iter().for_each(|subdir| {
+                    #[cfg(feature = "profiling")]
+                    puffin::profile_scope!("lwa_fm::dir_handling::read_directory::read_subdir", subdir.to_string_lossy().as_ref());
+                    if cancel.load(AtomicOrdering::SeqCst) {
+                        return;
                     }
-                    if skip {
-                        continue;
-                    }
-                }
-                database::read_dir(dir.path(), &mut list);
-                subdir_count += 1;
-                if subdir_count.is_multiple_of(128)
-                    && cancel.load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    return list;
-                }
+                    database::read_dir(subdir, &mut *list_mutex.lock().expect("dir list mutex"));
+                });
             }
         }
     }
-    list.par_sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    list.dedup_by(|a, b| a.path == b.path);
+    // Deduplicate by path using a HashSet (avoids O(n log n) sort)
+    {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::dir_handling::read_directory::dedup", list.len().to_string().as_str());
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(list.len());
+        list.retain(|e| seen.insert(e.path.clone()));
+    }
     list
+}
+
+fn is_hidden_dir(entry: &walkdir::DirEntry) -> bool {
+    #[cfg(feature = "profiling")]
+    puffin::profile_scope!("lwa_fm::dir_handling::is_hidden_dir");
+    let mut parent = entry.path().parent();
+    let mut parent_depth = 0;
+    while let Some(p) = parent {
+        if p.iter().next_back().is_some_and(|f| {
+            f.to_string_lossy().starts_with('.') || f.to_string_lossy().starts_with('$')
+        }) {
+            return true;
+        }
+        parent_depth += 1;
+        if parent_depth >= entry.depth() {
+            break;
+        }
+        parent = p.parent();
+    }
+    false
 }
 
 pub fn sort_entries_vec(entries: &mut [DirEntry], settings: &DirectoryViewSettings) {

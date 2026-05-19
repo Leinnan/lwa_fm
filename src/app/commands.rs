@@ -29,6 +29,8 @@ pub enum TabAction {
     ChangePaths(CurrentPath),
     /// Request a refresh of the currently displayed files.
     RequestFilesRefresh,
+    /// Force a full refresh: invalidates sled cache and re-reads from filesystem.
+    ForceRefresh,
     /// Request a sort of the currently displayed files.
     FilesSort,
     /// `SearchInFavorites`
@@ -55,6 +57,7 @@ pub enum TabAction {
     FilesLoaded {
         list: Vec<DirEntry>,
         generation: u64,
+        visible: Vec<usize>,
     },
 }
 
@@ -127,6 +130,7 @@ impl From<&ActionToPerform> for Cow<'static, str> {
             ActionToPerform::TabAction(_, action) => match action {
                 TabAction::ChangePaths(_) => Cow::Borrowed("Open"),
                 TabAction::RequestFilesRefresh => Cow::Borrowed("Refresh"),
+                TabAction::ForceRefresh => Cow::Borrowed("Force refresh"),
                 TabAction::FilesSort => Cow::Borrowed("Sort"),
                 TabAction::SearchInFavorites(favorites) => {
                     if *favorites {

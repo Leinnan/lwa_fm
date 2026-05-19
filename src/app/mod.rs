@@ -430,6 +430,38 @@ impl App {
                         tab.update_settings(ctx);
                         tab.update_visible_entries();
                     }
+                    commands::TabAction::ForceRefresh => {
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("lwa_fm::handle_action::ForceRefresh");
+                        // Invalidate sled cache for all watched directories
+                        let force_dirs: Vec<PathBuf> = {
+                            #[cfg(feature = "profiling")]
+                            puffin::profile_scope!("lwa_fm::handle_action::ForceRefresh::collect_dirs");
+                            let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                                return;
+                            };
+                            let mut dirs: Vec<PathBuf> = match &tab.current_path {
+                                CurrentPath::None => vec![],
+                                CurrentPath::One(p) => vec![p.clone()],
+                                CurrentPath::Multiple(ps) => ps.clone(),
+                            };
+                            if let Some(search) = &tab.search {
+                                dirs.extend(search.extra_dirs.iter().cloned());
+                                dirs.sort();
+                                dirs.dedup();
+                            }
+                            dirs
+                        };
+                        crate::app::database::invalidate_dirs(force_dirs.into_iter());
+                        // Fall through to normal refresh
+                        self.handle_action(
+                            ctx,
+                            ActionToPerform::TabAction(
+                                TabTarget::TabWithId(tab_id),
+                                TabAction::RequestFilesRefresh,
+                            ),
+                        );
+                    }
                     commands::TabAction::RequestFilesRefresh => {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles");
@@ -460,6 +492,7 @@ impl App {
                         let depth = tab.search_depth();
                         let show_hidden = tab.show_hidden;
                         let current_path = tab.current_path.clone();
+                        let search = tab.search.clone();
 
                         let settings =
                             ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&current_path);
@@ -472,7 +505,8 @@ impl App {
                         let cancel = std::sync::Arc::clone(&tab.cancel_token);
 
                         std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            #[cfg(feature = "profiling")]
+                            puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles::bg_thread");
                             if refresh_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
                                 return;
                             }
@@ -489,9 +523,16 @@ impl App {
                                 return;
                             }
                             crate::app::dir_handling::sort_entries_vec(&mut list, &settings.data);
+                            #[cfg(feature = "profiling")]
+                            puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles::filter_visible");
+                            let visible = crate::app::dir_handling::filter_visible_entries(
+                                &list,
+                                show_hidden,
+                                search.as_ref(),
+                            );
                             COMMANDS_QUEUE.push(ActionToPerform::TabAction(
                                 TabTarget::TabWithId(tab_id),
-                                TabAction::FilesLoaded { list, generation },
+                                TabAction::FilesLoaded { list, generation, visible },
                             ));
                         });
                     }
@@ -507,7 +548,13 @@ impl App {
                         tab.sort_entries(&settings.data);
                         tab.update_visible_entries();
                     }
-                    commands::TabAction::FilesLoaded { list, generation } => {
+                    commands::TabAction::FilesLoaded {
+                        list,
+                        generation,
+                        visible,
+                    } => {
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("lwa_fm::handle_action::FilesLoaded");
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
                         };
@@ -524,7 +571,7 @@ impl App {
                             return;
                         }
                         tab.list = list;
-                        tab.update_visible_entries();
+                        tab.visible_entries = visible;
                         tab.loading = false;
                         if tab.pending_refresh {
                             tab.pending_refresh = false;
@@ -776,6 +823,11 @@ impl eframe::App for App {
                 );
             }
         }
+        // F5: Force refresh the active tab (bypass all caches)
+        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+            toast!(Info, "Force refreshing...");
+            TabAction::ForceRefresh.schedule_active_tab();
+        }
 
         if let Some(modal) = &self.display_modal {
             match modal {
@@ -821,6 +873,7 @@ impl eframe::App for App {
                                     crate::app::database::invalidate_dir(Path::new(
                                         old.get_splitted_path().0,
                                     ));
+                                    TabAction::RequestFilesRefresh.schedule_active_tab();
                                 }
                                 ui.data_mut(|w| {
                                     w.remove_temp::<String>(
@@ -849,6 +902,12 @@ impl eframe::App for App {
         self.drain_command_queue(&ctx);
         if self.watchers.is_active() {
             ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        // Defensive: keep the UI ticking while any tab is loading
+        if self.tabs.has_loading() {
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("lwa_fm::repaint::loading_tab");
+            ctx.request_repaint_after(Duration::from_millis(80));
         }
     }
 }

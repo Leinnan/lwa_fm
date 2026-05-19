@@ -49,8 +49,14 @@ pub fn populate_time_pool(components: impl Iterator<Item = ElapsedTime>, ui: &Co
     TIME_POOL.with_borrow_mut(|pool| {
         for component in components {
             if !pool.contains_key(&component) {
-                if pool.len() >= 512 {
-                    pool.clear();
+                if pool.len() >= 2048 {
+                    #[cfg(feature = "profiling")]
+                    puffin::profile_scope!("lwa_fm::dock::time_pool_evict", pool.len().to_string().as_str());
+                    let target = pool.len() / 2;
+                    let keys: Vec<ElapsedTime> = pool.keys().take(target).copied().collect();
+                    for key in keys {
+                        pool.remove(&key);
+                    }
                 }
                 let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
                     component.to_string(),
@@ -77,8 +83,14 @@ pub fn populate_sizes_pool(components: impl Iterator<Item = u32>, ui: &Context) 
     SIZES_POOL.with_borrow_mut(|pool| {
         for component in components {
             if !pool.contains_key(&component) {
-                if pool.len() >= 512 {
-                    pool.clear();
+                if pool.len() >= 2048 {
+                    #[cfg(feature = "profiling")]
+                    puffin::profile_scope!("lwa_fm::dock::sizes_pool_evict", pool.len().to_string().as_str());
+                    let target = pool.len() / 2;
+                    let keys: Vec<u32> = pool.keys().take(target).copied().collect();
+                    for key in keys {
+                        pool.remove(&key);
+                    }
                 }
                 let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
                     crate::helper::format_bytes_simple(u64::from(component)),
@@ -1804,6 +1816,12 @@ impl MyTabs {
             TabTarget::AllTabs => None,
         }?;
         self.get_tab_by_id(tab_id)
+    }
+
+    pub fn has_loading(&mut self) -> bool {
+        self.dock_state
+            .iter_all_tabs_mut()
+            .any(|(_, tab)| tab.loading)
     }
 
     #[inline]

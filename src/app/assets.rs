@@ -1,5 +1,6 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ const GIF_BYTES_CAPACITY: usize = 128;
 const VIDEO_GIF_FRAMES: u32 = 15;
 const VIDEO_GIF_FRAME_DELAY_MS: u16 = 600;
 const THUMBNAIL_WORKER_COUNT: usize = 3;
+const MAX_TEXTURES_PER_FRAME: usize = 10;
 
 static FFMPEG_READY: OnceLock<Result<(), String>> = OnceLock::new();
 
@@ -115,18 +117,54 @@ enum AssetJobClass {
     HoverPreview,
 }
 
-#[derive(Debug, Clone)]
-struct ScheduledAssetJob {
+/// Priority for the binary heap: lower rank = higher priority,
+/// lower order within same rank = older job processed first.
+#[derive(Debug, Eq, PartialEq)]
+struct JobPriority(u8, u64);
+
+impl Ord for JobPriority {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse: BinaryHeap is a max-heap, so Reverse gives us min-behavior
+        Reverse((self.0, self.1)).cmp(&Reverse((other.0, other.1)))
+    }
+}
+
+impl PartialOrd for JobPriority {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug)]
+struct HeapEntry {
+    priority: JobPriority,
     job: AssetJob,
-    class: AssetJobClass,
-    directory: Option<String>,
-    order: u64,
+}
+
+impl PartialEq for HeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority
+    }
+}
+
+impl Eq for HeapEntry {}
+
+impl Ord for HeapEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.priority.cmp(&other.priority)
+    }
+}
+
+impl PartialOrd for HeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, Default)]
 struct JobSchedulerState {
     active_directory: Option<String>,
-    queue: VecDeque<ScheduledAssetJob>,
+    queue: BinaryHeap<HeapEntry>,
     next_order: u64,
 }
 
@@ -138,15 +176,16 @@ struct JobScheduler {
 
 impl JobScheduler {
     fn enqueue(&self, job: AssetJob, class: AssetJobClass, directory: Option<String>) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::assets::scheduler::enqueue");
         {
             let mut state = self.state.lock().expect("job scheduler mutex poisoned");
             let order = state.next_order;
             state.next_order = state.next_order.saturating_add(1);
-            state.queue.push_back(ScheduledAssetJob {
+            let rank = job_rank(class, directory.as_deref(), state.active_directory.as_deref());
+            state.queue.push(HeapEntry {
+                priority: JobPriority(rank, order),
                 job,
-                class,
-                directory,
-                order,
             });
         }
         self.has_jobs.notify_one();
@@ -167,14 +206,12 @@ impl JobScheduler {
     }
 
     fn recv(&self) -> AssetJob {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::assets::scheduler::recv");
         let mut state = self.state.lock().expect("job scheduler mutex poisoned");
         loop {
-            if let Some(index) = best_job_index(&state) {
-                return state
-                    .queue
-                    .remove(index)
-                    .expect("scheduled job index should remain valid")
-                    .job;
+            if let Some(entry) = state.queue.pop() {
+                return entry.job;
             }
             state = self
                 .has_jobs
@@ -184,25 +221,7 @@ impl JobScheduler {
     }
 }
 
-fn best_job_index(state: &JobSchedulerState) -> Option<usize> {
-    state
-        .queue
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, scheduled)| {
-            (
-                asset_job_rank(
-                    scheduled.class,
-                    scheduled.directory.as_deref(),
-                    state.active_directory.as_deref(),
-                ),
-                scheduled.order,
-            )
-        })
-        .map(|(index, _)| index)
-}
-
-fn asset_job_rank(
+fn job_rank(
     class: AssetJobClass,
     directory: Option<&str>,
     active_directory: Option<&str>,
@@ -394,7 +413,13 @@ impl AssetManager {
 
     pub fn poll_results(&mut self, ctx: &Context) {
         let mut received_any = false;
+        let mut processed = 0usize;
         loop {
+            // Limit GPU texture uploads per frame to avoid UI thread stalls
+            if processed >= MAX_TEXTURES_PER_FRAME {
+                ctx.request_repaint();
+                return;
+            }
             match self.receiver.try_recv() {
                 Ok(AssetJobResult::Ready { request_key, image }) => {
                     self.pending.remove(&request_key);
@@ -409,6 +434,7 @@ impl AssetManager {
                     );
                     self.textures.put(request_key, texture);
                     received_any = true;
+                    processed += 1;
                 }
                 Ok(AssetJobResult::Failed { request_key }) => {
                     self.pending.remove(&request_key);
@@ -425,6 +451,7 @@ impl AssetManager {
                     self.gif_store().persist(&source_path, &gif_bytes);
                     self.gif_bytes.put(request_key, gif_bytes);
                     received_any = true;
+                    processed += 1;
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }

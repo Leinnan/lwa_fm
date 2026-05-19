@@ -1,7 +1,11 @@
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, TryRecvError},
+    },
     thread,
     time::Duration,
 };
@@ -197,6 +201,14 @@ impl DirectoryWatchers {
         puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_file_system_events");
         let mut changed_directories = BTreeSet::new();
         for watched in self.watchers.values_mut() {
+            if watched.watcher.check_rescan() {
+                // Rescan detected: we don't know which specific paths changed,
+                // so return the watched root to trigger a full refresh.
+                if let Some(ref path) = watched.watcher.current_path {
+                    log::info!("Rescan triggered full refresh for {}", path.display());
+                    changed_directories.insert(path.clone());
+                }
+            }
             while let Some(directories) = watched.watcher.try_recv_event() {
                 changed_directories.extend(directories);
             }
@@ -210,6 +222,7 @@ pub struct DirectoryWatcher {
     watcher: RecommendedWatcher,
     receiver: Receiver<BTreeSet<PathBuf>>,
     current_path: Option<PathBuf>,
+    rescan_detected: Arc<AtomicBool>,
 }
 
 impl DirectoryWatcher {
@@ -225,6 +238,9 @@ impl DirectoryWatcher {
         })
         .context("Failed to create file system watcher")?;
 
+        let rescan_detected = Arc::new(AtomicBool::new(false));
+        let rescan_flag = Arc::clone(&rescan_detected);
+
         // Spawn a thread to process raw notify events and convert them to our custom events
         let event_tx = tx;
         thread::spawn(move || {
@@ -233,6 +249,15 @@ impl DirectoryWatcher {
             for res in internal_rx {
                 match res {
                     Ok(event) => {
+                        // Handle Rescan (buffer overflow) — set flag for full refresh
+                        if event.kind == EventKind::Other {
+                            log::warn!(
+                                "File system watcher overflow detected for {:?}, scheduling full refresh",
+                                event.paths
+                            );
+                            rescan_flag.store(true, Ordering::SeqCst);
+                            continue;
+                        }
                         let changed_dirs = Self::process_event(event, &mut pending_renames);
                         if changed_dirs.is_empty() {
                             continue;
@@ -253,6 +278,7 @@ impl DirectoryWatcher {
             watcher,
             receiver: rx,
             current_path: None,
+            rescan_detected,
         })
     }
 
@@ -282,6 +308,14 @@ impl DirectoryWatcher {
     #[inline]
     pub fn try_recv_event(&self) -> Option<BTreeSet<PathBuf>> {
         self.receiver.try_recv().ok()
+    }
+
+    /// Returns true if a Rescan (buffer overflow) event was detected since last check.
+    /// Atomically clears the flag on read.
+    pub fn check_rescan(&self) -> bool {
+        self.rescan_detected
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
     #[allow(dead_code)]
@@ -437,6 +471,6 @@ mod tests {
     fn directory_event_invalidates_parent_directory() {
         let parent = parent_dir_for_event_path(Path::new("/tmp/example/subdir"));
 
-        assert_eq!(parent.as_deref(), Some(Path::new("/tmp/example")));
+        assert_eq!(parent, Some(normalize_path(Path::new("/tmp/example"))));
     }
 }

@@ -18,13 +18,23 @@ pub trait PathHelper {
 
 #[must_use]
 pub fn normalize_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| {
+    let result = std::fs::canonicalize(path).unwrap_or_else(|_| {
         if path.is_absolute() {
             path.to_path_buf()
         } else {
             std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
         }
-    })
+    });
+    #[cfg(windows)]
+    {
+        // Ensure consistent backslash separators on Windows
+        let s: String = result.to_string_lossy().replace('/', "\\");
+        PathBuf::from(s)
+    }
+    #[cfg(not(windows))]
+    {
+        result
+    }
 }
 
 #[must_use]
