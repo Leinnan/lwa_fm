@@ -16,9 +16,45 @@ mod widgets;
 #[cfg(windows)]
 mod windows_tools;
 
+fn parse_present_mode() -> wgpu::PresentMode {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == "--present-mode" && let Some(val) = args.next() {
+            return match val.to_lowercase().as_str() {
+                "fifo" => wgpu::PresentMode::Fifo,
+                "mailbox" => wgpu::PresentMode::Mailbox,
+                "immediate" => wgpu::PresentMode::Immediate,
+                "auto-no-vsync" => wgpu::PresentMode::AutoNoVsync,
+                _ => {
+                    eprintln!("Unknown present mode '{val}', using AutoVsync");
+                    wgpu::PresentMode::AutoVsync
+                }
+            };
+        }
+    }
+    if let Ok(val) = std::env::var("LWA_FM_PRESENT_MODE") {
+        return match val.to_lowercase().as_str() {
+            "fifo" => wgpu::PresentMode::Fifo,
+            "mailbox" => wgpu::PresentMode::Mailbox,
+            "immediate" => wgpu::PresentMode::Immediate,
+            "auto-no-vsync" => wgpu::PresentMode::AutoNoVsync,
+            _ => wgpu::PresentMode::AutoVsync,
+        };
+    }
+    wgpu::PresentMode::AutoVsync
+}
+
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "profiling")]
-    profiler::start_puffin_server(); // NOTE: you may only want to call this if the users specifies some flag or clicks a button!
+    profiler::enable_profiling();
+
+    #[cfg(feature = "profiling")]
+    profiler::start_puffin_server();
+
+    let present_mode = parse_present_mode();
+    if present_mode != wgpu::PresentMode::AutoVsync {
+        log::info!("Using present mode: {present_mode:?}");
+    }
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -28,6 +64,22 @@ fn main() -> anyhow::Result<()> {
                     .unwrap_or_default(),
             )
             .with_min_inner_size([300.0, 220.0]),
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            present_mode,
+            on_surface_status: std::sync::Arc::new(|status| {
+                #[cfg(feature = "profiling")]
+                puffin::profile_scope!("lwa_fm::surface::error", &format!("{status:?}"));
+                match status {
+                    wgpu::CurrentSurfaceTexture::Outdated
+                    | wgpu::CurrentSurfaceTexture::Occluded
+                    | wgpu::CurrentSurfaceTexture::Timeout => {
+                        eframe::egui_wgpu::SurfaceErrorAction::SkipFrame
+                    }
+                    _ => eframe::egui_wgpu::SurfaceErrorAction::RecreateSurface,
+                }
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

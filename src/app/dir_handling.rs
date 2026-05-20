@@ -49,7 +49,7 @@ where
                     return extract(data);
                 }
             }
-            extract(Data::default())
+            extract(data_source.data_get_path_or_persisted::<T>(path))
         }
         CurrentPath::None => extract(Data::default()),
     }

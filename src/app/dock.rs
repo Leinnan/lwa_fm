@@ -79,6 +79,33 @@ pub fn populate_time_pool(components: impl Iterator<Item = ElapsedTime>, ui: &Co
 thread_local! {
     pub static SIZES_POOL: RefCell<HashMap<u32, Arc<Galley>>> = RefCell::new(HashMap::default());
 }
+thread_local! {
+    pub static FILE_NAME_POOL: RefCell<HashMap<(String, bool), Arc<Galley>>> = RefCell::new(HashMap::default());
+}
+
+pub fn populate_file_name_pool(entries: impl Iterator<Item = (String, bool)>, ui: &Context) {
+    FILE_NAME_POOL.with_borrow_mut(|pool| {
+        for (name, is_dir) in entries {
+            if pool.contains_key(&(name.clone(), is_dir)) {
+                continue;
+            }
+            if pool.len() >= 2048 {
+                let target = pool.len() / 2;
+                let keys: Vec<(String, bool)> = pool.keys().take(target).cloned().collect();
+                for key in keys {
+                    pool.remove(&key);
+                }
+            }
+            let color = if is_dir { Color32::LIGHT_GRAY } else { Color32::GRAY };
+            let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
+                name.clone(), FontId::default(), color,
+            )))
+            .into_galley_impl(ui, &ui.style(), TextWrapping::default(), FontSelection::Default, egui::Align::Center);
+            _ = pool.insert((name, is_dir), galley);
+        }
+    });
+}
+
 pub fn populate_sizes_pool(components: impl Iterator<Item = u32>, ui: &Context) {
     SIZES_POOL.with_borrow_mut(|pool| {
         for component in components {
@@ -606,6 +633,14 @@ impl MyTabViewer<'_> {
         };
         let entries_len = tab.visible_entries.len();
 
+        populate_file_name_pool(
+            tab.visible_entries.iter().map(|&idx| {
+                let val = &tab.list[idx];
+                (val.get_splitted_path().1.to_string(), !val.is_file())
+            }),
+            ui.ctx(),
+        );
+
         let mut new_sort = None;
 
         // ── Unified virtual-grid: sticky header row + scrollable body ────────
@@ -751,37 +786,37 @@ impl MyTabViewer<'_> {
                                             Color32::GRAY
                                         };
 
-                                         ui.with_layout(
-                                             Layout::left_to_right(egui::Align::Center),
-                                             |ui| {
+                                          let (dir, file) = val.get_splitted_path();
+                                          let render_sz = self.assets.render_size_for(val);
+                                          ui.with_layout(
+                                              Layout::left_to_right(egui::Align::Center),
+                                              |ui| {
                                                   if let Some(texture) = self.assets.request_entry_texture(val) {
-                                                      let render_sz = self.assets.render_size_for(val);
                                                       ui.add(
                                                           egui::Image::new(&texture)
                                                               .fit_to_exact_size(Vec2::splat(render_sz)),
                                                       );
                                                   } else {
-                                                      ui.allocate_space(Vec2::splat(self.assets.render_size_for(val)));
+                                                      ui.allocate_space(Vec2::splat(render_sz));
                                                   }
-                                                 if cmd && indexed < 10 {
-                                                     ui.add(
-                                                         egui::Label::new(
-                                                            LayoutJob::simple_format(
-                                                                format!("[{indexed}]"),
-                                                                TextFormat {
-                                                                    color: Color32::DARK_GRAY,
-                                                                    ..Default::default()
-                                                                },
-                                                            ),
-                                                        )
-                                                        .wrap_mode(
-                                                            egui::TextWrapMode::Truncate,
-                                                        )
-                                                        .selectable(false)
-                                                        .sense(Sense::empty()),
-                                                    );
-                                                }
-                                                let (dir, file) = val.get_splitted_path();
+                                                  if cmd && indexed < 10 {
+                                                      ui.add(
+                                                          egui::Label::new(
+                                                             LayoutJob::simple_format(
+                                                                 format!("[{indexed}]"),
+                                                                 TextFormat {
+                                                                     color: Color32::DARK_GRAY,
+                                                                     ..Default::default()
+                                                                 },
+                                                             ),
+                                                         )
+                                                         .wrap_mode(
+                                                             egui::TextWrapMode::Truncate,
+                                                         )
+                                                         .selectable(false)
+                                                         .sense(Sense::empty()),
+                                                     );
+                                                 }
                                                 if is_searching || multiple_dirs {
                                                     ui.add(
                                                         egui::Label::new(
@@ -799,20 +834,39 @@ impl MyTabViewer<'_> {
                                                     );
                                                 }
 
-                                                let added_button = ui.add(
-                                                    egui::Label::new(
-                                                        LayoutJob::simple_singleline(
-                                                            file.into(),
-                                                            FontId::default(),
+                                                let file_name_response = FILE_NAME_POOL.with_borrow(|pool| {
+                                                    pool.get(&(file.to_string(), is_dir)).cloned()
+                                                }).map(|galley| {
+                                                    let available_width = ui.available_width();
+                                                    let galley_width = galley.size().x.min(available_width);
+                                                    let (rect, response) = ui.allocate_exact_size(
+                                                        egui::vec2(galley_width, galley.size().y),
+                                                        Sense::empty(),
+                                                    );
+                                                    if ui.is_rect_visible(rect) {
+                                                        ui.painter().add(egui::epaint::TextShape::new(
+                                                            rect.min,
+                                                            galley,
                                                             color,
-                                                        ),
+                                                        ));
+                                                    }
+                                                    response
+                                                }).unwrap_or_else(|| {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            LayoutJob::simple_singleline(
+                                                                file.into(),
+                                                                FontId::default(),
+                                                                color,
+                                                            ),
+                                                        )
+                                                        .wrap_mode(egui::TextWrapMode::Truncate)
+                                                        .selectable(false)
+                                                        .sense(Sense::empty()),
                                                     )
-                                                    .wrap_mode(egui::TextWrapMode::Truncate)
-                                                    .selectable(false)
-                                                    .sense(Sense::empty()),
-                                                );
+                                                });
 
-                                                added_button.on_hover_ui(|ui| {
+                                                file_name_response.on_hover_ui(|ui| {
                                                     Self::show_entry_hover_preview(
                                                         self.assets,
                                                         ui,

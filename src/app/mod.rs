@@ -82,6 +82,12 @@ pub struct App {
     pub watchers: DirectoryWatchers,
     #[serde(skip, default)]
     assets: AssetManager,
+    #[cfg(feature = "profiling")]
+    #[serde(skip)]
+    profiler_visible: bool,
+    #[cfg(feature = "profiling")]
+    #[serde(skip)]
+    frame_tracker: crate::profiler::FrameTracker,
 }
 
 impl App {
@@ -325,6 +331,10 @@ impl Default for App {
             command_palette,
             watchers: DirectoryWatchers::default(),
             assets: AssetManager::default(),
+            #[cfg(feature = "profiling")]
+            profiler_visible: true,
+            #[cfg(feature = "profiling")]
+            frame_tracker: crate::profiler::FrameTracker::new(),
         }
     }
 }
@@ -354,6 +364,10 @@ impl App {
             value.load_locations();
             value.tabs = crate::app::dock::MyTabs::new(&get_starting_path());
             value.assets = AssetManager::default();
+            #[cfg(feature = "profiling")]
+            {
+                value.profiler_visible = true;
+            }
             return value;
         }
 
@@ -551,7 +565,7 @@ impl App {
                     commands::TabAction::FilesLoaded {
                         list,
                         generation,
-                        visible,
+                        visible: _,
                     } => {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!("lwa_fm::handle_action::FilesLoaded");
@@ -570,8 +584,12 @@ impl App {
                             }
                             return;
                         }
+                        tab.update_settings(ctx);
                         tab.list = list;
-                        tab.visible_entries = visible;
+                        let settings = ctx
+                            .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
+                        tab.sort_entries(&settings.data);
+                        tab.update_visible_entries();
                         tab.loading = false;
                         if tab.pending_refresh {
                             tab.pending_refresh = false;
@@ -714,12 +732,13 @@ impl App {
             }
             ActionToPerform::ViewSettingsChanged(_) => {
                 TabAction::FilesSort.schedule_active_tab();
-                let Some(active_path) = self.tabs.get_current_path() else {
+                let Some(active_tab) = self.tabs.get_current_tab() else {
                     return;
                 };
+                let active_path = active_tab.current_path.clone();
                 for tab_id in self.tabs.get_tab_ids() {
                     if let Some(tab) = self.tabs.get_tab_by_id(tab_id)
-                        && tab.current_path.single_path() == Some(active_path.clone())
+                        && tab.current_path == active_path
                     {
                         TabAction::FilesSort.schedule_tab(tab_id);
                     }
@@ -790,10 +809,17 @@ impl eframe::App for App {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    #[allow(unused_variables)]
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         #[cfg(feature = "profiling")]
-        puffin::profile_function!("my_update");
+        {
+            puffin::profile_function!("my_update");
+            self.frame_tracker.begin_frame();
+            if let Some(render_state) = frame.wgpu_render_state() {
+                self.frame_tracker.report_gpu_status(&render_state.device);
+            }
+        }
         self.assets.poll_results(&ctx);
         self.drain_command_queue(&ctx);
         self.process_file_system_changes(&ctx);
@@ -898,6 +924,14 @@ impl eframe::App for App {
             }
         }
 
+        #[cfg(feature = "profiling")]
+        {
+            if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
+                self.profiler_visible = !self.profiler_visible;
+            }
+            crate::profiler::profiler_window(&ctx, &mut self.profiler_visible);
+        }
+
         TOASTS.write().show(&ctx);
         self.drain_command_queue(&ctx);
         if self.watchers.is_active() {
@@ -909,6 +943,8 @@ impl eframe::App for App {
             puffin::profile_scope!("lwa_fm::repaint::loading_tab");
             ctx.request_repaint_after(Duration::from_millis(80));
         }
+        #[cfg(feature = "profiling")]
+        self.frame_tracker.end_frame();
     }
 }
 

@@ -492,10 +492,10 @@ impl AssetManager {
 
     pub fn request_entry_texture(&mut self, entry: &DirEntry) -> Option<TextureHandle> {
         let path = entry.get_path();
-        let path_string = path.to_full_path_string();
         let size = self.effective_icon_size(entry);
 
         if let Some(kind) = thumbnail_kind(path) {
+            let path_string = path.to_full_path_string();
             let cache_key = format!("{}{}", path_string, size.cache_suffix());
             if let Some(texture) = self.textures.get(&cache_key) {
                 return Some(texture.clone());
@@ -515,12 +515,6 @@ impl AssetManager {
                 );
                 self.pending.insert(cache_key);
             }
-            return self.request_file_icon_texture(
-                path,
-                entry.is_file(),
-                size,
-                AssetJobClass::EntryVisual,
-            );
         }
 
         self.request_file_icon_texture(path, entry.is_file(), size, AssetJobClass::EntryVisual)

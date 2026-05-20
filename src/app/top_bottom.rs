@@ -689,7 +689,7 @@ impl App {
                         let old_value = settings.sorting;
                         let old_value_display = settings.display_type;
                         let mut display_hidden_changed: bool = false;
-                        egui::ComboBox::from_label("Icons")
+                        egui::ComboBox::from_label("Display")
                             .selected_text(format!("{:?}", settings.display_type))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
