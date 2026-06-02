@@ -80,6 +80,30 @@ impl IconSize {
             Self::Large => 1.4,
         }
     }
+
+    pub const fn tile_width(self) -> f32 {
+        match self {
+            Self::Small => 120.0,
+            Self::Medium => 168.0,
+            Self::Large => 220.0,
+        }
+    }
+
+    pub const fn tile_height(self) -> f32 {
+        match self {
+            Self::Small => 106.0,
+            Self::Medium => 148.0,
+            Self::Large => 196.0,
+        }
+    }
+
+    pub const fn tile_preview_size(self) -> f32 {
+        match self {
+            Self::Small => 60.0,
+            Self::Medium => 84.0,
+            Self::Large => 120.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +485,6 @@ impl AssetManager {
         }
     }
 
-    #[expect(dead_code, reason = "public API for future icon size UI controls")]
     pub fn set_icon_size(&mut self, size: IconSize) {
         if self.icon_size != size {
             self.icon_size = size;
@@ -472,17 +495,16 @@ impl AssetManager {
         }
     }
 
-    #[expect(dead_code, reason = "public API for future icon size UI controls")]
     pub const fn icon_size(&self) -> IconSize {
         self.icon_size
     }
 
-    #[expect(dead_code, reason = "public API for future icon size UI controls")]
+    #[expect(dead_code, reason = "public API for future per-directory icon size UI")]
     pub fn set_icon_size_for_dir(&mut self, dir_path: &str, size: IconSize) {
         self.per_dir_icon_size.insert(dir_path.to_string(), size);
     }
 
-    #[expect(dead_code, reason = "public API for future icon size UI controls")]
+    #[expect(dead_code, reason = "public API for future per-directory icon size UI")]
     pub fn icon_size_for_dir(&self, dir_path: &str) -> IconSize {
         self.per_dir_icon_size
             .get(dir_path)
@@ -494,14 +516,14 @@ impl AssetManager {
         let path = entry.get_path();
         let size = self.effective_icon_size(entry);
 
-        if let Some(kind) = thumbnail_kind(path) {
+        if let Some(kind) = thumbnail_kind(&path) {
             let path_string = path.to_full_path_string();
             let cache_key = format!("{}{}", path_string, size.cache_suffix());
             if let Some(texture) = self.textures.get(&cache_key) {
                 return Some(texture.clone());
             }
             if !self.is_pending_or_failed(&cache_key) {
-                let cache_path = thumbnail_cache_path(path, size);
+                let cache_path = thumbnail_cache_path(&path, size);
                 self.scheduler.enqueue(
                     AssetJob::Thumbnail {
                         source_path: path.to_path_buf(),
@@ -517,7 +539,7 @@ impl AssetManager {
             }
         }
 
-        self.request_file_icon_texture(path, entry.is_file(), size, AssetJobClass::EntryVisual)
+        self.request_file_icon_texture(&path, entry.is_file(), size, AssetJobClass::EntryVisual)
     }
 
     pub fn request_sidebar_texture(&mut self, path: &Path) -> Option<TextureHandle> {
@@ -572,7 +594,7 @@ impl AssetManager {
             "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" | "ico" | "avif"
             | "tga" => HoverPreview::ImageUri(format!("file://{}", entry.to_full_path_string())),
             "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" | "flv" | "m4v" | "3gp" | "ogv" => {
-                self.request_video_hover_preview(entry.get_path())
+                self.request_video_hover_preview(&entry.get_path())
             }
             _ => HoverPreview::Fallback,
         }

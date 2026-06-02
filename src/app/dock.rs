@@ -1,4 +1,3 @@
-use egui::ahash::HashMap;
 use egui::text::{LayoutJob, TextWrapping};
 use egui::util::undoer::Undoer;
 use egui::{
@@ -9,10 +8,12 @@ use egui_dock::{DockArea, DockState, Style, TabViewer};
 use icu::collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu::collator::{Collator, CollatorBorrowed};
 use icu::locale::Locale;
+use lru::LruCache;
 use mlua::{Function, UserData};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,7 +34,7 @@ use crate::app::commands::{ModalWindow, TabAction, TabTarget};
 use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
 use crate::app::top_bottom::TopDisplayPath;
 use crate::app::{DisplayType, LUA_INSTANCE, Search, Sort};
-use crate::data::files::DirEntry;
+use crate::data::files::{DirEntry, DirList};
 use crate::data::time::ElapsedTime;
 use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer, PathHelper};
 use crate::locations::Locations;
@@ -42,97 +43,77 @@ use crate::widgets::time_label::draw_size;
 use std::cell::RefCell;
 
 thread_local! {
-    pub static TIME_POOL: RefCell<HashMap<ElapsedTime, Arc<Galley>>> = RefCell::new(HashMap::default());
+    pub static TIME_POOL: RefCell<LruCache<ElapsedTime, Arc<Galley>>> =
+        RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
 }
 
 pub fn populate_time_pool(components: impl Iterator<Item = ElapsedTime>, ui: &Context) {
     TIME_POOL.with_borrow_mut(|pool| {
         for component in components {
-            if !pool.contains_key(&component) {
-                if pool.len() >= 2048 {
-                    #[cfg(feature = "profiling")]
-                    puffin::profile_scope!("lwa_fm::dock::time_pool_evict", pool.len().to_string().as_str());
-                    let target = pool.len() / 2;
-                    let keys: Vec<ElapsedTime> = pool.keys().take(target).copied().collect();
-                    for key in keys {
-                        pool.remove(&key);
-                    }
-                }
-                let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-                    component.to_string(),
-                    FontId::default(),
-                    Color32::DARK_GRAY,
-                )))
-                .into_galley_impl(
-                    ui,
-                    &ui.style(),
-                    TextWrapping::default(),
-                    FontSelection::Default,
-                    egui::Align::Center,
-                );
-                _ = pool.insert(component, galley);
+            if pool.peek(&component).is_some() {
+                continue;
             }
+            let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
+                component.to_string(),
+                FontId::default(),
+                Color32::DARK_GRAY,
+            )))
+            .into_galley_impl(
+                ui,
+                &ui.style(),
+                TextWrapping::default(),
+                FontSelection::Default,
+                egui::Align::Center,
+            );
+            pool.put(component, galley);
         }
     });
 }
 
 thread_local! {
-    pub static SIZES_POOL: RefCell<HashMap<u32, Arc<Galley>>> = RefCell::new(HashMap::default());
+    pub static SIZES_POOL: RefCell<LruCache<u64, Arc<Galley>>> =
+        RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
 }
 thread_local! {
-    pub static FILE_NAME_POOL: RefCell<HashMap<(String, bool), Arc<Galley>>> = RefCell::new(HashMap::default());
+    pub static FILE_NAME_POOL: RefCell<LruCache<(String, bool), Arc<Galley>>> =
+        RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
 }
 
 pub fn populate_file_name_pool(entries: impl Iterator<Item = (String, bool)>, ui: &Context) {
     FILE_NAME_POOL.with_borrow_mut(|pool| {
         for (name, is_dir) in entries {
-            if pool.contains_key(&(name.clone(), is_dir)) {
+            if pool.peek(&(name.clone(), is_dir)).is_some() {
                 continue;
-            }
-            if pool.len() >= 2048 {
-                let target = pool.len() / 2;
-                let keys: Vec<(String, bool)> = pool.keys().take(target).cloned().collect();
-                for key in keys {
-                    pool.remove(&key);
-                }
             }
             let color = if is_dir { Color32::LIGHT_GRAY } else { Color32::GRAY };
             let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
                 name.clone(), FontId::default(), color,
             )))
             .into_galley_impl(ui, &ui.style(), TextWrapping::default(), FontSelection::Default, egui::Align::Center);
-            _ = pool.insert((name, is_dir), galley);
+            pool.put((name, is_dir), galley);
         }
     });
 }
 
-pub fn populate_sizes_pool(components: impl Iterator<Item = u32>, ui: &Context) {
+pub fn populate_sizes_pool(components: impl Iterator<Item = u64>, ui: &Context) {
     SIZES_POOL.with_borrow_mut(|pool| {
         for component in components {
-            if !pool.contains_key(&component) {
-                if pool.len() >= 2048 {
-                    #[cfg(feature = "profiling")]
-                    puffin::profile_scope!("lwa_fm::dock::sizes_pool_evict", pool.len().to_string().as_str());
-                    let target = pool.len() / 2;
-                    let keys: Vec<u32> = pool.keys().take(target).copied().collect();
-                    for key in keys {
-                        pool.remove(&key);
-                    }
-                }
-                let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-                    crate::helper::format_bytes_simple(u64::from(component)),
-                    FontId::default(),
-                    Color32::DARK_GRAY,
-                )))
-                .into_galley_impl(
-                    ui,
-                    &ui.style(),
-                    TextWrapping::default(),
-                    FontSelection::Default,
-                    egui::Align::Center,
-                );
-                _ = pool.insert(component, galley);
+            if pool.peek(&component).is_some() {
+                continue;
             }
+            let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
+                crate::helper::format_bytes_simple(component),
+                FontId::default(),
+                Color32::DARK_GRAY,
+            )))
+            .into_galley_impl(
+                ui,
+                &ui.style(),
+                TextWrapping::default(),
+                FontSelection::Default,
+                egui::Align::Center,
+            );
+            pool.put(component, galley);
         }
     });
 }
@@ -272,12 +253,14 @@ pub struct TabData {
     pub display_type: DisplayType,
     pub search: Option<Search>,
     pub loading: bool,
+    pub loading_progress: Option<String>,
     pub(crate) refresh_generation: Arc<AtomicU64>,
     pub(crate) pending_refresh: bool,
     pub(crate) cancel_token: Arc<AtomicBool>,
     undoer: Undoer<CurrentPath>,
     pub id: u32,
     pub top_display_path: TopDisplayPath,
+    pub dir_list: Option<DirList>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -400,11 +383,13 @@ impl TabData {
             display_type: DisplayType::default(),
             search: None,
             loading: false,
+            loading_progress: None,
             refresh_generation: Arc::new(AtomicU64::new(0)),
             pending_refresh: false,
             cancel_token: Arc::new(AtomicBool::new(false)),
             undoer: Undoer::default(),
             top_display_path,
+            dir_list: None,
         };
         TabAction::ChangePaths(CurrentPath::One(path.into())).schedule_tab(new.id);
         new
@@ -426,11 +411,8 @@ const COL_MODIFIED_MAX: f32 = 150.0;
 const COL_SIZE_W: f32 = 125.0;
 const COL_SIZE_MIN: f32 = 100.0;
 const COL_SIZE_MAX: f32 = 150.0;
-const GRID_TILE_WIDTH: f32 = 168.0;
-const GRID_TILE_HEIGHT: f32 = 148.0;
 const GRID_TILE_PADDING: f32 = 10.0;
 const GRID_VIEW_PADDING: f32 = 8.0;
-const GRID_TILE_PREVIEW_SIZE: f32 = 84.0;
 const GRID_TILE_TEXT_HEIGHT: f32 = 20.0;
 const GRID_TILE_HINT_HEIGHT: f32 = 18.0;
 
@@ -469,7 +451,7 @@ impl MyTabViewer<'_> {
         if tab.loading {
             ui.centered_and_justified(|ui| {
                 ui.spinner();
-                ui.label("Loading...");
+                ui.label(tab.loading_progress.as_deref().unwrap_or("Loading..."));
             });
             return;
         }
@@ -501,8 +483,9 @@ impl MyTabViewer<'_> {
 
         let entries_len = tab.visible_entries.len();
         let tab_popup_id = Id::new(tab_id).with(1500);
-        let tile_width = GRID_TILE_WIDTH;
-        let tile_height = GRID_TILE_HEIGHT;
+        let icon_size = self.assets.icon_size();
+        let tile_width = icon_size.tile_width();
+        let tile_height = icon_size.tile_height();
         let item_spacing = ui.spacing().item_spacing;
         let content_width = GRID_VIEW_PADDING
             .mul_add(-2.0, ui.available_width())
@@ -595,7 +578,7 @@ impl MyTabViewer<'_> {
         if tab.loading {
             ui.centered_and_justified(|ui| {
                 ui.spinner();
-                ui.label("Loading...");
+                ui.label(tab.loading_progress.as_deref().unwrap_or("Loading..."));
             });
             return;
         }
@@ -834,7 +817,7 @@ impl MyTabViewer<'_> {
                                                     );
                                                 }
 
-                                                let file_name_response = FILE_NAME_POOL.with_borrow(|pool| {
+                                                let file_name_response = FILE_NAME_POOL.with_borrow_mut(|pool| {
                                                     pool.get(&(file.to_string(), is_dir)).cloned()
                                                 }).map(|galley| {
                                                     let available_width = ui.available_width();
@@ -1167,7 +1150,7 @@ impl MyTabViewer<'_> {
                     .is_some_and(|k| row_response.ctx.key_with_command_pressed(k))
             {
                 if val.is_file() {
-                    ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
+                    ActionToPerform::SystemOpen(val.full_path_string().into()).schedule();
                 } else if let Ok(path) = std::fs::canonicalize(val.get_path()) {
                     if row_response.ctx.shift_pressed() {
                         ActionToPerform::NewTab(path).schedule();
@@ -1192,7 +1175,7 @@ impl MyTabViewer<'_> {
                 .id(popup_id)
                 .show(|ui| {
                     ui.data_set_tab::<PopupOpened>(tab_id, PopupOpened(popup_id, row_index));
-                    let options = build_for_path(&tab.current_path, val.get_path(), &favorites);
+                    let options = build_for_path(&tab.current_path, &val.get_path(), &favorites);
                     for option in options {
                         if ui.button(option.name.as_str()).clicked() {
                             option.action.clone().schedule();
@@ -1201,7 +1184,7 @@ impl MyTabViewer<'_> {
                     }
                     if !is_dir {
                         if ui.button("Open").clicked() {
-                            ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
+                            ActionToPerform::SystemOpen(val.full_path_string().into()).schedule();
                             ui.close();
                             return;
                         }
@@ -1235,18 +1218,18 @@ impl MyTabViewer<'_> {
                                         .clicked()
                                     {
                                         let path = val.get_path();
-                                        let filename = path.file_name().expect("NO FILENAME");
-                                        let target_path = other.join(filename);
+                                        let filename = path.file_name().expect("NO FILENAME").to_os_string();
+                                        let target_path = other.join(&filename);
                                         println!("{}", &target_path.display());
-                                        let move_result = fs::rename(path, &target_path);
+                                        let move_result = fs::rename(&path, &target_path);
                                         let mut success = move_result.is_ok();
                                         let _ = move_result.inspect_err(|e| {
                                             e.raw_os_error().inspect(|nr| {
                                                 if *nr == 17 {
                                                     let copy_success =
-                                                        fs::copy(path, target_path.clone()).is_ok();
+                                                        fs::copy(&path, target_path.clone()).is_ok();
                                                     if copy_success {
-                                                        success = fs::remove_file(path).is_ok();
+                                                        success = fs::remove_file(&path).is_ok();
                                                     }
                                                 }
                                             });
@@ -1288,7 +1271,7 @@ impl MyTabViewer<'_> {
                             toast!(Error, "Failed to read the clipboard.");
                             return;
                         };
-                        clipboard.set_text(val.path.clone()).unwrap_or_else(|_| {
+                        clipboard.set_text(val.full_path_string()).unwrap_or_else(|_| {
                             toast!(Error, "Failed to update the clipboard.");
                         });
                         ui.close();
@@ -1425,7 +1408,7 @@ impl MyTabViewer<'_> {
         let text_width = inner_rect.width().max(0.0);
         let hint_height = if cmd { GRID_TILE_HINT_HEIGHT } else { 0.0 };
         let preview_height = (inner_rect.height() - GRID_TILE_TEXT_HEIGHT - hint_height).max(0.0);
-        let preview_size = GRID_TILE_PREVIEW_SIZE.max(self.assets.render_size_for(entry));
+        let preview_size = self.assets.icon_size().tile_preview_size().max(self.assets.render_size_for(entry));
         let preview_width = text_width.min(preview_size);
         let mut child_ui = ui.new_child(
             egui::UiBuilder::new()
@@ -1559,7 +1542,7 @@ impl MyTabViewer<'_> {
             .id(popup_id)
             .show(|ui| {
                 ui.data_set_tab::<PopupOpened>(tab.id, PopupOpened(popup_id, row_index));
-                let options = build_for_path(&tab.current_path, val.get_path(), favorites);
+                let options = build_for_path(&tab.current_path, &val.get_path(), favorites);
                 for option in options {
                     if ui.button(option.name.as_str()).clicked() {
                         option.action.clone().schedule();
@@ -1568,7 +1551,7 @@ impl MyTabViewer<'_> {
                 }
                 if !is_dir {
                     if ui.button("Open").clicked() {
-                        ActionToPerform::SystemOpen(val.path.clone().into()).schedule();
+                        ActionToPerform::SystemOpen(val.full_path_string().into()).schedule();
                         ui.close();
                         return;
                     }
@@ -1603,18 +1586,18 @@ impl MyTabViewer<'_> {
                                     .clicked()
                                 {
                                     let path = val.get_path();
-                                    let filename = path.file_name().expect("NO FILENAME");
-                                    let target_path = other.join(filename);
+                                    let filename = path.file_name().expect("NO FILENAME").to_os_string();
+                                    let target_path = other.join(&filename);
                                     println!("{}", &target_path.display());
-                                    let move_result = fs::rename(path, &target_path);
+                                    let move_result = fs::rename(&path, &target_path);
                                     let mut success = move_result.is_ok();
                                     let _ = move_result.inspect_err(|e| {
                                         e.raw_os_error().inspect(|nr| {
                                             if *nr == 17 {
                                                 let copy_success =
-                                                    fs::copy(path, target_path.clone()).is_ok();
+                                                    fs::copy(&path, target_path.clone()).is_ok();
                                                 if copy_success {
-                                                    success = fs::remove_file(path).is_ok();
+                                                    success = fs::remove_file(&path).is_ok();
                                                 }
                                             }
                                         });
@@ -1656,7 +1639,7 @@ impl MyTabViewer<'_> {
                         toast!(Error, "Failed to read the clipboard.");
                         return;
                     };
-                    clipboard.set_text(val.path.clone()).unwrap_or_else(|_| {
+                    clipboard.set_text(val.full_path_string()).unwrap_or_else(|_| {
                         toast!(Error, "Failed to update the clipboard.");
                     });
                     ui.close();
@@ -1753,7 +1736,7 @@ impl MyTabViewer<'_> {
 
     fn activate_entry(entry: &DirEntry, tab_id: u32, open_in_new_tab: bool) {
         if entry.is_file() {
-            ActionToPerform::SystemOpen(entry.path.clone().into()).schedule();
+            ActionToPerform::SystemOpen(entry.full_path_string().into()).schedule();
         } else if let Ok(path) = std::fs::canonicalize(entry.get_path()) {
             if open_in_new_tab {
                 ActionToPerform::NewTab(path).schedule();
@@ -1782,10 +1765,10 @@ impl MyTabViewer<'_> {
             }
             HoverPreview::Loading => {
                 ui.label("Loading preview...");
-                ui.label(entry.path.as_str());
+                ui.label(entry.full_path_string());
             }
             HoverPreview::Fallback => {
-                ui.label(entry.path.as_str());
+                ui.label(entry.full_path_string());
             }
         }
     }

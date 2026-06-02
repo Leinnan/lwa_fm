@@ -3,7 +3,7 @@ use crate::app::commands::{COMMANDS_QUEUE, TabAction, TabTarget};
 use crate::app::directory_path_info::DirectoryPathInfo;
 use crate::app::directory_view_settings::DirectoryViewSettings;
 use crate::app::dock::CurrentPath;
-use crate::data::files::DirEntry;
+use crate::data::files::{DirEntry, DirList};
 use crate::helper::{DataHolder, KeyWithCommandPressed};
 use crate::locations::Locations;
 use crate::watcher::DirectoryWatchers;
@@ -12,12 +12,14 @@ use command_palette::CommandPalette;
 use commands::{ActionToPerform, ModalWindow};
 use egui::TextBuffer;
 use mlua::Lua;
+use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::LazyLock;
 use std::time::Duration;
 use std::{fs, path::PathBuf};
 
@@ -33,6 +35,16 @@ pub mod dock;
 mod settings;
 mod side_panel;
 mod top_bottom;
+
+/// Dedicated thread pool for filesystem reads. Limited to 2 threads to bound
+/// concurrent disk I/O while keeping the UI responsive.
+static BG_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
+    ThreadPoolBuilder::new()
+        .num_threads(2)
+        .thread_name(|i| format!("lwa_fm_bg_{i}"))
+        .build()
+        .expect("Failed to create background thread pool")
+});
 
 thread_local! {
     pub static LUA_INSTANCE: RefCell<Lua> = RefCell::new({
@@ -364,6 +376,7 @@ impl App {
             value.load_locations();
             value.tabs = crate::app::dock::MyTabs::new(&get_starting_path());
             value.assets = AssetManager::default();
+            value.assets.set_icon_size(value.settings.icon_size);
             #[cfg(feature = "profiling")]
             {
                 value.profiler_visible = true;
@@ -512,13 +525,14 @@ impl App {
                             ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&current_path);
 
                         tab.loading = true;
+                        tab.loading_progress = None;
                         tab.cancel_token
                             .store(false, std::sync::atomic::Ordering::SeqCst);
                         let refresh_gen = std::sync::Arc::clone(&tab.refresh_generation);
                         let generation = refresh_gen.load(std::sync::atomic::Ordering::SeqCst);
                         let cancel = std::sync::Arc::clone(&tab.cancel_token);
 
-                        std::thread::spawn(move || {
+                        BG_POOL.spawn(move || {
                             #[cfg(feature = "profiling")]
                             puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles::bg_thread");
                             if refresh_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
@@ -527,6 +541,23 @@ impl App {
                             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                                 return;
                             }
+
+                            let progress = |msg: &str| {
+                                COMMANDS_QUEUE.push(ActionToPerform::TabAction(
+                                    TabTarget::TabWithId(tab_id),
+                                    TabAction::FilesProgress {
+                                        progress: msg.to_string(),
+                                        generation,
+                                    },
+                                ));
+                            };
+
+                            progress(&format!(
+                                "Scanning {} director{}…",
+                                directories.len(),
+                                if directories.len() == 1 { "y" } else { "ies" }
+                            ));
+
                             let mut list = crate::app::dir_handling::read_directory(
                                 &directories,
                                 depth,
@@ -536,6 +567,9 @@ impl App {
                             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                                 return;
                             }
+
+                            progress(&format!("Sorting {} entries…", list.len()));
+
                             crate::app::dir_handling::sort_entries_vec(&mut list, &settings.data);
                             #[cfg(feature = "profiling")]
                             puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles::filter_visible");
@@ -544,9 +578,21 @@ impl App {
                                 show_hidden,
                                 search.as_ref(),
                             );
+                            // Build DirList backing store from the loaded entries
+                            let dir_list = if depth <= 1 && directories.len() == 1 {
+                                // Single-directory read — entries share the same dir prefix
+                                crate::data::files::DirList::from_sorted_list(&list)
+                            } else {
+                                None
+                            };
                             COMMANDS_QUEUE.push(ActionToPerform::TabAction(
                                 TabTarget::TabWithId(tab_id),
-                                TabAction::FilesLoaded { list, generation, visible },
+                                TabAction::FilesLoaded {
+                                    list,
+                                    generation,
+                                    visible,
+                                    dir_list,
+                                },
                             ));
                         });
                     }
@@ -565,7 +611,8 @@ impl App {
                     commands::TabAction::FilesLoaded {
                         list,
                         generation,
-                        visible: _,
+                        visible,
+                        dir_list,
                     } => {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!("lwa_fm::handle_action::FilesLoaded");
@@ -577,7 +624,16 @@ impl App {
                             .load(std::sync::atomic::Ordering::SeqCst)
                             != generation
                         {
+                            // Stale generation — but if the list is empty, apply as a
+                            // visual fallback so the user sees something while the
+                            // "true" refresh is still in flight.
+                            if tab.list.is_empty() {
+                                tab.list = list;
+                                tab.visible_entries = visible;
+                                tab.dir_list = dir_list;
+                            }
                             tab.loading = false;
+                            tab.loading_progress = None;
                             if tab.pending_refresh {
                                 tab.pending_refresh = false;
                                 TabAction::RequestFilesRefresh.schedule_tab(tab_id);
@@ -586,15 +642,30 @@ impl App {
                         }
                         tab.update_settings(ctx);
                         tab.list = list;
-                        let settings = ctx
-                            .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
-                        tab.sort_entries(&settings.data);
-                        tab.update_visible_entries();
+                        tab.visible_entries = visible;
+                        tab.dir_list = dir_list;
                         tab.loading = false;
+                        tab.loading_progress = None;
                         if tab.pending_refresh {
                             tab.pending_refresh = false;
                             TabAction::RequestFilesRefresh.schedule_tab(tab_id);
                         }
+                    }
+                    commands::TabAction::FilesProgress {
+                        progress,
+                        generation: progress_gen,
+                    } => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        if tab
+                            .refresh_generation
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            != progress_gen
+                        {
+                            return;
+                        }
+                        tab.loading_progress = Some(progress);
                     }
                     commands::TabAction::SearchInFavorites(start) => {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
@@ -728,6 +799,7 @@ impl App {
             }
             ActionToPerform::CloseActiveModalWindow => {
                 self.display_modal = None;
+                self.assets.set_icon_size(self.settings.icon_size);
                 TabAction::RequestFilesRefresh.schedule_active_tab();
             }
             ActionToPerform::ViewSettingsChanged(_) => {

@@ -7,7 +7,7 @@ impl Widget for ElapsedTime {
     fn ui(self, ui: &mut Ui) -> Response {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::time_column::time_label");
-        let Some(galley) = crate::app::dock::TIME_POOL.with_borrow(|pool| pool.get(&self).cloned())
+        let Some(galley) = crate::app::dock::TIME_POOL.with_borrow_mut(|pool| pool.get(&self).cloned())
         else {
             return ui.response();
         };
@@ -27,10 +27,10 @@ impl Widget for ElapsedTime {
     }
 }
 #[inline]
-pub fn draw_size(ui: &mut Ui, size: u32) -> Response {
+pub fn draw_size(ui: &mut Ui, size: u64) -> Response {
     #[cfg(feature = "profiling")]
     puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body::size_column::draw_size");
-    let Some(galley) = crate::app::dock::SIZES_POOL.with_borrow(|pool| pool.get(&size).cloned())
+    let Some(galley) = crate::app::dock::SIZES_POOL.with_borrow_mut(|pool| pool.get(&size).cloned())
     else {
         return ui.response();
     };

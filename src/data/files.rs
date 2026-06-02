@@ -8,7 +8,8 @@ use rayon::iter::{
     IntoParallelIterator, IntoParallelRefIterator, ParallelExtend, ParallelIterator,
 };
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, fs::FileType, path::Path};
+use std::sync::Arc;
+use std::{cmp::Ordering, fs::FileType, path::{Path, PathBuf}};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Decode, Encode, Hash,
@@ -32,16 +33,10 @@ impl From<FileType> for EntryType {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, Decode, Encode)]
+#[derive(Debug, Clone, Deserialize, Serialize, Decode, Encode)]
 pub struct SortKey {
     pub is_file: bool,
-    pub sort_key: [u8; 30],
-}
-
-const fn empty() -> [u8; 30] {
-    [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ]
+    pub sort_key: Vec<u8>,
 }
 
 impl SortKey {
@@ -62,7 +57,6 @@ impl SortKey {
     pub fn new_path(base_path: &str, is_file: bool) -> Self {
         let mut sort_key = Vec::with_capacity(30);
         _ = COLLATER.write_sort_key_to(base_path, &mut sort_key);
-        let sort_key = sort_key.try_into().unwrap_or(empty());
         Self { is_file, sort_key }
     }
 }
@@ -104,18 +98,13 @@ impl DirContent {
 
     #[inline]
     pub fn populate(&self, entries: &mut Vec<DirEntry>) {
-        let file_name_index = self.path.len() + 1;
-        let prefix = self.path.as_str();
+        let dir: Arc<str> = Arc::from(self.path.as_str());
         entries.par_extend(self.entries.par_iter().map(|e| {
-            let mut path = String::with_capacity(self.path.len() + 1 + e.file_name.len());
-            path.push_str(prefix);
-            path.push(std::path::MAIN_SEPARATOR);
-            path.push_str(&e.file_name);
             DirEntry {
                 meta: e.meta,
-                path,
-                file_name_index,
-                sort_key: e.sort_key,
+                sort_key: e.sort_key.clone(),
+                dir: Arc::clone(&dir),
+                file_name: e.file_name.clone(),
             }
         }));
     }
@@ -143,9 +132,9 @@ impl DirEntryData {
 #[derive(Debug, Clone, Serialize, Deserialize, Decode, Encode)]
 pub struct DirEntry {
     pub meta: DirEntryMetaData,
-    pub path: String,
-    file_name_index: usize,
     pub sort_key: SortKey,
+    pub dir: Arc<str>,
+    pub file_name: String,
 }
 
 impl DirEntry {
@@ -153,10 +142,76 @@ impl DirEntry {
     pub fn read_metadata(&mut self) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::conversion::read_metadata");
-        let Ok(metadata) = std::fs::metadata(self.path.as_str()) else {
+        let path = self.get_path();
+        let Ok(metadata) = std::fs::metadata(&path) else {
             return;
         };
         self.meta = metadata.into();
+    }
+
+    #[must_use]
+    pub fn full_path_string(&self) -> String {
+        let mut s = String::with_capacity(self.dir.len() + 1 + self.file_name.len());
+        s.push_str(&self.dir);
+        s.push(std::path::MAIN_SEPARATOR);
+        s.push_str(&self.file_name);
+        s
+    }
+
+    #[must_use]
+    pub fn get_path(&self) -> PathBuf {
+        PathBuf::from(self.full_path_string())
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_file(&self) -> bool {
+        matches!(self.meta.entry_type, EntryType::File)
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn get_splitted_path(&self) -> (&str, &str) {
+        (&self.dir, &self.file_name)
+    }
+
+    #[must_use]
+    pub fn to_full_path_string(&self) -> String {
+        self.get_path().to_full_path_string()
+    }
+
+    #[cfg(test)]
+    pub fn test_new(path: &str) -> Self {
+        let sep = path.rfind(std::path::MAIN_SEPARATOR)
+            .or_else(|| path.rfind('/'));
+        let (dir, file_name) = sep
+            .map_or(("", path), |i| (&path[..i], &path[i + 1..]));
+        // Normalize forward slashes to platform separator (preserving leading /)
+        let dir = if dir.is_empty() {
+            Arc::from("")
+        } else if dir.starts_with('/') {
+            let sep_str = std::path::MAIN_SEPARATOR.to_string();
+            let normalized = format!(
+                "{}{}",
+                std::path::MAIN_SEPARATOR,
+                dir[1..].replace('/', &sep_str)
+            );
+            Arc::from(normalized.as_str())
+        } else {
+            Arc::from(dir.replace('/', &std::path::MAIN_SEPARATOR.to_string()).as_str())
+        };
+        Self {
+            meta: DirEntryMetaData {
+                entry_type: EntryType::File,
+                created_at: Default::default(),
+                modified_at: Default::default(),
+                since_modified: Default::default(),
+                size: 0,
+            },
+            dir,
+            file_name: file_name.to_string(),
+            sort_key: SortKey::new_path(file_name, true),
+        }
     }
 }
 
@@ -166,7 +221,7 @@ pub struct DirEntryMetaData {
     pub created_at: TimestampSeconds,
     pub modified_at: TimestampSeconds,
     pub since_modified: ElapsedTime,
-    pub size: u32,
+    pub size: u64,
 }
 
 impl From<EntryType> for DirEntryMetaData {
@@ -215,7 +270,7 @@ impl From<std::fs::Metadata> for DirEntryMetaData {
             created_at,
             modified_at,
             since_modified,
-            size: size as u32,
+            size,
         }
     }
 }
@@ -263,22 +318,110 @@ impl TryFrom<std::fs::DirEntry> for DirEntry {
             meta
         };
 
-        let path: String = {
-            #[cfg(feature = "profiling")]
-            puffin::profile_scope!("lwa_fm::dir_handling::conversion::from_std::string");
-            value.path().to_full_path_string()
-        };
-        let file_name_index = path.len() - value.file_name().len();
-        let sort_key = SortKey::new_path(
-            value.file_name().as_os_str().to_str().ok_or(())?,
-            file_type.is_file(),
-        );
+        let path = value.path().to_full_path_string();
+        let file_name = value.file_name().to_string_lossy().into_owned();
+        let dir_len = path.len().saturating_sub(file_name.len() + 1);
+        let dir = Arc::from(&path[..dir_len]);
+        let sort_key = SortKey::new_path(&file_name, file_type.is_file());
         Ok(Self {
             meta,
-            path,
-            file_name_index,
+            dir,
+            file_name,
             sort_key,
         })
+    }
+}
+
+/// Lazy-loading directory listing backed by [`DirEntryData`].
+///
+/// Stores raw entry data in a shared [`Arc`] slice, keeping sort/filter state as
+/// index permutations. Full [`DirEntry`] values are materialised only on request,
+/// which avoids allocating full-path strings and sort-key vectors for entries
+/// that are never displayed.
+#[derive(Debug, Clone)]
+pub struct DirList {
+    pub dir: Arc<str>,
+    pub entries: Arc<[DirEntryData]>,
+    pub sorted: Vec<usize>,
+    pub visible: Vec<usize>,
+}
+
+impl DirList {
+    #[must_use]
+    pub fn new(dir: Arc<str>, entries: Vec<DirEntryData>) -> Self {
+        let entries: Arc<[DirEntryData]> = Arc::from(entries);
+        let sorted: Vec<usize> = (0..entries.len()).collect();
+        let visible = sorted.clone();
+        Self {
+            dir,
+            entries,
+            sorted,
+            visible,
+        }
+    }
+
+    #[inline]
+    pub fn from_content(content: &DirContent) -> Self {
+        Self::new(Arc::from(content.path.as_str()), content.entries.clone())
+    }
+
+    /// Materialise a single [`DirEntry`] for the entry at `sorted_index`.
+    #[inline]
+    #[must_use]
+    pub fn materialize(&self, sorted_index: usize) -> DirEntry {
+        let data = &self.entries[sorted_index];
+        DirEntry {
+            meta: data.meta,
+            sort_key: data.sort_key.clone(),
+            dir: Arc::clone(&self.dir),
+            file_name: data.file_name.clone(),
+        }
+    }
+
+    /// Number of entries passing the current filter.
+    #[inline]
+    #[must_use]
+    pub fn visible_count(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// Total number of entries in the directory.
+    #[inline]
+    #[must_use]
+    pub fn total_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Populate `out` with materialised entries for the current visible range.
+    pub fn populate_visible(&self, out: &mut Vec<DirEntry>) {
+        out.reserve(self.visible.len());
+        for &vi in &self.visible {
+            let si = self.sorted[vi];
+            out.push(self.materialize(si));
+        }
+    }
+
+    /// Build a `DirList` from an already-sorted `Vec<DirEntry>`.
+    /// All entries MUST share the same `dir` prefix.
+    pub fn from_sorted_list(list: &[DirEntry]) -> Option<Self> {
+        let dir = list.first()?.dir.clone();
+        let entries: Vec<DirEntryData> = list
+            .iter()
+            .map(|e| DirEntryData {
+                meta: e.meta,
+                file_name: e.file_name.clone(),
+                sort_key: e.sort_key.clone(),
+            })
+            .collect();
+        Some(Self::new(dir, entries))
+    }
+
+    /// Build a sorted `DirList` from a raw `DirContent`.
+    pub fn from_sorted_content(content: &DirContent) -> Self {
+        let mut dl = Self::from_content(content);
+        dl.sorted = (0..dl.entries.len()).collect();
+        dl.visible = dl.sorted.clone();
+        dl
     }
 }
 
@@ -292,56 +435,15 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
         let meta = value.metadata().map_err(|_| ())?;
         let meta: DirEntryMetaData = meta.into();
         let path = value.path().to_full_path_string();
-        let file_name_index = path.len() - value.file_name().len();
-        let file_name = value.file_name().to_str().ok_or(())?;
-        let sort_key = SortKey::new_path(file_name, meta.entry_type.eq(&EntryType::File));
+        let file_name = value.file_name().to_string_lossy().into_owned();
+        let dir_len = path.len().saturating_sub(file_name.len() + 1);
+        let dir = Arc::from(&path[..dir_len]);
+        let sort_key = SortKey::new_path(&file_name, meta.entry_type.eq(&EntryType::File));
         Ok(Self {
             meta,
-            path,
-            file_name_index,
+            dir,
+            file_name,
             sort_key,
         })
-    }
-}
-impl AsRef<Path> for DirEntry {
-    #[inline]
-    fn as_ref(&self) -> &Path {
-        Path::new(self.path.as_str())
-    }
-}
-
-impl DirEntry {
-    #[must_use]
-    pub fn get_path(&self) -> &Path {
-        self.as_ref()
-    }
-
-    #[inline]
-    #[must_use]
-    pub const fn is_file(&self) -> bool {
-        matches!(self.meta.entry_type, EntryType::File)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn get_splitted_path(&self) -> (&str, &str) {
-        self.path.split_at(self.file_name_index)
-    }
-
-    #[cfg(test)]
-    pub fn test_new(path: &str) -> Self {
-        let file_name_index = path.rfind(std::path::MAIN_SEPARATOR).map_or(0, |i| i + 1);
-        Self {
-            meta: DirEntryMetaData {
-                entry_type: EntryType::File,
-                created_at: Default::default(),
-                modified_at: Default::default(),
-                since_modified: Default::default(),
-                size: 0,
-            },
-            path: path.to_string(),
-            file_name_index,
-            sort_key: SortKey::new_path(&path[file_name_index..], true),
-        }
     }
 }

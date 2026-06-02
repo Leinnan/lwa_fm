@@ -393,8 +393,12 @@ impl App {
                                             let showing = current_tab.visible_entries.len();
                                             let total = current_tab.list.len();
                                             if current_tab.loading {
+                                                let text = current_tab
+                                                    .loading_progress
+                                                    .as_deref()
+                                                    .unwrap_or("Loading...");
                                                 ui.label(
-                                                    egui::RichText::new("Loading...")
+                                                    egui::RichText::new(text)
                                                         .color(egui::Color32::GRAY),
                                                 );
                                             } else if showing != total {

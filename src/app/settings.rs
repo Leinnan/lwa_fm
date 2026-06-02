@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     app::{
         Sort,
+        assets::IconSize,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
     },
     helper::DataHolder,
@@ -14,8 +15,10 @@ use crate::{
 use super::commands::ActionToPerform;
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 pub struct ApplicationSettings {
     pub terminal_path: String,
+    pub icon_size: IconSize,
 }
 
 impl Default for ApplicationSettings {
@@ -25,6 +28,7 @@ impl Default for ApplicationSettings {
             terminal_path: "C:\\Program Files\\Alacritty\\alacritty.exe".into(),
             #[cfg(target_os = "macos")]
             terminal_path: "Terminal".into(),
+            icon_size: IconSize::default(),
         }
     }
 }
@@ -126,6 +130,15 @@ impl ApplicationSettings {
                             ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Settings)
                                 .schedule();
                         }
+                    });
+                ui.add_space(10.0);
+                ui.label("Icon Size");
+                egui::ComboBox::from_label("")
+                    .selected_text(format!("{:?}", self.icon_size))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.icon_size, IconSize::Small, "Small");
+                        ui.selectable_value(&mut self.icon_size, IconSize::Medium, "Medium");
+                        ui.selectable_value(&mut self.icon_size, IconSize::Large, "Large");
                     });
                 ui.add_space(10.0);
                 ui.separator();

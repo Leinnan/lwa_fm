@@ -1,12 +1,15 @@
 use crate::data::files::{DirContent, DirEntry};
 use bincode::config;
 use directories::ProjectDirs;
+use lru::LruCache;
 use std::{
     collections::BTreeSet,
     collections::HashMap,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     sync::mpsc,
+    sync::Arc,
     sync::{LazyLock, Mutex},
     thread,
 };
@@ -15,6 +18,12 @@ const MAX_CACHE_SIZE_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
 const EVICT_TARGET_BYTES: u64 = 50 * 1024 * 1024; // 50 MB target after eviction
 const EVICT_CHECK_INTERVAL: u64 = 1000;
 const EVICT_BATCH_SIZE: usize = 500;
+const IN_MEMORY_CACHE_CAPACITY: usize = 500;
+
+/// Hot in-memory cache: avoids the mtime stat + sled deserialization for
+/// recently accessed directories. The tuple is `(mtime_nanos, DirContent)`.
+static IN_MEMORY_CACHE: LazyLock<Mutex<LruCache<Vec<u8>, (u128, Arc<DirContent>)>>> =
+    LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(IN_MEMORY_CACHE_CAPACITY).expect("capacity must be > 0"))));
 
 static CACHE_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -139,8 +148,29 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
     let path = cache_key(dir);
     let generation = current_generation(&path);
 
-    // Safety net: check directory modification time. If the directory's mtime
-    // changed since it was cached, invalidate the stale entry.
+    // ── Tier 1: In-memory hot cache (avoids mtime stat + sled deserialization) ──
+    if let Ok(mut mem_cache) = IN_MEMORY_CACHE.lock() {
+        if let Some(&(cached_mtime, ref content)) = mem_cache.get(&path) {
+            // Verify generation
+            if current_generation(&path) == generation {
+                // Fast mtime check via in-memory value (no syscall)
+                if let Ok(dir_meta) = std::fs::metadata(dir) {
+                    if let Ok(modified) = dir_meta.modified() {
+                        if let Ok(nanos) = modified.duration_since(std::time::UNIX_EPOCH) {
+                            if nanos.as_nanos() == cached_mtime {
+                                content.populate(entries);
+                                return;
+                            }
+                        }
+                    }
+                }
+                // mtime changed — remove from memory cache, fall through
+                mem_cache.pop(&path);
+            }
+        }
+    }
+
+    // ── Tier 2: Sled on-disk cache with mtime guard ──
     #[cfg(feature = "profiling")]
     puffin::profile_scope!("lwa_fm::database::read_dir::mtime_check");
     if let Ok(dir_meta) = std::fs::metadata(dir) {
@@ -163,6 +193,7 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
         }
     }
 
+    let mut from_memory: Option<Arc<DirContent>> = None;
     if let Ok(Some(data)) = SLED_DIRS.get(&path) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::db_read::deserialize");
@@ -171,36 +202,56 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
             if current_generation(&path) == generation {
                 #[cfg(feature = "profiling")]
                 puffin::profile_scope!("lwa_fm::dir_handling::db_read::deserialize::extend");
-                meta.populate(entries);
-                return;
+                from_memory = Some(Arc::new(meta));
+            } else {
+                // Generation mismatch — cache entry is stale; remove it
+                log::info!("Stale cache entry (generation mismatch) for {}, removing", dir.display());
+                _ = SLED_DIRS.remove(&path);
             }
-            // Generation mismatch — cache entry is stale; remove it
-            log::info!("Stale cache entry (generation mismatch) for {}, removing", dir.display());
-            _ = SLED_DIRS.remove(&path);
         } else {
             // Corrupt or incompatible cache entry; remove it
             log::info!("Corrupt cache entry for {}, removing", dir.display());
             _ = SLED_DIRS.remove(&path);
         }
     }
-    let Some(dir_content) = DirContent::read(dir) else {
-        return;
+
+    let dir_content = match from_memory {
+        Some(content) => content,
+        None => {
+            let Some(content) = DirContent::read(dir) else {
+                return;
+            };
+            let content = Arc::new(content);
+            // Write to sled via background thread
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("lwa_fm::database::read_dir::cache_write");
+            let entry_mtime = std::fs::metadata(dir).ok()
+                .and_then(|m| m.modified().ok());
+            let mtime_nanos = entry_mtime.and_then(|m| {
+                m.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_nanos())
+            });
+            if let Ok(data) = bincode::encode_to_vec(&content, config) {
+                _ = cache_writer_sender().send(CacheWrite::Insert {
+                    path: path.clone(),
+                    generation,
+                    data,
+                    mtime_nanos,
+                });
+            }
+            content
+        }
     };
+
+    // Populate entries and seed in-memory cache
     dir_content.populate(entries);
-    #[cfg(feature = "profiling")]
-    puffin::profile_scope!("lwa_fm::database::read_dir::cache_write");
-    let entry_mtime = std::fs::metadata(dir).ok()
-        .and_then(|m| m.modified().ok());
-    let mtime_nanos = entry_mtime.and_then(|m| {
-        m.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_nanos())
-    });
-    if let Ok(data) = bincode::encode_to_vec(&dir_content, config) {
-        _ = cache_writer_sender().send(CacheWrite::Insert {
-            path,
-            generation,
-            data,
-            mtime_nanos,
-        });
+    if let Ok(mut mem_cache) = IN_MEMORY_CACHE.lock() {
+        if let Ok(dir_meta) = std::fs::metadata(dir) {
+            if let Ok(modified) = dir_meta.modified() {
+                if let Ok(nanos) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    mem_cache.put(path, (nanos.as_nanos(), Arc::clone(&dir_content)));
+                }
+            }
+        }
     }
 }
 
@@ -218,43 +269,54 @@ fn maybe_evict_cache() {
     if !count.is_multiple_of(EVICT_CHECK_INTERVAL) {
         return;
     }
-    let Ok(size) = SLED_DIRS.size_on_disk() else {
+    let Ok(mut current_size) = SLED_DIRS.size_on_disk() else {
         return;
     };
-    if size <= MAX_CACHE_SIZE_BYTES {
+    if current_size <= MAX_CACHE_SIZE_BYTES {
         return;
     }
-    log::warn!("Sled cache size {size} exceeds {MAX_CACHE_SIZE_BYTES}, evicting");
+    log::warn!("Sled cache size {current_size} exceeds {MAX_CACHE_SIZE_BYTES}, evicting");
     let mut removed = 0u64;
+
+    // First pass: scan for data keys, filtering out mtime entries
     let keys: Vec<Vec<u8>> = SLED_DIRS
         .iter()
         .keys()
-        .take(EVICT_BATCH_SIZE)
         .filter_map(Result::ok)
+        .filter(|k| !k.starts_with(b"mtime_"))
+        .take(EVICT_BATCH_SIZE)
         .map(|ivec| ivec.to_vec())
         .collect();
+
     for key in &keys {
-        if SLED_DIRS.size_on_disk().unwrap_or(size) <= EVICT_TARGET_BYTES {
+        current_size = SLED_DIRS.size_on_disk().unwrap_or(current_size);
+        if current_size <= EVICT_TARGET_BYTES {
             break;
-        }
-        // Skip mtime entries when evicting directory listings
-        if key.starts_with(b"mtime_") {
-            continue;
         }
         if SLED_DIRS.remove(key.as_slice()).is_ok() {
             removed += 1;
         }
     }
+
+    // If first pass found no data keys, scan a larger batch before giving up
     if removed == 0 {
-        // Fallback: if individual removal doesn't help, clear everything
-        log::warn!("Sled cache eviction removed 0 entries, falling back to full clear");
-        if let Err(e) = SLED_DIRS.clear() {
-            log::error!("Failed to clear sled cache: {e}");
-            return;
-        }
-        if let Ok(mut generations) = CACHE_GENERATIONS.lock() {
-            generations.clear();
+        let more: Vec<Vec<u8>> = SLED_DIRS
+            .iter()
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|k| !k.starts_with(b"mtime_"))
+            .take(EVICT_BATCH_SIZE * 4)
+            .map(|ivec| ivec.to_vec())
+            .collect();
+        for key in &more {
+            current_size = SLED_DIRS.size_on_disk().unwrap_or(current_size);
+            if current_size <= EVICT_TARGET_BYTES {
+                break;
+            }
+            _ = SLED_DIRS.remove(key.as_slice());
+            removed += 1;
         }
     }
+
     log::info!("Evicted {removed} entries from sled cache (target: {EVICT_TARGET_BYTES})");
 }

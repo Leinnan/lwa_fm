@@ -1,5 +1,5 @@
 use crate::app::{DataSource, MatchMode, SearchTerm, dock::CurrentPath};
-use crate::data::files::DirEntry;
+use crate::data::files::{DirEntry, DirList};
 use crossbeam::queue::SegQueue;
 use std::{borrow::Cow, fmt::Display, path::PathBuf, str::FromStr};
 
@@ -58,6 +58,12 @@ pub enum TabAction {
         list: Vec<DirEntry>,
         generation: u64,
         visible: Vec<usize>,
+        dir_list: Option<DirList>,
+    },
+    /// Background thread progress update.
+    FilesProgress {
+        progress: String,
+        generation: u64,
     },
 }
 
@@ -149,6 +155,7 @@ impl From<&ActionToPerform> for Cow<'static, str> {
                 TabAction::LoadSavedSearch(_) => Cow::Borrowed("Load search"),
                 TabAction::DeleteSavedSearch(_) => Cow::Borrowed("Delete search"),
                 TabAction::FilesLoaded { .. } => Cow::Borrowed("Files loaded"),
+                TabAction::FilesProgress { .. } => Cow::Borrowed("Files loading progress"),
             },
             ActionToPerform::AddToFavorites(_) => Cow::Borrowed("Add to favorites"),
             ActionToPerform::RemoveFromFavorites(_) => Cow::Borrowed("Remove from favorites"),

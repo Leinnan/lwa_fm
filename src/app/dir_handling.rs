@@ -9,7 +9,10 @@ use std::{
 use notify::RecursiveMode;
 
 use icu::collator::CollatorBorrowed;
-use rayon::slice::ParallelSliceMut;
+use rayon::{
+    iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
+    slice::ParallelSliceMut,
+};
 
 use crate::{
     app::{
@@ -155,6 +158,63 @@ impl TabData {
     }
 }
 
+/// Walk a single root path and return its entries.
+/// Shared helper used by [`read_directory`] for each path in the parallelized
+/// per-root walk.
+fn walk_single_root(
+    root: &PathBuf,
+    depth: usize,
+    show_hidden: bool,
+    cancel: &AtomicBool,
+) -> Vec<DirEntry> {
+    if cancel.load(AtomicOrdering::SeqCst) {
+        return Vec::new();
+    }
+    if depth > 1 {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!(
+            "lwa_fm::dir_handling::walk_single_root::walkdir",
+            root.to_string_lossy().as_ref()
+        );
+        let walk_entries: Vec<walkdir::DirEntry> = walkdir::WalkDir::new(root)
+            .follow_links(true)
+            .min_depth(1)
+            .max_depth(depth + 1)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                if show_hidden {
+                    return true;
+                }
+                let name = e.file_name().to_string_lossy();
+                !name.starts_with('.') && !name.starts_with('$')
+            })
+            .filter_map(Result::ok)
+            .take_while(|_| !cancel.load(AtomicOrdering::SeqCst))
+            .collect();
+
+        if cancel.load(AtomicOrdering::SeqCst) {
+            return Vec::new();
+        }
+
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!(
+            "lwa_fm::dir_handling::walk_single_root::parallel_convert",
+            walk_entries.len().to_string().as_str()
+        );
+        walk_entries
+            .into_par_iter()
+            .filter_map(|e| e.try_into().ok())
+            .collect()
+    } else {
+        let mut entries = Vec::new();
+        database::read_dir(root, &mut entries);
+        entries
+    }
+}
+
 pub fn read_directory(
     paths: &[PathBuf],
     depth: usize,
@@ -163,83 +223,25 @@ pub fn read_directory(
 ) -> Vec<DirEntry> {
     #[cfg(feature = "profiling")]
     puffin::profile_scope!("lwa_fm::dir_handling::read_directory");
-    let mut list = Vec::new();
-    for d in paths {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::dir_handling::read_directory::root", d.to_string_lossy().as_ref());
-        if cancel.load(AtomicOrdering::SeqCst) {
-            return list;
-        }
-        database::read_dir(d, &mut list);
-        if depth > 1 {
-            // Collect subdirectory paths first (fast non-blocking walk)
-            let subdirs = {
-                #[cfg(feature = "profiling")]
-                puffin::profile_scope!("lwa_fm::dir_handling::read_directory::collect_subdirs");
-                walkdir::WalkDir::new(d)
-                    .follow_links(true)
-                    .min_depth(1)
-                    .max_depth(depth)
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .filter(|e| e.file_type().is_dir())
-                    .filter(|e| show_hidden || !is_hidden_dir(e))
-                    .map(|e| e.path().to_path_buf())
-                    .take_while(|_| !cancel.load(AtomicOrdering::SeqCst))
-                    .collect::<Vec<PathBuf>>()
-            };
 
-            if cancel.load(AtomicOrdering::SeqCst) {
-                return list;
-            }
+    // Parallel per-root walk for multiple paths.
+    // For a single path the overhead of rayon dispatch is negligible.
+    let lists: Vec<Vec<DirEntry>> = paths
+        .par_iter()
+        .map(|d| walk_single_root(d, depth, show_hidden, cancel))
+        .collect();
 
-            // Read subdirectories in parallel using rayon
-            #[cfg(feature = "profiling")]
-            puffin::profile_scope!("lwa_fm::dir_handling::read_directory::parallel_read", subdirs.len().to_string().as_str());
-            {
-                use std::sync::Mutex;
-                let list_mutex = Mutex::new(&mut list);
-                use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-                subdirs.par_iter().for_each(|subdir| {
-                    #[cfg(feature = "profiling")]
-                    puffin::profile_scope!("lwa_fm::dir_handling::read_directory::read_subdir", subdir.to_string_lossy().as_ref());
-                    if cancel.load(AtomicOrdering::SeqCst) {
-                        return;
-                    }
-                    database::read_dir(subdir, &mut *list_mutex.lock().expect("dir list mutex"));
-                });
-            }
-        }
-    }
-    // Deduplicate by path using a HashSet (avoids O(n log n) sort)
-    {
+    let mut list: Vec<DirEntry> = lists.into_iter().flatten().collect();
+
+    // Dedup is only needed with multiple roots or recursive walks (symlinks may cause overlap)
+    if paths.len() > 1 || depth > 1 {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::read_directory::dedup", list.len().to_string().as_str());
         let mut seen: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(list.len());
-        list.retain(|e| seen.insert(e.path.clone()));
+        list.retain(|e| seen.insert(e.full_path_string()));
     }
     list
-}
-
-fn is_hidden_dir(entry: &walkdir::DirEntry) -> bool {
-    #[cfg(feature = "profiling")]
-    puffin::profile_scope!("lwa_fm::dir_handling::is_hidden_dir");
-    let mut parent = entry.path().parent();
-    let mut parent_depth = 0;
-    while let Some(p) = parent {
-        if p.iter().next_back().is_some_and(|f| {
-            f.to_string_lossy().starts_with('.') || f.to_string_lossy().starts_with('$')
-        }) {
-            return true;
-        }
-        parent_depth += 1;
-        if parent_depth >= entry.depth() {
-            break;
-        }
-        parent = p.parent();
-    }
-    false
 }
 
 pub fn sort_entries_vec(entries: &mut [DirEntry], settings: &DirectoryViewSettings) {
@@ -535,7 +537,10 @@ pub fn get_directories_recursive(
 
 #[cfg(test)]
 mod tests {
-    use rayon::slice::ParallelSliceMut;
+use rayon::{
+    iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
+    slice::ParallelSliceMut,
+};
 
     use crate::data::files::DirEntry;
 
@@ -606,21 +611,19 @@ mod tests {
 
     #[test]
     fn dedup_removes_all_duplicates_regardless_of_order() {
-        let mut list = vec![
+        let entries = [
             DirEntry::test_new("/fav/subdir/file.txt"),
             DirEntry::test_new("/fav/file.txt"),
             DirEntry::test_new("/fav/subdir/file.txt"),
             DirEntry::test_new("/fav/file.txt"),
         ];
-        list.par_sort_unstable_by(|a, b| a.path.cmp(&b.path));
-        list.dedup_by(|a, b| a.path == b.path);
-        assert_eq!(
-            list.len(),
-            2,
-            "should have 2 unique entries after sort+dedup"
-        );
-        assert!(list.iter().any(|e| e.path == "/fav/file.txt"));
-        assert!(list.iter().any(|e| e.path == "/fav/subdir/file.txt"));
+        let mut list: Vec<DirEntry> = entries.to_vec();
+        list.par_sort_unstable_by(|a, b| {
+            a.dir.as_ref().cmp(b.dir.as_ref())
+                .then(a.file_name.cmp(&b.file_name))
+        });
+        list.dedup_by(|a, b| a.dir == b.dir && a.file_name == b.file_name);
+        assert_eq!(list.len(), 2, "should have 2 unique entries");
     }
 
     #[test]
