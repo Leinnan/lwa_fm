@@ -38,6 +38,7 @@ pub enum IconSize {
     #[default]
     Medium,
     Large,
+    ExtraLarge,
 }
 
 impl IconSize {
@@ -46,6 +47,7 @@ impl IconSize {
             Self::Small => 32,
             Self::Medium => 48,
             Self::Large => 64,
+            Self::ExtraLarge => 96,
         }
     }
 
@@ -54,6 +56,7 @@ impl IconSize {
             Self::Small => 18.0,
             Self::Medium => 24.0,
             Self::Large => 40.0,
+            Self::ExtraLarge => 60.0,
         }
     }
 
@@ -62,6 +65,7 @@ impl IconSize {
             Self::Small => 64,
             Self::Medium => 96,
             Self::Large => 160,
+            Self::ExtraLarge => 240,
         }
     }
 
@@ -70,6 +74,7 @@ impl IconSize {
             Self::Small => "_s",
             Self::Medium => "_m",
             Self::Large => "_l",
+            Self::ExtraLarge => "_xl",
         }
     }
 
@@ -78,6 +83,7 @@ impl IconSize {
             Self::Small => 1.1,
             Self::Medium => 1.25,
             Self::Large => 1.4,
+            Self::ExtraLarge => 1.75,
         }
     }
 
@@ -86,6 +92,7 @@ impl IconSize {
             Self::Small => 120.0,
             Self::Medium => 168.0,
             Self::Large => 220.0,
+            Self::ExtraLarge => 330.0,
         }
     }
 
@@ -94,6 +101,7 @@ impl IconSize {
             Self::Small => 106.0,
             Self::Medium => 148.0,
             Self::Large => 196.0,
+            Self::ExtraLarge => 294.0,
         }
     }
 
@@ -102,6 +110,7 @@ impl IconSize {
             Self::Small => 60.0,
             Self::Medium => 84.0,
             Self::Large => 120.0,
+            Self::ExtraLarge => 180.0,
         }
     }
 }

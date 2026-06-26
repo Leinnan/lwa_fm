@@ -139,6 +139,7 @@ impl ApplicationSettings {
                         ui.selectable_value(&mut self.icon_size, IconSize::Small, "Small");
                         ui.selectable_value(&mut self.icon_size, IconSize::Medium, "Medium");
                         ui.selectable_value(&mut self.icon_size, IconSize::Large, "Large");
+                        ui.selectable_value(&mut self.icon_size, IconSize::ExtraLarge, "Extra Large");
                     });
                 ui.add_space(10.0);
                 ui.separator();
