@@ -39,6 +39,7 @@ use crate::data::time::ElapsedTime;
 use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer, PathHelper};
 use crate::locations::Locations;
 use crate::toast;
+use crate::widgets::label_scrollable::ScrollableLabel;
 use crate::widgets::time_label::draw_size;
 use std::cell::RefCell;
 
@@ -1419,8 +1420,8 @@ impl MyTabViewer<'_> {
 
         child_ui.add_sized(
             [text_width, GRID_TILE_TEXT_HEIGHT],
-            egui::Label::new(entry.get_splitted_path().1)
-                .wrap_mode(egui::TextWrapMode::Truncate)
+            ScrollableLabel::new(entry.get_splitted_path().1)
+                .scroll(hovered || is_selected)
                 .selectable(false)
                 .sense(Sense::empty()),
         );
