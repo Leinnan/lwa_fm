@@ -30,6 +30,10 @@ const VIDEO_GIF_FRAME_DELAY_MS: u16 = 600;
 const THUMBNAIL_WORKER_COUNT: usize = 3;
 const MAX_TEXTURES_PER_FRAME: usize = 10;
 
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mov", "mkv", "avi", "webm", "wmv", "flv", "m4v", "3gp", "ogv",
+];
+
 static FFMPEG_READY: OnceLock<Result<(), String>> = OnceLock::new();
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -65,7 +69,7 @@ impl IconSize {
             Self::Small => 64,
             Self::Medium => 96,
             Self::Large => 160,
-            Self::ExtraLarge => 240,
+            Self::ExtraLarge => 360,
         }
     }
 
@@ -102,15 +106,6 @@ impl IconSize {
             Self::Medium => 148.0,
             Self::Large => 196.0,
             Self::ExtraLarge => 294.0,
-        }
-    }
-
-    pub const fn tile_preview_size(self) -> f32 {
-        match self {
-            Self::Small => 60.0,
-            Self::Medium => 84.0,
-            Self::Large => 120.0,
-            Self::ExtraLarge => 180.0,
         }
     }
 }
@@ -602,7 +597,7 @@ impl AssetManager {
         match ext.as_str() {
             "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" | "ico" | "avif"
             | "tga" => HoverPreview::ImageUri(format!("file://{}", entry.to_full_path_string())),
-            "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" | "flv" | "m4v" | "3gp" | "ogv" => {
+            ext_str if VIDEO_EXTS.contains(&ext_str) => {
                 self.request_video_hover_preview(&entry.get_path())
             }
             _ => HoverPreview::Fallback,
@@ -786,6 +781,18 @@ fn directory_lookup_arg(path: &Path) -> String {
 #[cfg(not(target_os = "macos"))]
 fn directory_lookup_arg(_path: &Path) -> String {
     "folder".to_string()
+}
+
+pub fn entry_has_animated_preview(entry: &DirEntry) -> bool {
+    let Some(ext) = entry
+        .get_path()
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+    else {
+        return false;
+    };
+    ext == "gif" || VIDEO_EXTS.contains(&ext.as_str())
 }
 
 fn thumbnail_kind(path: &Path) -> Option<ThumbnailKind> {

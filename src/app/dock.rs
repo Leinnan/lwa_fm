@@ -27,7 +27,7 @@ use egui_taffy::{
 use taffy::prelude::*;
 use taffy::style_helpers;
 
-use super::assets::{AssetManager, HoverPreview};
+use super::assets::{entry_has_animated_preview, AssetManager, HoverPreview, IconSize};
 use super::commands::ActionToPerform;
 use crate::app::command_palette::build_for_path;
 use crate::app::commands::{ModalWindow, TabAction, TabTarget};
@@ -485,6 +485,7 @@ impl MyTabViewer<'_> {
         let entries_len = tab.visible_entries.len();
         let tab_popup_id = Id::new(tab_id).with(1500);
         let icon_size = self.assets.icon_size();
+        let xl = icon_size == IconSize::ExtraLarge;
         let tile_width = icon_size.tile_width();
         let tile_height = icon_size.tile_height();
         let item_spacing = ui.spacing().item_spacing;
@@ -504,6 +505,7 @@ impl MyTabViewer<'_> {
         let row_count = entries_len.div_ceil(columns);
 
         let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
+        let mut selected_inline_budget: u32 = 4;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -530,6 +532,8 @@ impl MyTabViewer<'_> {
                                 row_index == opened_popup,
                                 cmd,
                                 row_index + 1,
+                                xl,
+                                &mut selected_inline_budget,
                             );
                             row_results.push(RowResult {
                                 row_index,
@@ -1381,6 +1385,8 @@ impl MyTabViewer<'_> {
         is_popup_open: bool,
         cmd: bool,
         indexed: usize,
+        xl: bool,
+        selected_inline_budget: &mut u32,
     ) -> egui::Response {
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(tile_width, tile_height), Sense::click());
@@ -1409,8 +1415,7 @@ impl MyTabViewer<'_> {
         let text_width = inner_rect.width().max(0.0);
         let hint_height = if cmd { GRID_TILE_HINT_HEIGHT } else { 0.0 };
         let preview_height = (inner_rect.height() - GRID_TILE_TEXT_HEIGHT - hint_height).max(0.0);
-        let preview_size = self.assets.icon_size().tile_preview_size().max(self.assets.render_size_for(entry));
-        let preview_width = text_width.min(preview_size);
+        let preview_width = text_width;
         let mut child_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(inner_rect)
@@ -1451,20 +1456,54 @@ impl MyTabViewer<'_> {
             Vec2::new(text_width, preview_height),
             Layout::top_down_justified(egui::Align::Center),
             |ui| {
-                ui.add_space(((preview_height - preview_size) * 0.5).max(0.0));
-                if let Some(texture) = self.assets.request_entry_texture(entry) {
-                    ui.add(
-                        egui::Image::new(&texture)
-                            .maintain_aspect_ratio(true)
-                            .fit_to_exact_size(Vec2::new(preview_width, preview_size)),
-                    );
-                } else {
-                    ui.allocate_space(Vec2::new(preview_width, preview_size));
+                let eligible = xl && entry_has_animated_preview(entry);
+                let selected_inline = is_selected && eligible && *selected_inline_budget > 0;
+                let wants_inline = eligible && (hovered || selected_inline);
+
+                let mut rendered = false;
+                if wants_inline {
+                    match self.assets.request_hover_preview(entry) {
+                        HoverPreview::GifBytes { uri, bytes } => {
+                            ui.add(
+                                egui::Image::from_bytes(uri, bytes)
+                                    .maintain_aspect_ratio(true)
+                                    .fit_to_exact_size(Vec2::new(preview_width, preview_height)),
+                            );
+                            rendered = true;
+                        }
+                        HoverPreview::ImageUri(uri) if uri.ends_with(".gif") => {
+                            ui.add(
+                                egui::Image::new(uri)
+                                    .maintain_aspect_ratio(true)
+                                    .fit_to_exact_size(Vec2::new(preview_width, preview_height)),
+                            );
+                            rendered = true;
+                        }
+                        _ => {} // static image, Loading, or Fallback → thumbnail below
+                    }
+                }
+                if rendered && selected_inline && !hovered {
+                    *selected_inline_budget = selected_inline_budget.saturating_sub(1);
+                }
+                if !rendered {
+                    if let Some(texture) = self.assets.request_entry_texture(entry) {
+                        ui.add(
+                            egui::Image::new(&texture)
+                                .maintain_aspect_ratio(true)
+                                .fit_to_exact_size(Vec2::new(preview_width, preview_height)),
+                        );
+                    } else {
+                        ui.allocate_space(Vec2::new(preview_width, preview_height));
+                    }
                 }
             },
         );
 
-        response.on_hover_ui(|ui| Self::show_entry_hover_preview(self.assets, ui, entry))
+        if xl {
+            response
+        } else {
+            response.on_hover_ui(|ui| Self::show_entry_hover_preview(self.assets, ui, entry))
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
