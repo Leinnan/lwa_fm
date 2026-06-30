@@ -4,8 +4,9 @@ use std::collections::{BinaryHeap, HashMap, HashSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::io::Read;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
 
@@ -22,19 +23,34 @@ use crate::helper::PathHelper;
 const FOLDER_ICON_KEY: &str = "icon_folder";
 const ICON_EXT_PREFIX: &str = "icon_";
 const NO_EXT_ICON_KEY: &str = "icon_no_ext";
-const ICON_RETRY_SECS: u64 = 30;
 const TEXTURE_CAPACITY: usize = 512;
 const GIF_BYTES_CAPACITY: usize = 128;
 const VIDEO_GIF_FRAMES: u32 = 15;
 const VIDEO_GIF_FRAME_DELAY_MS: u16 = 600;
-const THUMBNAIL_WORKER_COUNT: usize = 3;
 const MAX_TEXTURES_PER_FRAME: usize = 10;
+
+// Failure backoff: first retry after `ICON_RETRY_BASE_SECS`, doubling on each
+// consecutive failure. After `ICON_RETRY_MAX_TRIES` the file is treated as
+// permanently failed and never re-attempted (stops repeat ffmpeg spawns on
+// corrupt/unsupported sources).
+const ICON_RETRY_BASE_SECS: u64 = 30;
+const ICON_RETRY_MAX_TRIES: u32 = 3;
+const ICON_BACKOFF_SHIFT_CAP: u32 = 8;
+const DURATION_CACHE_CAPACITY: usize = 512;
 
 const VIDEO_EXTS: &[&str] = &[
     "mp4", "mov", "mkv", "avi", "webm", "wmv", "flv", "m4v", "3gp", "ogv",
 ];
 
 static FFMPEG_READY: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Cross-worker cache of probed video durations, keyed by path + mtime so a
+/// re-encoded file (new mtime) is re-probed automatically. Evicted by LRU.
+static DURATION_CACHE: LazyLock<Mutex<LruCache<String, f64>>> = LazyLock::new(|| {
+    Mutex::new(LruCache::new(
+        std::num::NonZero::new(DURATION_CACHE_CAPACITY).expect("DURATION_CACHE_CAPACITY > 0"),
+    ))
+});
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IconSize {
@@ -287,11 +303,19 @@ enum ThumbnailKind {
     Video,
 }
 
+/// Recorded failure of a single asset request. `tries` drives exponential
+/// backoff and eventually permanent-failure semantics.
+#[derive(Debug, Clone, Copy)]
+struct FailureRecord {
+    last_attempt: Instant,
+    tries: u32,
+}
+
 pub struct AssetManager {
     textures: LruCache<String, TextureHandle>,
     gif_bytes: LruCache<String, Arc<[u8]>>,
     pending: HashSet<String>,
-    failed: HashMap<String, Instant>,
+    failed: HashMap<String, FailureRecord>,
     scheduler: Arc<JobScheduler>,
     receiver: Receiver<AssetJobResult>,
     icon_size: IconSize,
@@ -366,7 +390,15 @@ impl AssetManager {
         let (result_tx, result_rx) = mpsc::channel::<AssetJobResult>();
         let scheduler = Arc::new(JobScheduler::default());
 
-        for _ in 0..THUMBNAIL_WORKER_COUNT {
+        // Scale decode/resize workers with core count. ffmpeg invocations
+        // are pinned to `-threads 1` (see generate_video_thumbnail /
+        // generate_video_gif) so this parallelises image work across cores
+        // without oversubscribing on video jobs.
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 8);
+        for _ in 0..worker_count {
             let worker_scheduler = Arc::clone(&scheduler);
             let worker_tx = result_tx.clone();
             thread::spawn(move || {
@@ -466,7 +498,16 @@ impl AssetManager {
                 }
                 Ok(AssetJobResult::Failed { request_key }) => {
                     self.pending.remove(&request_key);
-                    self.failed.insert(request_key, Instant::now());
+                    self.failed
+                        .entry(request_key)
+                        .and_modify(|record| {
+                            record.last_attempt = Instant::now();
+                            record.tries = record.tries.saturating_add(1);
+                        })
+                        .or_insert_with(|| FailureRecord {
+                            last_attempt: Instant::now(),
+                            tries: 1,
+                        });
                     received_any = true;
                 }
                 Ok(AssetJobResult::GifReady {
@@ -727,8 +768,15 @@ impl AssetManager {
         if self.pending.contains(key) {
             return true;
         }
-        if let Some(fail_time) = self.failed.get(key) {
-            return fail_time.elapsed().as_secs() < ICON_RETRY_SECS;
+        if let Some(record) = self.failed.get(key) {
+            // Exponential backoff (30s, 60s, 120s); once we hit the max tries
+            // the entry is considered permanently failed and never retried.
+            if record.tries >= ICON_RETRY_MAX_TRIES {
+                return true;
+            }
+            let shift = (record.tries - 1).min(ICON_BACKOFF_SHIFT_CAP);
+            let backoff = ICON_RETRY_BASE_SECS * (1u64 << shift);
+            return record.last_attempt.elapsed().as_secs() < backoff;
         }
         false
     }
@@ -807,6 +855,21 @@ fn thumbnail_kind(path: &Path) -> Option<ThumbnailKind> {
     }
 }
 
+/// On-disk thumbnail extension chosen per source type. Photo-like and video
+/// sources use JPEG (faster encode/decode, far smaller); formats that can
+/// carry meaningful alpha keep PNG so transparency isn't lost on the tile.
+fn thumbnail_cache_ext(source_path: &Path) -> &'static str {
+    let ext = source_path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("png" | "gif" | "ico" | "webp" | "tiff" | "tif") => "png",
+        // jpg, jpeg, bmp, avif, tga and all video extensions default to JPEG.
+        _ => "jpg",
+    }
+}
+
 fn thumbnail_cache_path(path: &Path, size: IconSize) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
@@ -815,7 +878,14 @@ fn thumbnail_cache_path(path: &Path, size: IconSize) -> PathBuf {
     {
         modified.hash(&mut hasher);
     }
-    thumbnail_cache_dir().join(format!("{:x}{}.png", hasher.finish(), size.cache_suffix()))
+    let ext = thumbnail_cache_ext(path);
+    // `_v2` invalidates caches written by older format versions.
+    thumbnail_cache_dir().join(format!(
+        "{:x}{}_v2.{}",
+        hasher.finish(),
+        size.cache_suffix(),
+        ext
+    ))
 }
 
 fn thumbnail_cache_dir() -> PathBuf {
@@ -901,21 +971,77 @@ fn generate_video_thumbnail(
     cache_path: &Path,
     icon_size: IconSize,
 ) -> Option<image::DynamicImage> {
-    ensure_ffmpeg().ok()?;
+    if let Err(err) = ensure_ffmpeg() {
+        log::warn!(
+            "ffmpeg unavailable; cannot generate video thumbnail for {}: {err}",
+            source_path.display()
+        );
+        return None;
+    }
     let decode_px = icon_size.decode_px();
-    let mut ffmpeg = FfmpegCommand::new()
-        .seek(video_seek_timestamp(source_path))
+    // Capture the PNG straight from ffmpeg's stdout, then persist it in the
+    // cache format implied by `cache_path`'s extension. A fixed ~1s seek avoids
+    // the extra ffprobe round-trip the old 15% seek needed, a plain `scale`
+    // (no `thumbnail=n=24`) decodes a single frame instead of buffering 24, and
+    // piping stdout removes the write-then-read-back disk round-trip.
+    // `-threads 1` keeps concurrent workers from oversubscribing the CPU.
+    let mut ffmpeg = match FfmpegCommand::new()
+        .args(["-threads", "1"])
+        .seek("1")
         .input(source_path.as_os_str().to_string_lossy())
         .frames(1)
-        .args([
-            "-vf",
-            &format!("thumbnail=n=24,scale='min({decode_px}\\,iw)':-1"),
-        ])
-        .output(cache_path.as_os_str().to_string_lossy())
+        .args(["-vf", &format!("scale='min({decode_px}\\,iw)':-1")])
+        .format("image2pipe")
+        .codec_video("png")
+        .pipe_stdout()
         .spawn()
-        .ok()?;
-    ffmpeg.wait().ok()?;
-    image::open(cache_path).ok()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            log::warn!(
+                "failed to spawn ffmpeg thumbnail process for {}: {err}",
+                source_path.display()
+            );
+            return None;
+        }
+    };
+    let Some(mut stdout) = ffmpeg.take_stdout() else {
+        log::warn!(
+            "ffmpeg thumbnail process did not expose stdout for {}",
+            source_path.display()
+        );
+        return None;
+    };
+    let mut png_bytes = Vec::new();
+    if let Err(err) = stdout.read_to_end(&mut png_bytes) {
+        log::warn!(
+            "failed to read ffmpeg thumbnail output for {}: {err}",
+            source_path.display()
+        );
+        return None;
+    }
+    drop(stdout);
+    if let Err(err) = ffmpeg.wait() {
+        log::warn!(
+            "failed to wait for ffmpeg thumbnail process for {}: {err}",
+            source_path.display()
+        );
+        return None;
+    }
+    let image = match image::load_from_memory(&png_bytes) {
+        Ok(image) => image,
+        Err(err) => {
+            log::warn!(
+                "failed to decode ffmpeg thumbnail output for {}: {err}",
+                source_path.display()
+            );
+            return None;
+        }
+    };
+    // `save` infers the format from `cache_path`'s extension (JPEG/PNG), so no
+    // separate read-back of the just-written file is needed on this path.
+    let _ = image.save(cache_path);
+    Some(image)
 }
 
 fn ensure_ffmpeg() -> Result<(), String> {
@@ -954,36 +1080,73 @@ fn video_frame_temp_dir(path: &Path) -> Option<PathBuf> {
 }
 
 fn generate_video_gif(path: &Path) -> Option<Arc<[u8]>> {
-    ensure_ffmpeg().ok()?;
+    if let Err(err) = ensure_ffmpeg() {
+        log::warn!(
+            "ffmpeg unavailable; cannot generate animated preview for {}: {err}",
+            path.display()
+        );
+        return None;
+    }
 
     let duration_secs = probe_video_duration(path).unwrap_or(30.0).max(1.0);
     let start_pct = 0.05_f64;
     let end_pct = 0.90_f64;
     let span = (end_pct - start_pct) * duration_secs;
-    let frame_step = span / f64::from(VIDEO_GIF_FRAMES);
+    // Sample the desired frame count evenly across the span in a SINGLE ffmpeg
+    // pass. The old code spawned one process per frame (~15 process creations
+    // and disk round-trips per preview); this writes the whole sequence with
+    // one `-ss ... -t ... fps=...` invocation.
+    let fps = f64::from(VIDEO_GIF_FRAMES) / span;
     let frame_dir = video_frame_temp_dir(path)?;
     let file_stem = path.file_stem()?.to_string_lossy();
-    let mut frame_paths = Vec::with_capacity(VIDEO_GIF_FRAMES as usize);
+    let pattern = frame_dir.join(format!("{file_stem}_%03d.png"));
 
-    for index in 0..VIDEO_GIF_FRAMES {
-        let timestamp = start_pct.mul_add(duration_secs, f64::from(index) * frame_step);
-        let frame_path = frame_dir.join(format!("{file_stem}_frame_{index:03}.png"));
-        let mut ffmpeg = FfmpegCommand::new()
-            .seek(format!("{timestamp:.3}"))
-            .input(path.to_string_lossy())
-            .frames(1)
-            .args(["-vf", "scale='min(320,iw)':-2"])
-            .args(["-q:v", "3"])
-            .output(frame_path.to_string_lossy())
-            .spawn()
-            .ok()?;
-        ffmpeg.wait().ok()?;
-        if frame_path.exists() {
-            frame_paths.push(frame_path);
+    let mut ffmpeg = match FfmpegCommand::new()
+        .args(["-threads", "1"])
+        .seek(format!("{:.3}", start_pct * duration_secs))
+        .input(path.to_string_lossy())
+        .duration(format!("{span:.3}"))
+        .args(["-vf", &format!("fps={fps:.4},scale='min(320,iw)':-2")])
+        .frames(VIDEO_GIF_FRAMES)
+        .output(pattern.to_string_lossy())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            log::warn!(
+                "failed to spawn ffmpeg animated-preview process for {}: {err}",
+                path.display()
+            );
+            let _ = fs::remove_dir_all(frame_dir);
+            return None;
         }
+    };
+    if let Err(err) = ffmpeg.wait() {
+        log::warn!(
+            "failed to wait for ffmpeg animated-preview process for {}: {err}",
+            path.display()
+        );
+        let _ = fs::remove_dir_all(frame_dir);
+        return None;
     }
 
+    // Collect whatever frames ffmpeg actually wrote (000.png, 001.png, ...).
+    // The double `flatten` collapses both the read_dir Result and the per-entry
+    // io::Result, yielding DirEntry items (and nothing on read_dir failure).
+    let mut frame_paths: Vec<PathBuf> = fs::read_dir(&frame_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "png"))
+        .collect();
+    frame_paths.sort();
+
     if frame_paths.is_empty() {
+        log::warn!(
+            "ffmpeg produced no animated-preview frames for {}",
+            path.display()
+        );
         let _ = fs::remove_dir_all(frame_dir);
         return None;
     }
@@ -1007,13 +1170,13 @@ fn generate_video_gif(path: &Path) -> Option<Arc<[u8]>> {
     Some(Arc::from(gif_bytes))
 }
 
-fn video_seek_timestamp(path: &Path) -> String {
-    let duration = probe_video_duration(path).unwrap_or(10.0);
-    let seek = (duration * 0.15).max(1.0);
-    format!("{seek:.3}")
-}
-
 fn probe_video_duration(path: &Path) -> Option<f64> {
+    let cache_key = video_gif_request_key(path);
+    if let Ok(mut cache) = DURATION_CACHE.lock()
+        && let Some(&duration) = cache.get(&cache_key)
+    {
+        return Some(duration);
+    }
     let mut command = std::process::Command::new(ffmpeg_sidecar::ffprobe::ffprobe_path());
     command.args([
         "-v",
@@ -1027,8 +1190,16 @@ fn probe_video_duration(path: &Path) -> Option<f64> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
+        command.creation_flags(0x0800_0000);
     }
     let output = command.output().ok()?;
-    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+    let duration = String::from_utf8(output.stdout)
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+    if let Ok(mut cache) = DURATION_CACHE.lock() {
+        cache.put(cache_key, duration);
+    }
+    Some(duration)
 }

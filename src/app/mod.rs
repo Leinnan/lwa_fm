@@ -578,12 +578,14 @@ impl App {
                                 show_hidden,
                                 search.as_ref(),
                             );
-                            // Build DirList backing store from the loaded entries
-                            let dir_list = if depth <= 1 && directories.len() == 1 {
-                                // Single-directory read — entries share the same dir prefix
-                                crate::data::files::DirList::from_sorted_list(&list)
+                            // For single-directory reads, move `list` into a lazily-materialised
+                            // DirList so the tab's `list` can stay empty (full DirEntry values
+                            // are then built only for visible rows, roughly halving memory for
+                            // large folders). Multi-dir / search reads keep `list` populated.
+                            let (list, dir_list) = if depth <= 1 && directories.len() == 1 {
+                                (Vec::new(), crate::data::files::DirList::from_owned_list(list))
                             } else {
-                                None
+                                (list, None)
                             };
                             COMMANDS_QUEUE.push(ActionToPerform::TabAction(
                                 TabTarget::TabWithId(tab_id),
@@ -627,7 +629,7 @@ impl App {
                             // Stale generation — but if the list is empty, apply as a
                             // visual fallback so the user sees something while the
                             // "true" refresh is still in flight.
-                            if tab.list.is_empty() {
+                            if tab.visible_entries.is_empty() {
                                 tab.list = list;
                                 tab.visible_entries = visible;
                                 tab.dir_list = dir_list;

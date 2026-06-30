@@ -34,7 +34,7 @@ use crate::app::commands::{ModalWindow, TabAction, TabTarget};
 use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
 use crate::app::top_bottom::TopDisplayPath;
 use crate::app::{DisplayType, LUA_INSTANCE, Search, Sort};
-use crate::data::files::{DirEntry, DirList};
+use crate::data::files::{DirEntry, DirList, EntryType};
 use crate::data::time::ElapsedTime;
 use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer, PathHelper};
 use crate::locations::Locations;
@@ -371,6 +371,35 @@ impl TabData {
             None => false,
         }
     }
+
+    /// Materialise the entry visible at `visible_row` (0-based in visible order).
+    ///
+    /// For single-directory reads the backing store is a lazily-materialised
+    /// [`DirList`] (so [`TabData::list`] stays empty and full [`DirEntry`]s are
+    /// only built for the rows actually shown — roughly half the memory of
+    /// keeping both stores). For searches / multi-directory reads `list` is the
+    /// populated store and the entry is cloned from it.
+    pub fn entry_at(&self, visible_row: usize) -> Option<DirEntry> {
+        let data_idx = *self.visible_entries.get(visible_row)?;
+        match &self.dir_list {
+            Some(dl) => Some(dl.materialize(data_idx)),
+            None => self.list.get(data_idx).cloned(),
+        }
+    }
+
+    /// File name + "is directory" flag for the visible entry at `visible_row`,
+    /// without materialising a full [`DirEntry`] (avoids cloning the sort key,
+    /// which the file-name galley pool does not need).
+    pub fn visible_name_and_type(&self, visible_row: usize) -> Option<(&str, bool)> {
+        let data_idx = *self.visible_entries.get(visible_row)?;
+        if let Some(dl) = &self.dir_list {
+            let data = &dl.entries[data_idx];
+            Some((&data.file_name, !matches!(data.meta.entry_type, EntryType::File)))
+        } else {
+            let entry = self.list.get(data_idx)?;
+            Some((entry.get_splitted_path().1, !entry.is_file()))
+        }
+    }
     pub fn from_path(path: &Path) -> Self {
         let mut top_display_path = TopDisplayPath::default();
         top_display_path.build(path, false);
@@ -424,9 +453,29 @@ struct RowResult {
     response: egui::Response,
 }
 
+/// Shared per-frame setup extracted from [`MyTabViewer::grid_view`] and
+/// [`MyTabViewer::list_view`]: keyboard shortcuts (toggle search, toggle
+/// hidden, go to parent, undoer feed) handled identically by both views, plus
+/// the per-tab interaction state (selection, open popup, favorites) loaded once
+/// instead of in each view. Returns `None` when the caller should early-return
+/// (parent navigation was scheduled, or the tab is still loading).
+struct ViewHeader {
+    cmd: bool,
+    shift_pressed: bool,
+    tab_id: u32,
+    tab_popup_id: Id,
+    selected_tabs: Selected,
+    opened_popup: usize,
+    just_changed: bool,
+    favorites: Locations,
+}
+
 impl MyTabViewer<'_> {
-    fn grid_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
-        let cmd = ui.command_pressed();
+    /// Shared header for both views. Runs the keyboard shortcuts that
+    /// `grid_view` and `list_view` previously duplicated verbatim, draws the
+    /// loading spinner, and loads the per-tab interaction state into a
+    /// [`ViewHeader`]. Returning `None` signals the caller must early-return.
+    fn begin_view(&self, ui: &mut Ui, tab: &mut TabData) -> Option<ViewHeader> {
         if !matches!(&tab.current_path, CurrentPath::None) {
             tab.undoer
                 .feed_state(ui.ctx().input(|input| input.time), &tab.current_path);
@@ -443,10 +492,10 @@ impl MyTabViewer<'_> {
         }
         if self.focused && ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
             let Some(parent) = tab.current_path.parent() else {
-                return;
+                return None;
             };
             TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
-            return;
+            return None;
         }
 
         if tab.loading {
@@ -454,11 +503,9 @@ impl MyTabViewer<'_> {
                 ui.spinner();
                 ui.label(tab.loading_progress.as_deref().unwrap_or("Loading..."));
             });
-            return;
+            return None;
         }
 
-        let shift_pressed = ui.input(egui::InputState::shift_pressed);
-        let favorites = ui.data_get_persisted::<Locations>().unwrap_or_default();
         let tab_id = tab.id;
         let mut selected_tabs = ui
             .data_get_path::<Selected>(&tab.current_path)
@@ -482,8 +529,34 @@ impl MyTabViewer<'_> {
             false
         };
 
+        Some(ViewHeader {
+            cmd: ui.command_pressed(),
+            shift_pressed: ui.input(|i| i.modifiers.shift),
+            tab_id,
+            tab_popup_id: Id::new(tab_id).with(1500),
+            selected_tabs,
+            opened_popup,
+            just_changed,
+            favorites: ui.data_get_persisted::<Locations>().unwrap_or_default(),
+        })
+    }
+
+    fn grid_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
+        let ViewHeader {
+            cmd,
+            shift_pressed,
+            tab_popup_id,
+            mut selected_tabs,
+            opened_popup,
+            just_changed,
+            favorites,
+            ..
+        } = match self.begin_view(ui, tab) {
+            Some(h) => h,
+            None => return,
+        };
+
         let entries_len = tab.visible_entries.len();
-        let tab_popup_id = Id::new(tab_id).with(1500);
         let icon_size = self.assets.icon_size();
         let xl = icon_size == IconSize::ExtraLarge;
         let tile_width = icon_size.tile_width();
@@ -521,11 +594,12 @@ impl MyTabViewer<'_> {
                                 break;
                             }
 
-                            let index = tab.visible_entries[row_index];
-                            let val = &tab.list[index];
+                            let Some(val) = tab.entry_at(row_index) else {
+                                continue;
+                            };
                             let response = self.draw_grid_tile(
                                 ui,
-                                val,
+                                &val,
                                 tile_width,
                                 tile_height,
                                 selected_tabs.selected_fields.contains(&row_index),
@@ -557,74 +631,29 @@ impl MyTabViewer<'_> {
         self.handle_grid_keyboard_navigation(ui, tab, &mut selected_tabs, shift_pressed, columns);
     }
     fn list_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
-        let cmd = ui.command_pressed();
-        if !matches!(&tab.current_path, CurrentPath::None) {
-            tab.undoer
-                .feed_state(ui.ctx().input(|input| input.time), &tab.current_path);
-        }
-        if ui.key_with_command_pressed(egui::Key::F) {
-            tab.toggle_search(ui.ctx());
-        }
-        if ui.key_with_command_pressed(egui::Key::H) {
-            let mut show_hidden =
-                ui.data_get_path_or_persisted::<DirectoryShowHidden>(&tab.current_path);
-            show_hidden.0 = !show_hidden.0;
-            ui.data_set_path(&tab.current_path, show_hidden.data);
-            ActionToPerform::ViewSettingsChanged(super::DataSource::Local).schedule();
-        }
-        if self.focused && ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
-            let Some(parent) = tab.current_path.parent() else {
-                return;
-            };
-            TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
-            return;
-        }
-
-        if tab.loading {
-            ui.centered_and_justified(|ui| {
-                ui.spinner();
-                ui.label(tab.loading_progress.as_deref().unwrap_or("Loading..."));
-            });
-            return;
-        }
-
-        let shift_pressed = ui.input(super::super::helper::KeyWithCommandPressed::shift_pressed);
-        let favorites = ui.data_get_persisted::<Locations>().unwrap_or_default();
+        let ViewHeader {
+            cmd,
+            shift_pressed,
+            tab_id,
+            tab_popup_id,
+            mut selected_tabs,
+            opened_popup,
+            just_changed,
+            favorites,
+        } = match self.begin_view(ui, tab) {
+            Some(h) => h,
+            None => return,
+        };
 
         let is_searching = tab.is_searching();
-        let tab_id = tab.id;
-
         let multiple_dirs = tab.deep_or_multiple_paths();
         let text_height = (egui::TextStyle::Body.resolve(ui.style()).size * 1.5).ceil();
-
-        let tab_popup_id = Id::new(tab_id).with(1500);
-        let mut selected_tabs = ui
-            .data_get_path::<Selected>(&tab.current_path)
-            .unwrap_or_default();
-        let opened_popup = ui
-            .ctx()
-            .data_get_tab::<PopupOpened>(tab_id)
-            .and_then(|d| {
-                if egui::Popup::is_id_open(ui.ctx(), d.0) {
-                    Some(d.1)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(usize::MAX);
-        let just_changed = if selected_tabs.just_changed {
-            selected_tabs.just_changed = false;
-            ui.data_set_path(&tab.current_path, selected_tabs.clone());
-            true
-        } else {
-            false
-        };
         let entries_len = tab.visible_entries.len();
 
         populate_file_name_pool(
-            tab.visible_entries.iter().map(|&idx| {
-                let val = &tab.list[idx];
-                (val.get_splitted_path().1.to_string(), !val.is_file())
+            (0..entries_len).filter_map(|row| {
+                tab.visible_name_and_type(row)
+                    .map(|(name, is_dir)| (name.to_string(), is_dir))
             }),
             ui.ctx(),
         );
@@ -709,8 +738,10 @@ impl MyTabViewer<'_> {
                         let grid_row_param = info.grid_row_setter();
 
                         let row_index = info.idx;
-                        let index = tab.visible_entries[row_index];
-                        let val = &tab.list[index];
+                        let Some(val) = tab.entry_at(row_index) else {
+                            return;
+                        };
+                        let val = &val;
                         let is_dir = !val.is_file();
                         let indexed = row_index + 1;
 
@@ -1145,24 +1176,17 @@ impl MyTabViewer<'_> {
         } in &row_results
         {
             let row_index = *row_index;
-            let index = tab.visible_entries[row_index];
-            let val = &tab.list[index];
-            let is_dir = !val.is_file();
+            let Some(val) = tab.entry_at(row_index) else {
+                continue;
+            };
+            let val = &val;
             let indexed = row_index + 1;
 
             if row_response.double_clicked()
                 || convert_nr_to_egui_key(indexed)
                     .is_some_and(|k| row_response.ctx.key_with_command_pressed(k))
             {
-                if val.is_file() {
-                    ActionToPerform::SystemOpen(val.full_path_string().into()).schedule();
-                } else if let Ok(path) = std::fs::canonicalize(val.get_path()) {
-                    if row_response.ctx.shift_pressed() {
-                        ActionToPerform::NewTab(path).schedule();
-                    } else {
-                        TabAction::ChangePaths(path.into()).schedule_tab(tab_id);
-                    }
-                }
+                Self::activate_entry(val, tab_id, row_response.ctx.shift_pressed());
             } else if row_response.clicked() {
                 if !shift_pressed {
                     selected_tabs.selected_fields.clear();
@@ -1174,130 +1198,7 @@ impl MyTabViewer<'_> {
                     .data_set_path(&tab.current_path, selected_tabs.clone());
             }
 
-            // ── Context menu ─────────────────────────────────────────────────
-            let popup_id = tab_popup_id.with(row_index);
-            egui::Popup::context_menu(row_response)
-                .id(popup_id)
-                .show(|ui| {
-                    ui.data_set_tab::<PopupOpened>(tab_id, PopupOpened(popup_id, row_index));
-                    let options = build_for_path(&tab.current_path, &val.get_path(), &favorites);
-                    for option in options {
-                        if ui.button(option.name.as_str()).clicked() {
-                            option.action.clone().schedule();
-                            ui.close();
-                        }
-                    }
-                    if !is_dir {
-                        if ui.button("Open").clicked() {
-                            ActionToPerform::SystemOpen(val.full_path_string().into()).schedule();
-                            ui.close();
-                            return;
-                        }
-                        #[cfg(windows)]
-                        if ui.button("Show in explorer").clicked() {
-                            crate::windows_tools::display_in_explorer(val.get_path())
-                                .unwrap_or_else(|_| {
-                                    toast!(Error, "Could not open in explorer");
-                                });
-                            ui.close();
-                        }
-                        let val_dir = PathBuf::from(val.get_splitted_path().0);
-                        let matching_dirs = self.tab_paths.iter().filter(|s| !val_dir.eq(*s));
-                        #[allow(clippy::collapsible_else_if)]
-                        if matching_dirs.clone().count() > 0 {
-                            ui.separator();
-                            ui.menu_button("Move to", |ui| {
-                                for other in matching_dirs {
-                                    let other = PathBuf::from(
-                                        std::fs::canonicalize(other)
-                                            .unwrap_or_else(|_| val.get_path().to_path_buf())
-                                            .to_fixed_string(),
-                                    );
-
-                                    if ui
-                                        .button(format!(
-                                            "{}",
-                                            &other.file_name().expect("Failed").to_string_lossy()
-                                        ))
-                                        .on_hover_text(other.display().to_string())
-                                        .clicked()
-                                    {
-                                        let path = val.get_path();
-                                        let filename = path.file_name().expect("NO FILENAME").to_os_string();
-                                        let target_path = other.join(&filename);
-                                        println!("{}", &target_path.display());
-                                        let move_result = fs::rename(&path, &target_path);
-                                        let mut success = move_result.is_ok();
-                                        let _ = move_result.inspect_err(|e| {
-                                            e.raw_os_error().inspect(|nr| {
-                                                if *nr == 17 {
-                                                    let copy_success =
-                                                        fs::copy(&path, target_path.clone()).is_ok();
-                                                    if copy_success {
-                                                        success = fs::remove_file(&path).is_ok();
-                                                    }
-                                                }
-                                            });
-                                        });
-                                        if success {
-                                            crate::app::database::invalidate_dir(&val_dir);
-                                            crate::app::database::invalidate_dir(&other);
-                                            crate::app::commands::COMMANDS_QUEUE.push(
-                                                ActionToPerform::TabAction(
-                                                    TabTarget::AllTabs,
-                                                    TabAction::RequestFilesRefresh,
-                                                ),
-                                            );
-                                        } else {
-                                            toast!(
-                                                Error,
-                                                "Failed to move file {}",
-                                                filename.to_string_lossy()
-                                            );
-                                        }
-                                        ui.close();
-                                    }
-                                }
-                            });
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Move to Trash").clicked() {
-                        let parent = PathBuf::from(val.get_splitted_path().0);
-                        trash::delete(val.get_path()).unwrap_or_else(|_| {
-                            toast!(Error, "Could not move it to trash.");
-                        });
-                        crate::app::database::invalidate_dir(&parent);
-                        ui.close();
-                        TabAction::RequestFilesRefresh.schedule_active_tab();
-                    }
-                    if ui.button("Copy path to clipboard").clicked() {
-                        let Ok(mut clipboard) = arboard::Clipboard::new() else {
-                            toast!(Error, "Failed to read the clipboard.");
-                            return;
-                        };
-                        clipboard.set_text(val.full_path_string()).unwrap_or_else(|_| {
-                            toast!(Error, "Failed to update the clipboard.");
-                        });
-                        ui.close();
-                    }
-                    if ui.button("Rename").clicked() {
-                        ui.data_mut(|w| {
-                            w.insert_temp(egui::Id::new(ModalWindow::Rename), val.clone());
-                        });
-                        ActionToPerform::ToggleModalWindow(ModalWindow::Rename).schedule();
-                        ui.close();
-                    }
-
-                    #[cfg(windows)]
-                    {
-                        ui.separator();
-                        if ui.button("Properties").clicked() {
-                            crate::windows_tools::open_properties(val.get_path());
-                            ui.close();
-                        }
-                    }
-                });
+            self.show_entry_context_menu(row_response, tab, val, row_index, tab_popup_id, &favorites);
 
             // Scroll selected row into view
             if just_changed
@@ -1351,14 +1252,10 @@ impl MyTabViewer<'_> {
                         return;
                     }
                     egui::Key::Enter | egui::Key::ArrowRight => {
-                        let Some(entry) = tab
-                            .visible_entries
-                            .get(*i)
-                            .and_then(|visible| tab.list.get(*visible))
-                        else {
+                        let Some(entry) = tab.entry_at(*i) else {
                             return;
                         };
-                        Self::activate_entry(entry, tab_id, false);
+                        Self::activate_entry(&entry, tab_id, false);
                         *i
                     }
                     _ => return,
@@ -1524,10 +1421,10 @@ impl MyTabViewer<'_> {
         } in row_results
         {
             let row_index = *row_index;
-            let Some(index) = tab.visible_entries.get(row_index).copied() else {
+            let Some(val) = tab.entry_at(row_index) else {
                 continue;
             };
-            let val = &tab.list[index];
+            let val = &val;
             let indexed = row_index + 1;
 
             if row_response.double_clicked()
@@ -1751,14 +1648,10 @@ impl MyTabViewer<'_> {
             egui::Key::ArrowLeft => current.saturating_sub(1),
             egui::Key::ArrowRight => current.saturating_add(1).min(visible_len - 1),
             egui::Key::Enter => {
-                let Some(entry) = tab
-                    .visible_entries
-                    .get(current)
-                    .and_then(|visible| tab.list.get(*visible))
-                else {
+                let Some(entry) = tab.entry_at(current) else {
                     return;
                 };
-                Self::activate_entry(entry, tab.id, false);
+                Self::activate_entry(&entry, tab.id, false);
                 current
             }
             _ => return,

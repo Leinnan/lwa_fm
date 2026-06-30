@@ -632,4 +632,96 @@ use rayon::{
         assert_eq!(1usize.max(1), 1, "depth 1 should stay 1");
         assert_eq!(3usize.max(1), 3, "depth 3 should stay 3");
     }
+
+    /// Build a file entry with explicit size and modification/creation times so
+    /// the numeric sort keys can be exercised (DirEntry::test_new zeroes them).
+    fn entry_with(name: &str, size: u64, modified: u32, created: u32) -> DirEntry {
+        use crate::data::time::TimestampSeconds;
+        let mut entry = DirEntry::test_new(&format!("/d/{name}"));
+        entry.meta.size = size;
+        let ts = |secs: u32| {
+            TimestampSeconds::from(std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::from(secs)))
+        };
+        entry.meta.modified_at = ts(modified);
+        entry.meta.created_at = ts(created);
+        entry
+    }
+
+    fn names_of(entries: &[DirEntry]) -> Vec<String> {
+        entries.iter().map(|e| e.file_name.clone()).collect()
+    }
+
+    fn settings(sorting: super::super::Sort, invert: bool) -> super::super::directory_view_settings::DirectoryViewSettings {
+        super::super::directory_view_settings::DirectoryViewSettings {
+            sorting,
+            display_type: super::super::DisplayType::default(),
+            invert_sort: invert,
+        }
+    }
+
+    #[test]
+    fn sort_by_name_alphabetical_and_inverted() {
+        let mut entries = vec![
+            entry_with("c.txt", 0, 0, 0),
+            entry_with("a.txt", 0, 0, 0),
+            entry_with("b.txt", 0, 0, 0),
+        ];
+        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Name, false));
+        assert_eq!(
+            names_of(&entries),
+            vec!["a.txt", "b.txt", "c.txt"],
+            "name sort should be alphabetical"
+        );
+
+        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Name, true));
+        assert_eq!(
+            names_of(&entries),
+            vec!["c.txt", "b.txt", "a.txt"],
+            "inverted name sort should reverse"
+        );
+    }
+
+    #[test]
+    fn sort_by_size_ascending_and_inverted() {
+        let mut entries = vec![
+            entry_with("big", 300, 0, 0),
+            entry_with("small", 100, 0, 0),
+            entry_with("mid", 200, 0, 0),
+        ];
+        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Size, false));
+        assert_eq!(
+            names_of(&entries),
+            vec!["small", "mid", "big"],
+            "size sort should be ascending"
+        );
+
+        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Size, true));
+        assert_eq!(
+            names_of(&entries),
+            vec!["big", "mid", "small"],
+            "inverted size sort should be descending"
+        );
+    }
+
+    #[test]
+    fn sort_by_modified_ascending_and_inverted() {
+        let mut entries = vec![
+            entry_with("newest", 0, 30, 0),
+            entry_with("oldest", 0, 10, 0),
+            entry_with("middle", 0, 20, 0),
+        ];
+        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Modified, false));
+        assert_eq!(
+            names_of(&entries),
+            vec!["oldest", "middle", "newest"],
+            "modified sort should be ascending by mtime"
+        );
+
+        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Modified, true));
+        assert_eq!(
+            names_of(&entries),
+            vec!["newest", "middle", "oldest"],
+            "inverted modified sort should be descending"
+        );
+    }
 }

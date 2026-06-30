@@ -30,7 +30,7 @@ pub struct DirectoryWatchers {
 struct PendingWatcherReceiver {
     path: PathBuf,
     mode: RecursiveMode,
-    receiver: Receiver<DirectoryWatcher>,
+    receiver: Receiver<Result<DirectoryWatcher, String>>,
 }
 
 #[derive(Debug)]
@@ -149,14 +149,23 @@ impl DirectoryWatchers {
         self.increment_pending(&path);
 
         std::thread::spawn(move || {
-            let Ok(mut watcher) = DirectoryWatcher::new() else {
-                return;
-            };
-            if let Err(err) = watcher.watch_directory(&path_for_thread, mode) {
-                eprintln!("Failed to watch directory: {err}");
-                return;
+            // Report both failure modes (watcher creation and watch setup) back to
+            // the UI thread instead of dying silently. A silent failure would leave
+            // this directory unwatched with no indication that live updates (file
+            // change auto-refresh) are no longer working for it.
+            match DirectoryWatcher::new() {
+                Ok(mut watcher) => match watcher.watch_directory(&path_for_thread, mode) {
+                    Ok(()) => {
+                        _ = tx.send(Ok(watcher));
+                    }
+                    Err(err) => {
+                        _ = tx.send(Err(format!("watch setup failed: {err:#}")));
+                    }
+                },
+                Err(err) => {
+                    _ = tx.send(Err(format!("watcher creation failed: {err:#}")));
+                }
             }
-            _ = tx.send(watcher);
         });
         self.receivers.push(PendingWatcherReceiver {
             path,
@@ -175,21 +184,36 @@ impl DirectoryWatchers {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_new_watchers");
         let mut ready_watchers = Vec::new();
-        let mut disconnected_paths = Vec::new();
+        let mut failed_paths = Vec::new();
         self.receivers
             .retain(|pending| match pending.receiver.try_recv() {
-                Ok(watcher) => {
+                Ok(Ok(watcher)) => {
                     ready_watchers.push((watcher, pending.mode));
+                    false
+                }
+                Ok(Err(error)) => {
+                    failed_paths.push((pending.path.clone(), error));
                     false
                 }
                 Err(TryRecvError::Empty) => true,
                 Err(TryRecvError::Disconnected) => {
-                    disconnected_paths.push(pending.path.clone());
+                    // The worker thread ended without reporting back — treat it as
+                    // a failure so the user is told live updates are unavailable.
+                    failed_paths.push((
+                        pending.path.clone(),
+                        "watcher thread exited unexpectedly".to_string(),
+                    ));
                     false
                 }
             });
-        for path in disconnected_paths {
-            self.pending_paths.remove(&path);
+        for (path, error) in &failed_paths {
+            self.pending_paths.remove(path);
+            log::warn!("File system watcher failed for {}: {error}", path.display());
+            toast!(
+                Warning,
+                "Live updates unavailable for {}",
+                path.display()
+            );
         }
         for (watcher, mode) in ready_watchers {
             self.insert_started_watcher(watcher, mode);

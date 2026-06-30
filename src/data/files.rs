@@ -401,6 +401,25 @@ impl DirList {
         }
     }
 
+    /// Build a `DirList` by **moving** entries out of `list` (no clone), making
+    /// this store canonical so the caller can drop its `Vec<DirEntry>`. All
+    /// entries MUST share the same `dir` prefix; the per-entry `dir: Arc<str>`
+    /// is replaced by a single shared `Arc<str>`. Returns `None` for an empty
+    /// list. Index order is preserved, so indices computed against `list`
+    /// remain valid against [`Self::entries`] / [`Self::materialize`].
+    pub fn from_owned_list(list: Vec<DirEntry>) -> Option<Self> {
+        let dir = list.first()?.dir.clone();
+        let entries: Vec<DirEntryData> = list
+            .into_iter()
+            .map(|e| DirEntryData {
+                meta: e.meta,
+                file_name: e.file_name,
+                sort_key: e.sort_key,
+            })
+            .collect();
+        Some(Self::new(dir, entries))
+    }
+
     /// Build a `DirList` from an already-sorted `Vec<DirEntry>`.
     /// All entries MUST share the same `dir` prefix.
     pub fn from_sorted_list(list: &[DirEntry]) -> Option<Self> {
@@ -445,5 +464,40 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
             file_name,
             sort_key,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_owned_list_preserves_order_and_materialises() {
+        let entries: Vec<DirEntry> = ["/a/one.txt", "/a/two.dat", "/a/three.log"]
+            .into_iter()
+            .map(DirEntry::test_new)
+            .collect();
+        let names: Vec<String> = entries.iter().map(|e| e.file_name.clone()).collect();
+        let expected_dir: Arc<str> = entries[0].dir.clone();
+
+        // `from_owned_list` consumes `entries` (no clone of the source).
+        let list = DirList::from_owned_list(entries).expect("non-empty list");
+        assert_eq!(list.total_count(), 3);
+        assert_eq!(list.dir, expected_dir);
+
+        // Order is preserved, so indices computed against the source `Vec` remain
+        // valid: `materialize(i)` must reconstruct exactly the i-th source entry.
+        for (i, expected) in names.iter().enumerate() {
+            let materialised = list.materialize(i);
+            assert_eq!(materialised.file_name, *expected, "name mismatch at {i}");
+            assert!(materialised.is_file(), "expected file at {i}");
+            assert_eq!(materialised.dir, expected_dir, "shared dir prefix lost at {i}");
+            assert_eq!(materialised.get_splitted_path().1, expected.as_str());
+        }
+    }
+
+    #[test]
+    fn from_owned_list_empty_returns_none() {
+        assert!(DirList::from_owned_list(Vec::new()).is_none());
     }
 }
