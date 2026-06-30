@@ -645,6 +645,40 @@ impl AssetManager {
         }
     }
 
+    pub fn invalidate_files(&mut self, files: impl IntoIterator<Item = PathBuf>) {
+        let files: Vec<PathBuf> = files.into_iter().collect();
+        if files.is_empty() {
+            return;
+        }
+
+        let file_prefixes: Vec<String> = files.iter().map(|file| file.to_full_path_string()).collect();
+        let matches_file = |key: &str| -> bool {
+            let entry_key = key.strip_prefix("sidebar:").unwrap_or(key);
+            file_prefixes.iter().any(|file| entry_key.starts_with(file))
+        };
+
+        let keys_to_remove: Vec<String> = self
+            .textures
+            .iter()
+            .filter(|(key, _)| matches_file(key))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys_to_remove {
+            self.textures.pop(&key);
+        }
+        let gif_keys_to_remove: Vec<String> = self
+            .gif_bytes
+            .iter()
+            .filter(|(key, _)| matches_file(key))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in gif_keys_to_remove {
+            self.gif_bytes.pop(&key);
+        }
+        self.pending.retain(|key| !matches_file(key));
+        self.failed.retain(|key, _| !matches_file(key));
+    }
+
     pub fn invalidate_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
         let directories: Vec<PathBuf> = directories.into_iter().collect();
         if directories.is_empty() {

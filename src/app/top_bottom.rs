@@ -263,8 +263,10 @@ impl App {
                                     let mut search_visible = is_searching;
                                     ui.toggle_value(&mut search_visible, "🔍")
                                         .on_hover_text("Search");
-                                    let mut search_changed = is_searching != search_visible;
+                                    let search_visibility_changed = is_searching != search_visible;
+                                    let mut search_changed = false;
                                     let mut search_target_changed = false;
+                                    let tab_total_count = current_tab.total_entry_count();
                                     if let Some(search) = &mut current_tab.search {
                                         let saved_searches = ui
                                             .data_get_persisted::<crate::app::SavedSearches>()
@@ -391,7 +393,7 @@ impl App {
                                             .changed();
                                         {
                                             let showing = current_tab.visible_entries.len();
-                                            let total = current_tab.list.len();
+                                            let total = tab_total_count;
                                             if current_tab.loading {
                                                 let text = current_tab
                                                     .loading_progress
@@ -565,10 +567,19 @@ impl App {
                                         }
                                     }
 
-                                    if search_visible != is_searching {
+                                    if search_visibility_changed {
+                                        let was_filtering = current_tab.is_searching();
                                         current_tab.toggle_search(ui.ctx());
+                                        // Opening an empty search box should not clear/rebuild the
+                                        // current view. Refilter only when the effective predicate
+                                        // changed: an active saved/restored search was enabled, or
+                                        // an active search was disabled.
+                                        search_changed |= was_filtering != current_tab.is_searching();
                                     }
                                     if search_target_changed {
+                                        // Show immediately-available current-directory results while
+                                        // the broader/deeper async search is loading.
+                                        current_tab.update_visible_entries();
                                         TabAction::RequestFilesRefresh.schedule_tab(current_tab.id);
                                     } else if search_changed {
                                         TabAction::FilterChanged.schedule_tab(current_tab.id);

@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Context, Result};
 use notify::{
     Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
-    event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode},
+    event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
 };
 
 use crate::helper::normalize_path;
@@ -24,6 +24,25 @@ pub struct DirectoryWatchers {
     watchers: HashMap<PathBuf, WatchedDirectory>,
     pending_paths: HashMap<PathBuf, usize>,
     receivers: Vec<PendingWatcherReceiver>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FileSystemChanges {
+    pub modified_files: BTreeSet<PathBuf>,
+    pub structural_dirs: BTreeSet<PathBuf>,
+}
+
+impl FileSystemChanges {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.modified_files.is_empty() && self.structural_dirs.is_empty()
+    }
+
+    #[inline]
+    fn extend(&mut self, other: Self) {
+        self.modified_files.extend(other.modified_files);
+        self.structural_dirs.extend(other.structural_dirs);
+    }
 }
 
 #[derive(Debug)]
@@ -220,31 +239,31 @@ impl DirectoryWatchers {
         }
     }
 
-    pub fn check_for_file_system_events(&mut self) -> BTreeSet<PathBuf> {
+    pub fn check_for_file_system_events(&mut self) -> FileSystemChanges {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_file_system_events");
-        let mut changed_directories = BTreeSet::new();
+        let mut changes = FileSystemChanges::default();
         for watched in self.watchers.values_mut() {
             if watched.watcher.check_rescan() {
                 // Rescan detected: we don't know which specific paths changed,
-                // so return the watched root to trigger a full refresh.
+                // so return the watched root as structural to trigger a full refresh.
                 if let Some(ref path) = watched.watcher.current_path {
                     log::info!("Rescan triggered full refresh for {}", path.display());
-                    changed_directories.insert(path.clone());
+                    changes.structural_dirs.insert(path.clone());
                 }
             }
-            while let Some(directories) = watched.watcher.try_recv_event() {
-                changed_directories.extend(directories);
+            while let Some(event_changes) = watched.watcher.try_recv_event() {
+                changes.extend(event_changes);
             }
         }
-        changed_directories
+        changes
     }
 }
 
 #[derive(Debug)]
 pub struct DirectoryWatcher {
     watcher: RecommendedWatcher,
-    receiver: Receiver<BTreeSet<PathBuf>>,
+    receiver: Receiver<FileSystemChanges>,
     current_path: Option<PathBuf>,
     rescan_detected: Arc<AtomicBool>,
 }
@@ -282,11 +301,11 @@ impl DirectoryWatcher {
                             rescan_flag.store(true, Ordering::SeqCst);
                             continue;
                         }
-                        let changed_dirs = Self::process_event(event, &mut pending_renames);
-                        if changed_dirs.is_empty() {
+                        let changes = Self::process_event(event, &mut pending_renames);
+                        if changes.is_empty() {
                             continue;
                         }
-                        if let Err(err) = event_tx.send(changed_dirs) {
+                        if let Err(err) = event_tx.send(changes) {
                             eprintln!("Failed to send processed file system event: {err}");
                             break;
                         }
@@ -330,7 +349,7 @@ impl DirectoryWatcher {
     }
 
     #[inline]
-    pub fn try_recv_event(&self) -> Option<BTreeSet<PathBuf>> {
+    pub fn try_recv_event(&self) -> Option<FileSystemChanges> {
         self.receiver.try_recv().ok()
     }
 
@@ -343,14 +362,14 @@ impl DirectoryWatcher {
     }
 
     #[allow(dead_code)]
-    pub fn recv_event_timeout(&self, timeout: Duration) -> Option<BTreeSet<PathBuf>> {
+    pub fn recv_event_timeout(&self, timeout: Duration) -> Option<FileSystemChanges> {
         self.receiver.recv_timeout(timeout).ok()
     }
 
     fn process_event(
         event: Event,
         pending_renames: &mut HashMap<usize, BTreeSet<PathBuf>>,
-    ) -> BTreeSet<PathBuf> {
+    ) -> FileSystemChanges {
         let tracker = event.attrs.tracker();
         let Event {
             kind,
@@ -359,12 +378,14 @@ impl DirectoryWatcher {
         } = event;
 
         match kind {
-            EventKind::Create(CreateKind::File | CreateKind::Folder) => {
-                parent_dirs_for_paths(paths)
-            }
-            EventKind::Remove(RemoveKind::File | RemoveKind::Folder) => {
-                parent_dirs_for_paths(paths)
-            }
+            EventKind::Create(CreateKind::File | CreateKind::Folder) => FileSystemChanges {
+                structural_dirs: parent_dirs_for_paths(paths),
+                ..Default::default()
+            },
+            EventKind::Remove(RemoveKind::File | RemoveKind::Folder) => FileSystemChanges {
+                structural_dirs: parent_dirs_for_paths(paths),
+                ..Default::default()
+            },
             EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
                 let directories = parent_dirs_for_paths(paths);
                 if let Some(tracker) = tracker {
@@ -376,7 +397,10 @@ impl DirectoryWatcher {
                         pending_renames.clear();
                     }
                 }
-                directories
+                FileSystemChanges {
+                    structural_dirs: directories,
+                    ..Default::default()
+                }
             }
             EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
                 let mut directories = parent_dirs_for_paths(paths);
@@ -385,17 +409,21 @@ impl DirectoryWatcher {
                 {
                     directories.extend(pending);
                 }
-                directories
+                FileSystemChanges {
+                    structural_dirs: directories,
+                    ..Default::default()
+                }
             }
-            EventKind::Modify(
-                ModifyKind::Name(_)
-                | ModifyKind::Data(DataChange::Content | _)
-                | ModifyKind::Metadata(_)
-                | ModifyKind::Any
-                | ModifyKind::Other,
-            )
-            | EventKind::Any => parent_dirs_for_paths(paths),
-            _ => BTreeSet::new(),
+            EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_)) => FileSystemChanges {
+                modified_files: normalize_existing_paths(paths),
+                ..Default::default()
+            },
+            EventKind::Modify(ModifyKind::Name(_) | ModifyKind::Any | ModifyKind::Other)
+            | EventKind::Any => FileSystemChanges {
+                structural_dirs: parent_dirs_for_paths(paths),
+                ..Default::default()
+            },
+            _ => FileSystemChanges::default(),
         }
     }
 }
@@ -411,6 +439,10 @@ fn parent_dirs_for_paths(paths: Vec<PathBuf>) -> BTreeSet<PathBuf> {
         .collect()
 }
 
+fn normalize_existing_paths(paths: Vec<PathBuf>) -> BTreeSet<PathBuf> {
+    paths.into_iter().map(|path| normalize_path(&path)).collect()
+}
+
 impl Default for DirectoryWatcher {
     fn default() -> Self {
         Self::new().expect("Failed to create directory watcher")
@@ -423,7 +455,7 @@ mod tests {
     use crate::helper::normalize_path;
     use notify::{
         Event, EventKind,
-        event::{ModifyKind, RenameMode},
+        event::{DataChange, ModifyKind, RenameMode},
     };
     use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
@@ -440,12 +472,13 @@ mod tests {
         };
 
         let mut pending = HashMap::new();
-        let directories = DirectoryWatcher::process_event(event, &mut pending);
+        let changes = DirectoryWatcher::process_event(event, &mut pending);
 
         assert_eq!(
-            directories,
+            changes.structural_dirs,
             BTreeSet::from([normalize_path(Path::new("/tmp"))])
         );
+        assert!(changes.modified_files.is_empty());
     }
 
     #[test]
@@ -457,12 +490,13 @@ mod tests {
         };
 
         let mut pending = HashMap::new();
-        let directories = DirectoryWatcher::process_event(event, &mut pending);
+        let changes = DirectoryWatcher::process_event(event, &mut pending);
 
         assert_eq!(
-            directories,
+            changes.structural_dirs,
             BTreeSet::from([normalize_path(Path::new("/tmp"))])
         );
+        assert!(changes.modified_files.is_empty());
     }
 
     #[test]
@@ -475,20 +509,37 @@ mod tests {
             .add_path(Path::new("/tmp/dest/file.txt").to_path_buf())
             .set_tracker(7);
 
-        let from_directories = DirectoryWatcher::process_event(from, &mut pending);
-        let to_directories = DirectoryWatcher::process_event(to, &mut pending);
+        let from_changes = DirectoryWatcher::process_event(from, &mut pending);
+        let to_changes = DirectoryWatcher::process_event(to, &mut pending);
 
         assert_eq!(
-            from_directories,
+            from_changes.structural_dirs,
             BTreeSet::from([normalize_path(Path::new("/tmp/source"))])
         );
+        assert!(from_changes.modified_files.is_empty());
         assert_eq!(
-            to_directories,
+            to_changes.structural_dirs,
             BTreeSet::from([
                 normalize_path(Path::new("/tmp/source")),
                 normalize_path(Path::new("/tmp/dest"))
             ])
         );
+        assert!(to_changes.modified_files.is_empty());
+    }
+
+    #[test]
+    fn data_modify_updates_file_without_structural_refresh() {
+        let event = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+            .add_path(Path::new("/tmp/hot.log").to_path_buf());
+
+        let mut pending = HashMap::new();
+        let changes = DirectoryWatcher::process_event(event, &mut pending);
+
+        assert_eq!(
+            changes.modified_files,
+            BTreeSet::from([normalize_path(Path::new("/tmp/hot.log"))])
+        );
+        assert!(changes.structural_dirs.is_empty());
     }
 
     #[test]

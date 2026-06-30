@@ -400,6 +400,12 @@ impl TabData {
             Some((entry.get_splitted_path().1, !entry.is_file()))
         }
     }
+
+    pub fn total_entry_count(&self) -> usize {
+        self.dir_list
+            .as_ref()
+            .map_or(self.list.len(), DirList::total_count)
+    }
     pub fn from_path(path: &Path) -> Self {
         let mut top_display_path = TopDisplayPath::default();
         top_display_path.build(path, false);
@@ -498,7 +504,7 @@ impl MyTabViewer<'_> {
             return None;
         }
 
-        if tab.loading {
+        if tab.loading && tab.visible_entries.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.spinner();
                 ui.label(tab.loading_progress.as_deref().unwrap_or("Loading..."));

@@ -16,12 +16,13 @@ use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
-use std::time::Duration;
-use std::{fs, path::PathBuf};
+use std::time::{Duration, Instant};
+use std::fs;
 
 pub mod assets;
 mod central_panel;
@@ -94,6 +95,8 @@ pub struct App {
     pub watchers: DirectoryWatchers,
     #[serde(skip, default)]
     assets: AssetManager,
+    #[serde(skip, default)]
+    pending_modified_files: BTreeMap<PathBuf, Instant>,
     #[cfg(feature = "profiling")]
     #[serde(skip)]
     profiler_visible: bool,
@@ -155,24 +158,59 @@ impl App {
 
     fn process_file_system_changes(&mut self, ctx: &egui::Context) {
         self.watchers.check_for_new_watchers();
-        let changed_directories = self.watchers.check_for_file_system_events();
-        if changed_directories.is_empty() {
+        const MODIFIED_FILE_COALESCE: Duration = Duration::from_millis(150);
+
+        let changes = self.watchers.check_for_file_system_events();
+        let now = Instant::now();
+        for file in changes.modified_files {
+            self.pending_modified_files.entry(file).or_insert(now);
+        }
+        let ready_modified_files = self
+            .pending_modified_files
+            .iter()
+            .filter_map(|(path, first_seen)| {
+                (now.duration_since(*first_seen) >= MODIFIED_FILE_COALESCE).then(|| path.clone())
+            })
+            .collect::<Vec<_>>();
+        for file in &ready_modified_files {
+            self.pending_modified_files.remove(file);
+        }
+
+        if changes.structural_dirs.is_empty() && ready_modified_files.is_empty() {
             return;
         }
 
+        self.assets.invalidate_files(ready_modified_files.iter().cloned());
+        for file in &ready_modified_files {
+            crate::app::database::update_file_metadata(file);
+        }
         self.assets
-            .invalidate_directories(changed_directories.iter().cloned());
-        crate::app::database::invalidate_dirs(changed_directories.iter().cloned());
+            .invalidate_directories(changes.structural_dirs.iter().cloned());
+        crate::app::database::invalidate_dirs(changes.structural_dirs.iter().cloned());
 
         let tab_ids = self.tabs.get_tab_ids();
         let affected_tabs = tab_ids
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|tab_id| {
                 self.tabs
                     .get_tab_by_id(*tab_id)
-                    .is_some_and(|tab| tab.should_refresh_for_directories(&changed_directories))
+                    .is_some_and(|tab| tab.should_refresh_for_directories(&changes.structural_dirs))
             })
             .collect::<Vec<_>>();
+
+        for tab_id in &tab_ids {
+            if affected_tabs.contains(tab_id) {
+                continue;
+            }
+            let Some(tab) = self.tabs.get_tab_by_id(*tab_id) else {
+                continue;
+            };
+            let settings = ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
+            for file in &ready_modified_files {
+                tab.update_file_metadata(file, &settings.data);
+            }
+        }
 
         for tab_id in affected_tabs {
             self.handle_action(
@@ -343,6 +381,7 @@ impl Default for App {
             command_palette,
             watchers: DirectoryWatchers::default(),
             assets: AssetManager::default(),
+            pending_modified_files: BTreeMap::new(),
             #[cfg(feature = "profiling")]
             profiler_visible: true,
             #[cfg(feature = "profiling")]
@@ -708,6 +747,7 @@ impl App {
                         {
                             search.extra_dirs.push(path);
                         }
+                        tab.update_visible_entries();
                         TabAction::RequestFilesRefresh.schedule_tab(tab_id);
                     }
                     commands::TabAction::RemoveSearchDir(index) => {
@@ -719,6 +759,7 @@ impl App {
                         {
                             search.extra_dirs.remove(index);
                         }
+                        tab.update_visible_entries();
                         TabAction::RequestFilesRefresh.schedule_tab(tab_id);
                     }
                     commands::TabAction::AddSearchTerm(term) => {
@@ -776,6 +817,7 @@ impl App {
                                 return;
                             };
                             tab.search = Some(ss.search.clone());
+                            tab.update_visible_entries();
                             TabAction::RequestFilesRefresh.schedule_tab(tab_id);
                         }
                     }

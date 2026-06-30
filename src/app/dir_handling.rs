@@ -16,17 +16,17 @@ use rayon::{
 
 use crate::{
     app::{
-        Data, MatchMode, Search, SearchTermType, database,
+        Data, MatchMode, Search, SearchTermType, Sort, database,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
     },
-    data::files::DirEntry,
+    data::files::{DirEntry, DirEntryData, DirEntryMetaData, DirList},
     helper::{DataHolder, normalize_path},
 };
 pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
     std::sync::LazyLock::new(|| build_collator(false));
 
-use super::{Sort, dock::TabData};
+use super::dock::TabData;
 
 fn resolve_path_setting<T, F, R>(path: &CurrentPath, data_source: &impl DataHolder, extract: F) -> R
 where
@@ -135,17 +135,71 @@ impl TabData {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!(
             "dir_handling::update_visible_entries",
-            self.list.len().to_string()
+            self.total_entry_count().to_string()
         );
-        self.visible_entries =
-            filter_visible_entries(&self.list, self.show_hidden, self.search.as_ref());
+        self.visible_entries = if let Some(dir_list) = &self.dir_list {
+            filter_visible_dir_list(dir_list, self.show_hidden, self.search.as_ref())
+        } else {
+            filter_visible_entries(&self.list, self.show_hidden, self.search.as_ref())
+        };
     }
 
     pub fn sort_entries(&mut self, sort_settings: &DirectoryViewSettings) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::sort_entries");
         self.display_type = sort_settings.display_type;
-        sort_entries_vec(&mut self.list, sort_settings);
+        if let Some(dir_list) = &mut self.dir_list {
+            sort_dir_entry_data_slice(std::sync::Arc::make_mut(&mut dir_list.entries), sort_settings);
+        } else {
+            sort_entries_vec(&mut self.list, sort_settings);
+        }
+    }
+
+    pub fn update_file_metadata(
+        &mut self,
+        path: &Path,
+        sort_settings: &DirectoryViewSettings,
+    ) -> bool {
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return false;
+        };
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let meta: DirEntryMetaData = metadata.into();
+        let mut updated = false;
+
+        if let Some(dir_list) = &mut self.dir_list {
+            let Some(parent) = path.parent().map(normalize_path) else {
+                return false;
+            };
+            if normalize_path(Path::new(dir_list.dir.as_ref())) != parent {
+                return false;
+            }
+            let entries = std::sync::Arc::make_mut(&mut dir_list.entries);
+            if let Some(entry) = entries.iter_mut().find(|entry| entry.file_name == file_name) {
+                entry.meta = meta;
+                updated = true;
+            }
+        } else if let Some(entry) = self.list.iter_mut().find(|entry| {
+            entry.file_name == file_name
+                && path.parent().is_some_and(|parent| {
+                    normalize_path(Path::new(entry.dir.as_ref())) == normalize_path(parent)
+                })
+        }) {
+            entry.meta = meta;
+            updated = true;
+        }
+
+        if !updated {
+            return false;
+        }
+
+        if matches!(sort_settings.sorting, Sort::Modified | Sort::Created | Sort::Size) {
+            self.sort_entries(sort_settings);
+        }
+        self.update_visible_entries();
+        true
     }
 
     pub fn deep_or_multiple_paths(&self) -> bool {
@@ -242,6 +296,69 @@ pub fn read_directory(
         list.retain(|e| seen.insert(e.full_path_string()));
     }
     list
+}
+
+fn sort_dir_entry_data_slice(entries: &mut [DirEntryData], settings: &DirectoryViewSettings) {
+    match settings.sorting {
+        Sort::Modified => {
+            if settings.invert_sort {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
+                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
+                    file_type_cmp.then(b.meta.modified_at.cmp(&a.meta.modified_at))
+                });
+            } else {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
+                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
+                    file_type_cmp.then(a.meta.modified_at.cmp(&b.meta.modified_at))
+                });
+            }
+        }
+        Sort::Name => {
+            if settings.invert_sort {
+                entries.par_sort_unstable_by(|a, b| b.sort_key.compare(&a.sort_key));
+            } else {
+                entries.par_sort_unstable_by(|a, b| a.sort_key.compare(&b.sort_key));
+            }
+        }
+        Sort::Created => {
+            if settings.invert_sort {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
+                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
+                    file_type_cmp.then(b.meta.created_at.cmp(&a.meta.created_at))
+                });
+            } else {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
+                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
+                    file_type_cmp.then(a.meta.created_at.cmp(&b.meta.created_at))
+                });
+            }
+        }
+        Sort::Size => {
+            if settings.invert_sort {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
+                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
+                    file_type_cmp.then(b.meta.size.cmp(&a.meta.size))
+                });
+            } else {
+                entries.par_sort_unstable_by(|a, b| {
+                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
+                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
+                    file_type_cmp.then(a.meta.size.cmp(&b.meta.size))
+                });
+            }
+        }
+        Sort::Random => {
+            use rand::seq::SliceRandom;
+            use rand::thread_rng;
+            let mut rng = thread_rng();
+            entries.shuffle(&mut rng);
+        }
+    }
 }
 
 pub fn sort_entries_vec(entries: &mut [DirEntry], settings: &DirectoryViewSettings) {
@@ -351,39 +468,12 @@ impl CompiledSearch {
     fn matches(
         &self,
         name: &str,
-        _case_sensitive: bool,
+        case_sensitive: bool,
         collator: Option<&CollatorBorrowed<'_>>,
     ) -> bool {
         let matches_one = |term: &CompiledTerm| -> bool {
             match term {
-                CompiledTerm::Plain(pattern) => {
-                    let search_len = pattern.len();
-                    if search_len > name.len() {
-                        return false;
-                    }
-                    let chars = name.as_bytes();
-                    let mut found = false;
-                    if let Some(collator) = collator {
-                        for (j, _) in name.char_indices() {
-                            if j + search_len > name.len() {
-                                break;
-                            }
-                            if !name.is_char_boundary(j + search_len) {
-                                continue;
-                            }
-                            if collator.compare_utf8(pattern.as_bytes(), &chars[j..j + search_len])
-                                == Ordering::Equal
-                            {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    if !found && name.contains(pattern.as_str()) {
-                        log::debug!("Collator missed match for {name:?} containing {pattern:?}");
-                    }
-                    found
-                }
+                CompiledTerm::Plain(pattern) => plain_matches(name, pattern, case_sensitive, collator),
                 CompiledTerm::Glob(glob) => glob.matches(name),
                 CompiledTerm::Regex(re) => re.is_match(name),
             }
@@ -395,12 +485,62 @@ impl CompiledSearch {
     }
 }
 
-pub fn filter_visible_entries(
-    entries: &[DirEntry],
-    show_hidden: bool,
-    search: Option<&Search>,
-) -> Vec<usize> {
-    let mut visible = Vec::new();
+fn contains_ignore_ascii_case(name: &str, pattern: &str) -> bool {
+    let needle = pattern.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > name.len() {
+        return false;
+    }
+    name.as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn plain_matches(
+    name: &str,
+    pattern: &str,
+    case_sensitive: bool,
+    collator: Option<&CollatorBorrowed<'_>>,
+) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    if case_sensitive {
+        return name.contains(pattern);
+    }
+    // Very common fast path for large ASCII-heavy directories. This avoids the
+    // per-character ICU collation loop while keeping the collator fallback for
+    // non-ASCII names where locale-aware matching matters.
+    if name.is_ascii() && pattern.is_ascii() {
+        return contains_ignore_ascii_case(name, pattern);
+    }
+
+    let search_len = pattern.len();
+    if search_len > name.len() {
+        return false;
+    }
+    let chars = name.as_bytes();
+    if let Some(collator) = collator {
+        for (j, _) in name.char_indices() {
+            if j + search_len > name.len() {
+                break;
+            }
+            if !name.is_char_boundary(j + search_len) {
+                continue;
+            }
+            if collator.compare_utf8(pattern.as_bytes(), &chars[j..j + search_len])
+                == Ordering::Equal
+            {
+                return true;
+            }
+        }
+    }
+    name.to_lowercase().contains(pattern)
+}
+
+fn compile_search(search: Option<&Search>) -> (bool, Option<CompiledSearch>) {
     let case_sensitive = search.is_some_and(|s| s.case_sensitive);
     let compiled_search = search.and_then(|s| {
         let terms: Vec<CompiledTerm> = if !s.terms.is_empty() {
@@ -429,24 +569,57 @@ pub fn filter_visible_entries(
             has_plain,
         })
     });
-    let is_searching = compiled_search.is_some();
-    let collator = if is_searching && compiled_search.as_ref().is_some_and(|cs| cs.has_plain) {
+    (case_sensitive, compiled_search)
+}
+
+pub fn filter_visible_entries(
+    entries: &[DirEntry],
+    show_hidden: bool,
+    search: Option<&Search>,
+) -> Vec<usize> {
+    let mut visible = Vec::new();
+    let (case_sensitive, compiled_search) = compile_search(search);
+    let collator = if compiled_search.as_ref().is_some_and(|cs| cs.has_plain) {
         Some(build_collator(case_sensitive))
     } else {
         None
     };
     for (i, entry) in entries.iter().enumerate() {
-        if !show_hidden {
-            let name = entry.get_splitted_path().1;
-            if name.starts_with('.') || name.starts_with('$') {
-                continue;
-            }
+        let name = entry.get_splitted_path().1;
+        if !show_hidden && (name.starts_with('.') || name.starts_with('$')) {
+            continue;
         }
-        if let Some(ref cs) = compiled_search {
-            let name = entry.get_splitted_path().1;
-            if !cs.matches(name, case_sensitive, collator.as_ref()) {
-                continue;
-            }
+        if let Some(ref cs) = compiled_search
+            && !cs.matches(name, case_sensitive, collator.as_ref())
+        {
+            continue;
+        }
+        visible.push(i);
+    }
+    visible
+}
+
+pub fn filter_visible_dir_list(
+    dir_list: &DirList,
+    show_hidden: bool,
+    search: Option<&Search>,
+) -> Vec<usize> {
+    let mut visible = Vec::new();
+    let (case_sensitive, compiled_search) = compile_search(search);
+    let collator = if compiled_search.as_ref().is_some_and(|cs| cs.has_plain) {
+        Some(build_collator(case_sensitive))
+    } else {
+        None
+    };
+    for (i, entry) in dir_list.entries.iter().enumerate() {
+        let name = entry.file_name.as_str();
+        if !show_hidden && (name.starts_with('.') || name.starts_with('$')) {
+            continue;
+        }
+        if let Some(ref cs) = compiled_search
+            && !cs.matches(name, case_sensitive, collator.as_ref())
+        {
+            continue;
         }
         visible.push(i);
     }
@@ -542,9 +715,10 @@ use rayon::{
     slice::ParallelSliceMut,
 };
 
-    use crate::data::files::DirEntry;
+    use crate::app::dock::TabData;
+    use crate::data::files::{DirEntry, DirList};
 
-    use super::{Search, filter_visible_entries};
+    use super::{Search, filter_visible_dir_list, filter_visible_entries};
 
     #[test]
     fn filter_visible_entries_includes_all_entries_uniformly() {
@@ -610,6 +784,30 @@ use rayon::{
     }
 
     #[test]
+    fn filter_visible_dir_list_matches_eager_entries() {
+        let entries = vec![
+            DirEntry::test_new("/fav/file_report.txt"),
+            DirEntry::test_new("/fav/.hidden_report.txt"),
+            DirEntry::test_new("/fav/notes.txt"),
+            DirEntry::test_new("/fav/REPORT_final.txt"),
+        ];
+        let search = Search {
+            value: "report".to_string(),
+            case_sensitive: false,
+            ..Default::default()
+        };
+        let eager = filter_visible_entries(&entries, false, Some(&search));
+        let lazy = DirList::from_owned_list(entries).expect("non-empty dir list");
+        let lazy_visible = filter_visible_dir_list(&lazy, false, Some(&search));
+
+        assert_eq!(
+            lazy_visible, eager,
+            "lazy DirList filtering should preserve eager search behavior"
+        );
+        assert_eq!(lazy_visible, vec![0, 3]);
+    }
+
+    #[test]
     fn dedup_removes_all_duplicates_regardless_of_order() {
         let entries = [
             DirEntry::test_new("/fav/subdir/file.txt"),
@@ -624,6 +822,57 @@ use rayon::{
         });
         list.dedup_by(|a, b| a.dir == b.dir && a.file_name == b.file_name);
         assert_eq!(list.len(), 2, "should have 2 unique entries");
+    }
+
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lwa_fm_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
+
+    #[test]
+    fn update_file_metadata_updates_eager_entry_without_refresh() {
+        let dir = unique_test_dir("eager_meta");
+        let file = dir.join("hot.log");
+        std::fs::write(&file, b"abc").expect("write temp file");
+
+        let mut tab = TabData::from_path(&dir);
+        tab.list = vec![DirEntry::test_new(&file.to_string_lossy())];
+        tab.visible_entries = vec![0];
+
+        let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
+        assert!(tab.update_file_metadata(&file, &settings));
+        assert_eq!(tab.list[0].meta.size, 3);
+        assert_eq!(tab.visible_entries, vec![0]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn update_file_metadata_updates_lazy_dir_list_without_refresh() {
+        let dir = unique_test_dir("lazy_meta");
+        let file = dir.join("hot.log");
+        std::fs::write(&file, b"abcdef").expect("write temp file");
+
+        let mut tab = TabData::from_path(&dir);
+        let entry = DirEntry::test_new(&file.to_string_lossy());
+        tab.dir_list = DirList::from_owned_list(vec![entry]);
+        tab.visible_entries = vec![0];
+
+        let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
+        assert!(tab.update_file_metadata(&file, &settings));
+        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
+        assert_eq!(dir_list.entries[0].meta.size, 6);
+        assert_eq!(tab.visible_entries, vec![0]);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

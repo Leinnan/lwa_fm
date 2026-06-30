@@ -1,4 +1,4 @@
-use crate::data::files::{DirContent, DirEntry};
+use crate::data::files::{DirContent, DirEntry, DirEntryMetaData};
 use bincode::config;
 use directories::ProjectDirs;
 use lru::LruCache;
@@ -138,6 +138,42 @@ pub fn invalidate_dirs(paths: impl IntoIterator<Item = PathBuf>) {
     let unique_paths: BTreeSet<PathBuf> = paths.into_iter().collect();
     for path in unique_paths {
         invalidate_dir(&path);
+    }
+}
+
+pub fn update_file_metadata(path: &Path) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    let meta: DirEntryMetaData = metadata.into();
+    let config = config::standard();
+    let key = cache_key(dir);
+
+    if let Ok(mut mem_cache) = IN_MEMORY_CACHE.lock()
+        && let Some((cached_mtime, content)) = mem_cache.pop(&key)
+    {
+        let mut content = (*content).clone();
+        if let Some(entry) = content.entries.iter_mut().find(|entry| entry.file_name == file_name)
+        {
+            entry.meta = meta;
+        }
+        mem_cache.put(key.clone(), (cached_mtime, Arc::new(content)));
+    }
+
+    if let Ok(Some(data)) = SLED_DIRS.get(&key)
+        && let Ok((mut content, _)) = bincode::decode_from_slice::<DirContent, _>(&data[..], config)
+        && let Some(entry) = content.entries.iter_mut().find(|entry| entry.file_name == file_name)
+    {
+        entry.meta = meta;
+        if let Ok(data) = bincode::encode_to_vec(&content, config) {
+            _ = SLED_DIRS.insert(key, data);
+        }
     }
 }
 
