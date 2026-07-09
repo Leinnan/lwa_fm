@@ -78,9 +78,12 @@ where
 
 impl TabData {
     pub fn watcher_specs(&mut self) -> Vec<(PathBuf, RecursiveMode)> {
-        // Always recompute fresh: this is the reconcile path, which must
-        // discover newly-created symlinked watch roots. Keep the memoisation
-        // cache warm so the hot `should_refresh_for_directories` path benefits.
+        // Always recompute fresh on this reconcile path (called from
+        // `reconcile_tab_watchers`) so newly-created symlinked watch roots are
+        // picked up for single-root recursive views. Multi-root views skip that
+        // discovery (see `compute_watcher_specs`), so this stays cheap for them.
+        // The result also warms the memoisation cache used by the hot
+        // `should_refresh_for_directories` path.
         let specs = self.compute_watcher_specs();
         self.watcher_specs_cache.specs.clone_from(&specs);
         self.watcher_specs_cache.inputs = Some(self.specs_inputs());
@@ -118,34 +121,49 @@ impl TabData {
     }
 
     fn compute_watcher_specs(&self) -> Vec<(PathBuf, RecursiveMode)> {
-        let mode = if self.search.as_ref().map_or(1, |search| search.depth) > 1 {
+        // Gather every root this view covers: the current path(s) plus any extra
+        // search directories.
+        let mut roots: Vec<PathBuf> = match &self.current_path {
+            CurrentPath::None => vec![],
+            CurrentPath::One(path_buf) => vec![path_buf.clone()],
+            CurrentPath::Multiple(path_bufs) => path_bufs.clone(),
+        };
+        if let Some(search) = &self.search {
+            roots.extend(search.extra_dirs.iter().cloned());
+        }
+
+        // Recursive watching requires discovering symlinked sub-directories,
+        // which `linked_watch_roots` does via a `walkdir` sweep plus a
+        // `canonicalize` syscall per symlink — work that scales with the number
+        // of roots × the tree size at the search depth. Running that once per
+        // favorite during a deep favorites search freezes the UI thread.
+        //
+        // We therefore only afford recursive watching (with symlink expansion)
+        // for a SINGLE root. Multi-root views (favorites, multi-dir searches)
+        // watch each root non-recursively instead: a change directly inside a
+        // root still triggers a refresh, while deeper changes require a manual
+        // re-search — an acceptable trade-off for not stalling the UI.
+        //
+        // The listing depth itself is NOT affected: `read_directory` still
+        // walks every root to the full requested depth; only the live-update
+        // watch is bounded.
+        let single_root = roots.len() <= 1;
+        let depth = self.search_depth();
+        let recursive = single_root && depth > 1;
+        let mode = if recursive {
             RecursiveMode::Recursive
         } else {
             RecursiveMode::NonRecursive
         };
-        let depth = self.search_depth();
+
         let mut specs = BTreeSet::new();
-        let mut add_root = |root: &PathBuf| {
-            let root = normalize_path(root);
-            specs.insert((root.clone(), mode));
-            if mode == RecursiveMode::Recursive {
-                for linked_root in linked_watch_roots(&root, depth) {
+        for root in &roots {
+            let normalized = normalize_path(root);
+            specs.insert((normalized.clone(), mode));
+            if recursive {
+                for linked_root in linked_watch_roots(&normalized, depth) {
                     specs.insert((linked_root, mode));
                 }
-            }
-        };
-        match &self.current_path {
-            CurrentPath::None => {}
-            CurrentPath::One(path_buf) => add_root(path_buf),
-            CurrentPath::Multiple(path_bufs) => {
-                for root in path_bufs {
-                    add_root(root);
-                }
-            }
-        }
-        if let Some(search) = &self.search {
-            for extra in &search.extra_dirs {
-                add_root(extra);
             }
         }
         specs.into_iter().collect()

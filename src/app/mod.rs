@@ -679,10 +679,35 @@ impl App {
                             puffin::profile_scope!(
                                 "lwa_fm::handle_action::RefreshFiles::bg_thread"
                             );
+                            // A superseded or cancelled task MUST still post a terminal
+                            // `FilesLoaded`. That handler is the only thing that clears
+                            // `loading`, and it is where `pending_refresh` (set when a
+                            // refresh is requested while one is already running) gets
+                            // re-spawned. Bailing silently leaves the tab parked in
+                            // `loading = true`, so a depth/path change made during a
+                            // slow (e.g. deep favorites) search would never take effect.
+                            //
+                            // The generation carried here is always stale at abort time
+                            // (cancel/gen are only flipped by a *newer* RequestFilesRefresh),
+                            // so the handler discards the empty payload without blanking
+                            // the view, clears `loading`, and re-spawns with fresh inputs.
+                            let abort = move || {
+                                COMMANDS_QUEUE.push(ActionToPerform::TabAction(
+                                    TabTarget::TabWithId(tab_id),
+                                    TabAction::FilesLoaded {
+                                        list: Vec::new(),
+                                        generation,
+                                        visible: Vec::new(),
+                                        dir_list: None,
+                                    },
+                                ));
+                            };
                             if refresh_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                                abort();
                                 return;
                             }
                             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                                abort();
                                 return;
                             }
 
@@ -709,6 +734,7 @@ impl App {
                                 &cancel,
                             );
                             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                                abort();
                                 return;
                             }
 
