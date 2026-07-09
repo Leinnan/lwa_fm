@@ -12,7 +12,7 @@ impl App {
             .tabs
             .get_current_tab()
             .is_some_and(|tab| !tab.is_searching());
-        egui::SidePanel::left("leftPanel")
+        egui::Panel::left("leftPanel")
             .frame(egui::Frame::canvas(&ctx.style()).inner_margin(10.0))
             .show(ctx, |ui| {
                 ui.allocate_space([160.0, TOP_SIDE_MARGIN].into());

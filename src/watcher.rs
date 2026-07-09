@@ -26,21 +26,34 @@ pub struct DirectoryWatchers {
     receivers: Vec<PendingWatcherReceiver>,
 }
 
+/// A surgical change to a single file. `structural_dirs` (the coarse
+/// "re-read the whole folder" fallback) is kept separate for genuinely
+/// ambiguous events.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FileChange {
+    /// File content/metadata changed — refresh its metadata only.
+    Metadata(PathBuf),
+    /// A new file appeared — insert an entry for it.
+    Created(PathBuf),
+    /// A file disappeared — drop its entry.
+    Removed(PathBuf),
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FileSystemChanges {
-    pub modified_files: BTreeSet<PathBuf>,
+    pub file_changes: BTreeSet<FileChange>,
     pub structural_dirs: BTreeSet<PathBuf>,
 }
 
 impl FileSystemChanges {
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.modified_files.is_empty() && self.structural_dirs.is_empty()
+        self.file_changes.is_empty() && self.structural_dirs.is_empty()
     }
 
     #[inline]
     fn extend(&mut self, other: Self) {
-        self.modified_files.extend(other.modified_files);
+        self.file_changes.extend(other.file_changes);
         self.structural_dirs.extend(other.structural_dirs);
     }
 }
@@ -228,11 +241,7 @@ impl DirectoryWatchers {
         for (path, error) in &failed_paths {
             self.pending_paths.remove(path);
             log::warn!("File system watcher failed for {}: {error}", path.display());
-            toast!(
-                Warning,
-                "Live updates unavailable for {}",
-                path.display()
-            );
+            toast!(Warning, "Live updates unavailable for {}", path.display());
         }
         for (watcher, mode) in ready_watchers {
             self.insert_started_watcher(watcher, mode);
@@ -378,16 +387,32 @@ impl DirectoryWatcher {
         } = event;
 
         match kind {
-            EventKind::Create(CreateKind::File | CreateKind::Folder) => FileSystemChanges {
+            // A new file: can be inserted surgically once the handler is wired.
+            EventKind::Create(CreateKind::File) => FileSystemChanges {
+                file_changes: file_changes_from(paths, FileChange::Created),
+                ..Default::default()
+            },
+            // A new folder may pull in a whole subtree: structural refresh.
+            EventKind::Create(CreateKind::Folder) => FileSystemChanges {
                 structural_dirs: parent_dirs_for_paths(paths),
                 ..Default::default()
             },
-            EventKind::Remove(RemoveKind::File | RemoveKind::Folder) => FileSystemChanges {
+            // A deleted file: can be removed surgically once the handler is wired.
+            EventKind::Remove(RemoveKind::File) => FileSystemChanges {
+                file_changes: file_changes_from(paths, FileChange::Removed),
+                ..Default::default()
+            },
+            // A deleted folder may take a subtree with it: structural refresh.
+            EventKind::Remove(RemoveKind::Folder) => FileSystemChanges {
                 structural_dirs: parent_dirs_for_paths(paths),
                 ..Default::default()
             },
+            // Rename "From" half. The source path is gone regardless of whether
+            // a matching "To" arrives, so emit a surgical `Removed` now and
+            // remember the source parent dirs (keyed by tracker) so the "To"
+            // half can decide between a same-dir coalesce and a cross-dir refresh.
             EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-                let directories = parent_dirs_for_paths(paths);
+                let directories = parent_dirs_for_paths(paths.clone());
                 if let Some(tracker) = tracker {
                     pending_renames
                         .entry(tracker)
@@ -398,24 +423,39 @@ impl DirectoryWatcher {
                     }
                 }
                 FileSystemChanges {
-                    structural_dirs: directories,
+                    file_changes: file_changes_from(paths, FileChange::Removed),
                     ..Default::default()
                 }
             }
+            // Rename "To" half. If the remembered "From" lived in the same
+            // directory (the common atomic-save pattern: write `file.tmp` then
+            // rename over `file`), this is a surgical `Created` and no structural
+            // refresh is needed. Otherwise fall back to a structural refresh of
+            // both directories.
             EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-                let mut directories = parent_dirs_for_paths(paths);
-                if let Some(tracker) = tracker
-                    && let Some(pending) = pending_renames.remove(&tracker)
-                {
-                    directories.extend(pending);
-                }
-                FileSystemChanges {
-                    structural_dirs: directories,
-                    ..Default::default()
+                let to_parents = parent_dirs_for_paths(paths.clone());
+                let remembered = tracker.and_then(|t| pending_renames.remove(&t));
+                let same_dir = remembered
+                    .as_ref()
+                    .is_some_and(|from_parents| from_parents == &to_parents);
+                if same_dir {
+                    FileSystemChanges {
+                        file_changes: file_changes_from(paths, FileChange::Created),
+                        ..Default::default()
+                    }
+                } else {
+                    let mut directories = to_parents;
+                    if let Some(from_parents) = remembered {
+                        directories.extend(from_parents);
+                    }
+                    FileSystemChanges {
+                        structural_dirs: directories,
+                        ..Default::default()
+                    }
                 }
             }
             EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_)) => FileSystemChanges {
-                modified_files: normalize_existing_paths(paths),
+                file_changes: file_changes_from(paths, FileChange::Metadata),
                 ..Default::default()
             },
             EventKind::Modify(ModifyKind::Name(_) | ModifyKind::Any | ModifyKind::Other)
@@ -439,8 +479,13 @@ fn parent_dirs_for_paths(paths: Vec<PathBuf>) -> BTreeSet<PathBuf> {
         .collect()
 }
 
-fn normalize_existing_paths(paths: Vec<PathBuf>) -> BTreeSet<PathBuf> {
-    paths.into_iter().map(|path| normalize_path(&path)).collect()
+/// Map raw event paths into `FileChange`s of the given kind, normalising each
+/// path exactly once.
+fn file_changes_from(paths: Vec<PathBuf>, kind: fn(PathBuf) -> FileChange) -> BTreeSet<FileChange> {
+    paths
+        .into_iter()
+        .map(|path| kind(normalize_path(&path)))
+        .collect()
 }
 
 impl Default for DirectoryWatcher {
@@ -451,11 +496,11 @@ impl Default for DirectoryWatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{DirectoryWatcher, parent_dir_for_event_path};
+    use super::{DirectoryWatcher, FileChange, parent_dir_for_event_path};
     use crate::helper::normalize_path;
     use notify::{
         Event, EventKind,
-        event::{DataChange, ModifyKind, RenameMode},
+        event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode},
     };
     use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
@@ -478,7 +523,7 @@ mod tests {
             changes.structural_dirs,
             BTreeSet::from([normalize_path(Path::new("/tmp"))])
         );
-        assert!(changes.modified_files.is_empty());
+        assert!(changes.file_changes.is_empty());
     }
 
     #[test]
@@ -496,7 +541,7 @@ mod tests {
             changes.structural_dirs,
             BTreeSet::from([normalize_path(Path::new("/tmp"))])
         );
-        assert!(changes.modified_files.is_empty());
+        assert!(changes.file_changes.is_empty());
     }
 
     #[test]
@@ -512,11 +557,15 @@ mod tests {
         let from_changes = DirectoryWatcher::process_event(from, &mut pending);
         let to_changes = DirectoryWatcher::process_event(to, &mut pending);
 
+        // Cross-directory rename: From is a surgical `Removed`; To falls back to a
+        // structural refresh covering both directories.
         assert_eq!(
-            from_changes.structural_dirs,
-            BTreeSet::from([normalize_path(Path::new("/tmp/source"))])
+            from_changes.file_changes,
+            BTreeSet::from([FileChange::Removed(normalize_path(Path::new(
+                "/tmp/source/file.txt"
+            )))])
         );
-        assert!(from_changes.modified_files.is_empty());
+        assert!(from_changes.structural_dirs.is_empty());
         assert_eq!(
             to_changes.structural_dirs,
             BTreeSet::from([
@@ -524,7 +573,38 @@ mod tests {
                 normalize_path(Path::new("/tmp/dest"))
             ])
         );
-        assert!(to_changes.modified_files.is_empty());
+        assert!(to_changes.file_changes.is_empty());
+    }
+
+    #[test]
+    fn same_directory_rename_coalesces_to_removed_plus_created() {
+        // Atomic-save pattern: write `file.tmp`, rename over `file` in the same
+        // directory. From -> Removed(tmp), To -> Created(file), no structural.
+        let mut pending = HashMap::new();
+        let from = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path(Path::new("/tmp/file.tmp").to_path_buf())
+            .set_tracker(42);
+        let to = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path(Path::new("/tmp/file.txt").to_path_buf())
+            .set_tracker(42);
+
+        let from_changes = DirectoryWatcher::process_event(from, &mut pending);
+        let to_changes = DirectoryWatcher::process_event(to, &mut pending);
+
+        assert_eq!(
+            from_changes.file_changes,
+            BTreeSet::from([FileChange::Removed(normalize_path(Path::new(
+                "/tmp/file.tmp"
+            )))])
+        );
+        assert!(from_changes.structural_dirs.is_empty());
+        assert_eq!(
+            to_changes.file_changes,
+            BTreeSet::from([FileChange::Created(normalize_path(Path::new(
+                "/tmp/file.txt"
+            )))])
+        );
+        assert!(to_changes.structural_dirs.is_empty());
     }
 
     #[test]
@@ -536,8 +616,10 @@ mod tests {
         let changes = DirectoryWatcher::process_event(event, &mut pending);
 
         assert_eq!(
-            changes.modified_files,
-            BTreeSet::from([normalize_path(Path::new("/tmp/hot.log"))])
+            changes.file_changes,
+            BTreeSet::from([FileChange::Metadata(normalize_path(Path::new(
+                "/tmp/hot.log"
+            )))])
         );
         assert!(changes.structural_dirs.is_empty());
     }
@@ -547,5 +629,61 @@ mod tests {
         let parent = parent_dir_for_event_path(Path::new("/tmp/example/subdir"));
 
         assert_eq!(parent, Some(normalize_path(Path::new("/tmp/example"))));
+    }
+
+    // The next four tests PIN the current bucket routing for non-rename events
+    // so the surgical-update refactor (later phases) can change them deliberately.
+
+    #[test]
+    fn create_file_routed_as_created_change() {
+        let event = Event::new(EventKind::Create(CreateKind::File))
+            .add_path(Path::new("/tmp/new_file.txt").to_path_buf());
+
+        let mut pending = HashMap::new();
+        let changes = DirectoryWatcher::process_event(event, &mut pending);
+
+        assert_eq!(
+            changes.file_changes,
+            BTreeSet::from([FileChange::Created(normalize_path(Path::new(
+                "/tmp/new_file.txt"
+            )))])
+        );
+        assert!(changes.structural_dirs.is_empty());
+    }
+
+    #[test]
+    fn remove_file_routed_as_removed_change() {
+        let event = Event::new(EventKind::Remove(RemoveKind::File))
+            .add_path(Path::new("/tmp/gone_file.txt").to_path_buf());
+
+        let mut pending = HashMap::new();
+        let changes = DirectoryWatcher::process_event(event, &mut pending);
+
+        assert_eq!(
+            changes.file_changes,
+            BTreeSet::from([FileChange::Removed(normalize_path(Path::new(
+                "/tmp/gone_file.txt"
+            )))])
+        );
+        assert!(changes.structural_dirs.is_empty());
+    }
+
+    #[test]
+    fn metadata_modify_routed_as_metadata_change() {
+        let event = Event::new(EventKind::Modify(ModifyKind::Metadata(
+            notify::event::MetadataKind::Any,
+        )))
+        .add_path(Path::new("/tmp/hot.log").to_path_buf());
+
+        let mut pending = HashMap::new();
+        let changes = DirectoryWatcher::process_event(event, &mut pending);
+
+        assert_eq!(
+            changes.file_changes,
+            BTreeSet::from([FileChange::Metadata(normalize_path(Path::new(
+                "/tmp/hot.log"
+            )))])
+        );
+        assert!(changes.structural_dirs.is_empty());
     }
 }

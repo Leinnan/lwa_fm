@@ -3,8 +3,8 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::thread;
@@ -226,7 +226,11 @@ impl JobScheduler {
             let mut state = self.state.lock().expect("job scheduler mutex poisoned");
             let order = state.next_order;
             state.next_order = state.next_order.saturating_add(1);
-            let rank = job_rank(class, directory.as_deref(), state.active_directory.as_deref());
+            let rank = job_rank(
+                class,
+                directory.as_deref(),
+                state.active_directory.as_deref(),
+            );
             state.queue.push(HeapEntry {
                 priority: JobPriority(rank, order),
                 job,
@@ -265,11 +269,7 @@ impl JobScheduler {
     }
 }
 
-fn job_rank(
-    class: AssetJobClass,
-    directory: Option<&str>,
-    active_directory: Option<&str>,
-) -> u8 {
+fn job_rank(class: AssetJobClass, directory: Option<&str>, active_directory: Option<&str>) -> u8 {
     let is_active_directory = directory
         .zip(active_directory)
         .is_some_and(|(dir, active)| dir == active);
@@ -651,7 +651,10 @@ impl AssetManager {
             return;
         }
 
-        let file_prefixes: Vec<String> = files.iter().map(|file| file.to_full_path_string()).collect();
+        let file_prefixes: Vec<String> = files
+            .iter()
+            .map(|file| file.to_full_path_string())
+            .collect();
         let matches_file = |key: &str| -> bool {
             let entry_key = key.strip_prefix("sidebar:").unwrap_or(key);
             file_prefixes.iter().any(|file| entry_key.starts_with(file))

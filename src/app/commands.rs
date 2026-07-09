@@ -61,10 +61,7 @@ pub enum TabAction {
         dir_list: Option<DirList>,
     },
     /// Background thread progress update.
-    FilesProgress {
-        progress: String,
-        generation: u64,
-    },
+    FilesProgress { progress: String, generation: u64 },
 }
 
 impl TabAction {

@@ -27,10 +27,11 @@ use egui_taffy::{
 use taffy::prelude::*;
 use taffy::style_helpers;
 
-use super::assets::{entry_has_animated_preview, AssetManager, HoverPreview, IconSize};
+use super::assets::{AssetManager, HoverPreview, IconSize, entry_has_animated_preview};
 use super::commands::ActionToPerform;
 use crate::app::command_palette::build_for_path;
 use crate::app::commands::{ModalWindow, TabAction, TabTarget};
+use crate::app::dir_handling::WatcherSpecsCache;
 use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
 use crate::app::top_bottom::TopDisplayPath;
 use crate::app::{DisplayType, LUA_INSTANCE, Search, Sort};
@@ -86,11 +87,23 @@ pub fn populate_file_name_pool(entries: impl Iterator<Item = (String, bool)>, ui
             if pool.peek(&(name.clone(), is_dir)).is_some() {
                 continue;
             }
-            let color = if is_dir { Color32::LIGHT_GRAY } else { Color32::GRAY };
+            let color = if is_dir {
+                Color32::LIGHT_GRAY
+            } else {
+                Color32::GRAY
+            };
             let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-                name.clone(), FontId::default(), color,
+                name.clone(),
+                FontId::default(),
+                color,
             )))
-            .into_galley_impl(ui, &ui.style(), TextWrapping::default(), FontSelection::Default, egui::Align::Center);
+            .into_galley_impl(
+                ui,
+                &ui.style(),
+                TextWrapping::default(),
+                FontSelection::Default,
+                egui::Align::Center,
+            );
             pool.put((name, is_dir), galley);
         }
     });
@@ -262,6 +275,11 @@ pub struct TabData {
     pub id: u32,
     pub top_display_path: TopDisplayPath,
     pub dir_list: Option<DirList>,
+    /// Memoised `(path, RecursiveMode)` watcher specs plus the input snapshot
+    /// that produced them. Recomputed only when `current_path` / search depth /
+    /// `extra_dirs` change, so the per-frame `should_refresh_for_directories`
+    /// path avoids `walkdir` + `canonicalize` syscalls during change bursts.
+    pub(crate) watcher_specs_cache: WatcherSpecsCache,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -394,7 +412,10 @@ impl TabData {
         let data_idx = *self.visible_entries.get(visible_row)?;
         if let Some(dl) = &self.dir_list {
             let data = &dl.entries[data_idx];
-            Some((&data.file_name, !matches!(data.meta.entry_type, EntryType::File)))
+            Some((
+                &data.file_name,
+                !matches!(data.meta.entry_type, EntryType::File),
+            ))
         } else {
             let entry = self.list.get(data_idx)?;
             Some((entry.get_splitted_path().1, !entry.is_file()))
@@ -426,6 +447,7 @@ impl TabData {
             undoer: Undoer::default(),
             top_display_path,
             dir_list: None,
+            watcher_specs_cache: WatcherSpecsCache::default(),
         };
         TabAction::ChangePaths(CurrentPath::One(path.into())).schedule_tab(new.id);
         new
@@ -1204,7 +1226,14 @@ impl MyTabViewer<'_> {
                     .data_set_path(&tab.current_path, selected_tabs.clone());
             }
 
-            self.show_entry_context_menu(row_response, tab, val, row_index, tab_popup_id, &favorites);
+            self.show_entry_context_menu(
+                row_response,
+                tab,
+                val,
+                row_index,
+                tab_popup_id,
+                &favorites,
+            );
 
             // Scroll selected row into view
             if just_changed
@@ -1529,7 +1558,8 @@ impl MyTabViewer<'_> {
                                     .clicked()
                                 {
                                     let path = val.get_path();
-                                    let filename = path.file_name().expect("NO FILENAME").to_os_string();
+                                    let filename =
+                                        path.file_name().expect("NO FILENAME").to_os_string();
                                     let target_path = other.join(&filename);
                                     println!("{}", &target_path.display());
                                     let move_result = fs::rename(&path, &target_path);
@@ -1582,9 +1612,11 @@ impl MyTabViewer<'_> {
                         toast!(Error, "Failed to read the clipboard.");
                         return;
                     };
-                    clipboard.set_text(val.full_path_string()).unwrap_or_else(|_| {
-                        toast!(Error, "Failed to update the clipboard.");
-                    });
+                    clipboard
+                        .set_text(val.full_path_string())
+                        .unwrap_or_else(|_| {
+                            toast!(Error, "Failed to update the clipboard.");
+                        });
                     ui.close();
                 }
                 if ui.button("Rename").clicked() {

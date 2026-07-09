@@ -574,7 +574,8 @@ impl App {
                                         // current view. Refilter only when the effective predicate
                                         // changed: an active saved/restored search was enabled, or
                                         // an active search was disabled.
-                                        search_changed |= was_filtering != current_tab.is_searching();
+                                        search_changed |=
+                                            was_filtering != current_tab.is_searching();
                                     }
                                     if search_target_changed {
                                         // Show immediately-available current-directory results while

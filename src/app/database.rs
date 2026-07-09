@@ -1,4 +1,6 @@
-use crate::data::files::{DirContent, DirEntry, DirEntryMetaData};
+use crate::data::files::{
+    DirContent, DirEntry, DirEntryData, DirEntryMetaData, EntryType, SortKey,
+};
 use bincode::config;
 use directories::ProjectDirs;
 use lru::LruCache;
@@ -7,9 +9,9 @@ use std::{
     collections::HashMap,
     num::NonZeroUsize,
     path::{Path, PathBuf},
+    sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
     sync::mpsc,
-    sync::Arc,
     sync::{LazyLock, Mutex},
     thread,
 };
@@ -23,7 +25,11 @@ const IN_MEMORY_CACHE_CAPACITY: usize = 500;
 /// Hot in-memory cache: avoids the mtime stat + sled deserialization for
 /// recently accessed directories. The tuple is `(mtime_nanos, DirContent)`.
 static IN_MEMORY_CACHE: LazyLock<Mutex<LruCache<Vec<u8>, (u128, Arc<DirContent>)>>> =
-    LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(IN_MEMORY_CACHE_CAPACITY).expect("capacity must be > 0"))));
+    LazyLock::new(|| {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(IN_MEMORY_CACHE_CAPACITY).expect("capacity must be > 0"),
+        ))
+    });
 
 static CACHE_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -51,7 +57,8 @@ enum CacheWrite {
 /// Dedicated single-threaded cache writer. Processes sled writes sequentially
 /// to avoid spawning a thread per cache miss.
 fn cache_writer_sender() -> mpsc::Sender<CacheWrite> {
-    static WRITER: LazyLock<Mutex<Option<mpsc::Sender<CacheWrite>>>> = LazyLock::new(|| Mutex::new(None));
+    static WRITER: LazyLock<Mutex<Option<mpsc::Sender<CacheWrite>>>> =
+        LazyLock::new(|| Mutex::new(None));
     let mut guard = WRITER.lock().expect("cache writer mutex poisoned");
     if let Some(ref sender) = *guard {
         return sender.clone();
@@ -75,10 +82,7 @@ fn cache_writer_sender() -> mpsc::Sender<CacheWrite> {
                     if let Some(mtime) = mtime_nanos {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!("lwa_fm::database::cache_writer::mtime");
-                        _ = SLED_DIRS.insert(
-                            mtime_key(&path),
-                            &mtime.to_ne_bytes()[..],
-                        );
+                        _ = SLED_DIRS.insert(mtime_key(&path), &mtime.to_ne_bytes()[..]);
                     }
                     _ = SLED_DIRS.insert(path, data);
                     log::info!("Data saved");
@@ -159,7 +163,10 @@ pub fn update_file_metadata(path: &Path) {
         && let Some((cached_mtime, content)) = mem_cache.pop(&key)
     {
         let mut content = (*content).clone();
-        if let Some(entry) = content.entries.iter_mut().find(|entry| entry.file_name == file_name)
+        if let Some(entry) = content
+            .entries
+            .iter_mut()
+            .find(|entry| entry.file_name == file_name)
         {
             entry.meta = meta;
         }
@@ -168,13 +175,126 @@ pub fn update_file_metadata(path: &Path) {
 
     if let Ok(Some(data)) = SLED_DIRS.get(&key)
         && let Ok((mut content, _)) = bincode::decode_from_slice::<DirContent, _>(&data[..], config)
-        && let Some(entry) = content.entries.iter_mut().find(|entry| entry.file_name == file_name)
+        && let Some(entry) = content
+            .entries
+            .iter_mut()
+            .find(|entry| entry.file_name == file_name)
     {
         entry.meta = meta;
         if let Ok(data) = bincode::encode_to_vec(&content, config) {
             _ = SLED_DIRS.insert(key, data);
         }
     }
+}
+
+/// Surgically insert (or replace) a single entry in the cached `DirContent` for
+/// `path`'s parent directory, without re-reading the whole directory. Mirrors
+/// [`update_file_metadata`] but for newly-created files. The directory's stored
+/// mtime guard is refreshed so the cache stays consistent (creating a file
+/// changes the parent dir's mtime).
+pub fn insert_file_entry(path: &Path) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Ok(metadata) = std::fs::metadata(path) else {
+        // File is already gone (fast create/delete) — nothing to cache.
+        return;
+    };
+    let entry = build_entry_data(metadata, file_name.to_string());
+    mutate_cached_entries(dir, |entries| {
+        upsert_entry(entries, entry.clone());
+        true
+    });
+}
+
+/// Surgically remove a single entry from the cached `DirContent` for `path`'s
+/// parent directory, without re-reading it. Returns silently if the entry (or
+/// its cache) is absent.
+pub fn remove_file_entry(path: &Path) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    mutate_cached_entries(dir, |entries| remove_entry(entries, file_name));
+}
+
+/// Build a cacheable [`DirEntryData`] straight from metadata + a file name,
+/// avoiding a full directory re-scan.
+fn build_entry_data(metadata: std::fs::Metadata, file_name: String) -> DirEntryData {
+    let meta: DirEntryMetaData = metadata.into();
+    let is_file = matches!(meta.entry_type, EntryType::File);
+    DirEntryData {
+        sort_key: SortKey::new_path(&file_name, is_file),
+        file_name,
+        meta,
+    }
+}
+
+fn upsert_entry(entries: &mut Vec<DirEntryData>, entry: DirEntryData) {
+    if let Some(existing) = entries.iter_mut().find(|e| e.file_name == entry.file_name) {
+        *existing = entry;
+    } else {
+        entries.push(entry);
+    }
+}
+
+fn remove_entry(entries: &mut Vec<DirEntryData>, file_name: &str) -> bool {
+    let before = entries.len();
+    entries.retain(|e| e.file_name != file_name);
+    entries.len() != before
+}
+
+/// Apply `mutate` to the cached `DirContent` entries for `dir` in both the
+/// in-memory hot cache and the sled store. When the mutation changes content,
+/// the stored mtime guard is refreshed so a subsequent read doesn't discard the
+/// surgical update as stale (creating/deleting a file changes the dir mtime).
+fn mutate_cached_entries<F>(dir: &Path, mutate: F)
+where
+    F: Fn(&mut Vec<DirEntryData>) -> bool,
+{
+    let config = config::standard();
+    let key = cache_key(dir);
+    let new_mtime = current_mtime_nanos(dir);
+    let mut changed_mem = false;
+    let mut changed_sled = false;
+
+    if let Ok(mut mem_cache) = IN_MEMORY_CACHE.lock()
+        && let Some((cached_mtime, content)) = mem_cache.pop(&key)
+    {
+        let mut content = (*content).clone();
+        changed_mem = mutate(&mut content.entries);
+        mem_cache.put(key.clone(), (cached_mtime, Arc::new(content)));
+    }
+
+    if let Ok(Some(data)) = SLED_DIRS.get(&key)
+        && let Ok((mut content, _)) = bincode::decode_from_slice::<DirContent, _>(&data[..], config)
+    {
+        if mutate(&mut content.entries) {
+            changed_sled = true;
+            if let Ok(data) = bincode::encode_to_vec(&content, config) {
+                _ = SLED_DIRS.insert(&key, data);
+            }
+        }
+    }
+
+    if (changed_mem || changed_sled)
+        && let Some(mtime) = new_mtime
+    {
+        _ = SLED_DIRS.insert(mtime_key(&key), &mtime.to_ne_bytes()[..]);
+    }
+}
+
+fn current_mtime_nanos(dir: &Path) -> Option<u128> {
+    let modified = std::fs::metadata(dir).ok()?.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_nanos())
 }
 
 pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
@@ -215,11 +335,13 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
                 let current_nanos = current_nanos.as_nanos();
                 if let Ok(Some(stored)) = SLED_DIRS.get(mtime_key(&path)) {
                     if stored.len() == 16 {
-                        let stored_nanos = u128::from_ne_bytes(
-                            stored.as_ref().try_into().unwrap_or([0; 16]),
-                        );
+                        let stored_nanos =
+                            u128::from_ne_bytes(stored.as_ref().try_into().unwrap_or([0; 16]));
                         if stored_nanos != current_nanos {
-                            log::info!("Directory mtime changed for {}, invalidating cache", dir.display());
+                            log::info!(
+                                "Directory mtime changed for {}, invalidating cache",
+                                dir.display()
+                            );
                             bump_generation(&path);
                             _ = SLED_DIRS.remove(&path);
                         }
@@ -241,7 +363,10 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
                 from_memory = Some(Arc::new(meta));
             } else {
                 // Generation mismatch — cache entry is stale; remove it
-                log::info!("Stale cache entry (generation mismatch) for {}, removing", dir.display());
+                log::info!(
+                    "Stale cache entry (generation mismatch) for {}, removing",
+                    dir.display()
+                );
                 _ = SLED_DIRS.remove(&path);
             }
         } else {
@@ -261,10 +386,11 @@ pub fn read_dir(dir: &Path, entries: &mut Vec<DirEntry>) {
             // Write to sled via background thread
             #[cfg(feature = "profiling")]
             puffin::profile_scope!("lwa_fm::database::read_dir::cache_write");
-            let entry_mtime = std::fs::metadata(dir).ok()
-                .and_then(|m| m.modified().ok());
+            let entry_mtime = std::fs::metadata(dir).ok().and_then(|m| m.modified().ok());
             let mtime_nanos = entry_mtime.and_then(|m| {
-                m.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_nanos())
+                m.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_nanos())
             });
             if let Ok(data) = bincode::encode_to_vec(&content, config) {
                 _ = cache_writer_sender().send(CacheWrite::Insert {

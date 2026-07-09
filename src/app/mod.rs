@@ -16,13 +16,13 @@ use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use std::fs;
 
 pub mod assets;
 mod central_panel;
@@ -97,6 +97,10 @@ pub struct App {
     assets: AssetManager,
     #[serde(skip, default)]
     pending_modified_files: BTreeMap<PathBuf, Instant>,
+    /// Structural (folder-level) changes awaiting a debounced refresh, mapped to
+    /// the instant they were first seen. Coalesces bursts into one refresh.
+    #[serde(skip, default)]
+    pending_structural_dirs: BTreeMap<PathBuf, Instant>,
     #[cfg(feature = "profiling")]
     #[serde(skip)]
     profiler_visible: bool,
@@ -162,9 +166,9 @@ impl App {
 
         let changes = self.watchers.check_for_file_system_events();
         let now = Instant::now();
-        for file in changes.modified_files {
-            self.pending_modified_files.entry(file).or_insert(now);
-        }
+        let mut degraded_structural: BTreeSet<PathBuf> = BTreeSet::new();
+        self.route_file_changes(changes.file_changes, now, ctx, &mut degraded_structural);
+
         let ready_modified_files = self
             .pending_modified_files
             .iter()
@@ -176,17 +180,46 @@ impl App {
             self.pending_modified_files.remove(file);
         }
 
-        if changes.structural_dirs.is_empty() && ready_modified_files.is_empty() {
+        // Debounce structural changes (watcher-reported + surgical fallbacks)
+        // so a burst (git checkout, npm install) collapses into one refresh per
+        // tab instead of one per frame. Modified-file changes above are handled
+        // independently and stay near-instant.
+        const STRUCTURAL_COALESCE: Duration = Duration::from_millis(150);
+        for dir in changes
+            .structural_dirs
+            .iter()
+            .chain(degraded_structural.iter())
+        {
+            self.pending_structural_dirs
+                .entry(dir.clone())
+                .or_insert(now);
+        }
+        let ready_structural: BTreeSet<PathBuf> = self
+            .pending_structural_dirs
+            .iter()
+            .filter_map(|(dir, first_seen)| {
+                (now.duration_since(*first_seen) >= STRUCTURAL_COALESCE).then(|| dir.clone())
+            })
+            .collect();
+        for dir in &ready_structural {
+            self.pending_structural_dirs.remove(dir);
+        }
+        if !self.pending_structural_dirs.is_empty() {
+            ctx.request_repaint_after(STRUCTURAL_COALESCE);
+        }
+
+        if ready_structural.is_empty() && ready_modified_files.is_empty() {
             return;
         }
 
-        self.assets.invalidate_files(ready_modified_files.iter().cloned());
+        self.assets
+            .invalidate_files(ready_modified_files.iter().cloned());
         for file in &ready_modified_files {
             crate::app::database::update_file_metadata(file);
         }
         self.assets
-            .invalidate_directories(changes.structural_dirs.iter().cloned());
-        crate::app::database::invalidate_dirs(changes.structural_dirs.iter().cloned());
+            .invalidate_directories(ready_structural.iter().cloned());
+        crate::app::database::invalidate_dirs(ready_structural.iter().cloned());
 
         let tab_ids = self.tabs.get_tab_ids();
         let affected_tabs = tab_ids
@@ -195,7 +228,7 @@ impl App {
             .filter(|tab_id| {
                 self.tabs
                     .get_tab_by_id(*tab_id)
-                    .is_some_and(|tab| tab.should_refresh_for_directories(&changes.structural_dirs))
+                    .is_some_and(|tab| tab.should_refresh_for_directories(&ready_structural))
             })
             .collect::<Vec<_>>();
 
@@ -206,7 +239,8 @@ impl App {
             let Some(tab) = self.tabs.get_tab_by_id(*tab_id) else {
                 continue;
             };
-            let settings = ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
+            let settings =
+                ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
             for file in &ready_modified_files {
                 tab.update_file_metadata(file, &settings.data);
             }
@@ -220,6 +254,72 @@ impl App {
                     TabAction::RequestFilesRefresh,
                 ),
             );
+        }
+    }
+
+    /// Route per-file changes from the watcher: metadata changes are queued for
+    /// the modified-file debounce; create/delete are applied surgically to the
+    /// asset/db caches and each tab, degrading to `degraded_structural` when a
+    /// tab can't apply the change.
+    fn route_file_changes(
+        &mut self,
+        file_changes: BTreeSet<crate::watcher::FileChange>,
+        now: Instant,
+        ctx: &egui::Context,
+        degraded_structural: &mut BTreeSet<PathBuf>,
+    ) {
+        for change in file_changes {
+            match change {
+                crate::watcher::FileChange::Metadata(file) => {
+                    self.pending_modified_files.entry(file).or_insert(now);
+                }
+                crate::watcher::FileChange::Created(path) => {
+                    self.assets.invalidate_files(std::iter::once(path.clone()));
+                    crate::app::database::insert_file_entry(&path);
+                    self.apply_file_change_to_tabs(
+                        &path,
+                        ctx,
+                        degraded_structural,
+                        crate::app::dock::TabData::insert_file_entry,
+                    );
+                }
+                crate::watcher::FileChange::Removed(path) => {
+                    self.assets.invalidate_files(std::iter::once(path.clone()));
+                    crate::app::database::remove_file_entry(&path);
+                    self.apply_file_change_to_tabs(
+                        &path,
+                        ctx,
+                        degraded_structural,
+                        crate::app::dock::TabData::remove_file_entry,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Apply a surgical file change (create/delete) to every tab's listing via
+    /// `apply`. Tabs that can't apply it (search / multi-directory / recursive
+    /// views, or an entry not present) contribute the parent directory to
+    /// `degraded` so the caller can fall back to a structural refresh.
+    fn apply_file_change_to_tabs(
+        &mut self,
+        path: &Path,
+        ctx: &egui::Context,
+        degraded: &mut BTreeSet<PathBuf>,
+        apply: impl Fn(&mut crate::app::dock::TabData, &Path, &DirectoryViewSettings) -> bool,
+    ) {
+        let tab_ids = self.tabs.get_tab_ids();
+        for tab_id in tab_ids {
+            let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                continue;
+            };
+            let settings =
+                ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
+            if !apply(tab, path, &settings.data)
+                && let Some(parent) = path.parent()
+            {
+                degraded.insert(crate::helper::normalize_path(parent));
+            }
         }
     }
 
@@ -382,6 +482,7 @@ impl Default for App {
             watchers: DirectoryWatchers::default(),
             assets: AssetManager::default(),
             pending_modified_files: BTreeMap::new(),
+            pending_structural_dirs: BTreeMap::new(),
             #[cfg(feature = "profiling")]
             profiler_visible: true,
             #[cfg(feature = "profiling")]
@@ -502,7 +603,9 @@ impl App {
                         // Invalidate sled cache for all watched directories
                         let force_dirs: Vec<PathBuf> = {
                             #[cfg(feature = "profiling")]
-                            puffin::profile_scope!("lwa_fm::handle_action::ForceRefresh::collect_dirs");
+                            puffin::profile_scope!(
+                                "lwa_fm::handle_action::ForceRefresh::collect_dirs"
+                            );
                             let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                                 return;
                             };
@@ -573,7 +676,9 @@ impl App {
 
                         BG_POOL.spawn(move || {
                             #[cfg(feature = "profiling")]
-                            puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles::bg_thread");
+                            puffin::profile_scope!(
+                                "lwa_fm::handle_action::RefreshFiles::bg_thread"
+                            );
                             if refresh_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
                                 return;
                             }
@@ -611,7 +716,9 @@ impl App {
 
                             crate::app::dir_handling::sort_entries_vec(&mut list, &settings.data);
                             #[cfg(feature = "profiling")]
-                            puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles::filter_visible");
+                            puffin::profile_scope!(
+                                "lwa_fm::handle_action::RefreshFiles::filter_visible"
+                            );
                             let visible = crate::app::dir_handling::filter_visible_entries(
                                 &list,
                                 show_hidden,
@@ -622,7 +729,10 @@ impl App {
                             // are then built only for visible rows, roughly halving memory for
                             // large folders). Multi-dir / search reads keep `list` populated.
                             let (list, dir_list) = if depth <= 1 && directories.len() == 1 {
-                                (Vec::new(), crate::data::files::DirList::from_owned_list(list))
+                                (
+                                    Vec::new(),
+                                    crate::data::files::DirList::from_owned_list(list),
+                                )
                             } else {
                                 (list, None)
                             };

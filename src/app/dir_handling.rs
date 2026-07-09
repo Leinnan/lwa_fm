@@ -20,13 +20,31 @@ use crate::{
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
     },
-    data::files::{DirEntry, DirEntryData, DirEntryMetaData, DirList},
+    data::files::{DirEntry, DirEntryData, DirEntryMetaData, DirList, EntryType, SortKey},
     helper::{DataHolder, normalize_path},
 };
 pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
     std::sync::LazyLock::new(|| build_collator(false));
 
 use super::dock::TabData;
+
+/// Inputs that determine a tab's watcher specs, stored alongside the cached
+/// specs so a recompute is triggered only when these change (not every frame).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SpecsInputs {
+    roots: Vec<PathBuf>,
+    is_recursive: bool,
+}
+
+/// Memoisation store for `TabData::watcher_specs`. Keeps the hot per-frame
+/// change-detection path (`should_refresh_for_directories`) from redoing the
+/// `walkdir` symlink walk + `canonicalize` syscalls that `compute_watcher_specs`
+/// performs.
+#[derive(Debug, Default)]
+pub struct WatcherSpecsCache {
+    specs: Vec<(PathBuf, RecursiveMode)>,
+    inputs: Option<SpecsInputs>,
+}
 
 fn resolve_path_setting<T, F, R>(path: &CurrentPath, data_source: &impl DataHolder, extract: F) -> R
 where
@@ -59,7 +77,47 @@ where
 }
 
 impl TabData {
-    pub fn watcher_specs(&self) -> Vec<(PathBuf, RecursiveMode)> {
+    pub fn watcher_specs(&mut self) -> Vec<(PathBuf, RecursiveMode)> {
+        // Always recompute fresh: this is the reconcile path, which must
+        // discover newly-created symlinked watch roots. Keep the memoisation
+        // cache warm so the hot `should_refresh_for_directories` path benefits.
+        let specs = self.compute_watcher_specs();
+        self.watcher_specs_cache.specs.clone_from(&specs);
+        self.watcher_specs_cache.inputs = Some(self.specs_inputs());
+        specs
+    }
+
+    /// Recompute the cached watcher specs only if the spec-relevant inputs
+    /// (`current_path`, search depth, `extra_dirs`) have changed since the last
+    /// compute. This is the cheap path used by the per-frame change handler and
+    /// avoids the `walkdir` + `canonicalize` work done by `compute_watcher_specs`.
+    fn ensure_watcher_specs_cached(&mut self) {
+        let inputs = self.specs_inputs();
+        let needs_recompute = self.watcher_specs_cache.inputs.as_ref() != Some(&inputs);
+        if needs_recompute {
+            self.watcher_specs_cache.specs = self.compute_watcher_specs();
+            self.watcher_specs_cache.inputs = Some(inputs);
+        }
+    }
+
+    fn specs_inputs(&self) -> SpecsInputs {
+        let is_recursive = self.search.as_ref().is_some_and(|s| s.depth > 1);
+        let mut roots = Vec::new();
+        match &self.current_path {
+            CurrentPath::None => {}
+            CurrentPath::One(p) => roots.push(p.clone()),
+            CurrentPath::Multiple(ps) => roots.extend(ps.iter().cloned()),
+        }
+        if let Some(s) = &self.search {
+            roots.extend(s.extra_dirs.iter().cloned());
+        }
+        SpecsInputs {
+            roots,
+            is_recursive,
+        }
+    }
+
+    fn compute_watcher_specs(&self) -> Vec<(PathBuf, RecursiveMode)> {
         let mode = if self.search.as_ref().map_or(1, |search| search.depth) > 1 {
             RecursiveMode::Recursive
         } else {
@@ -97,8 +155,15 @@ impl TabData {
         self.search.as_ref().map_or(1, |search| search.depth.max(1))
     }
 
-    pub fn should_refresh_for_directories(&self, changed_directories: &BTreeSet<PathBuf>) -> bool {
-        self.watcher_specs().iter().any(|(root, mode)| {
+    pub fn should_refresh_for_directories(
+        &mut self,
+        changed_directories: &BTreeSet<PathBuf>,
+    ) -> bool {
+        self.ensure_watcher_specs_cached();
+        // Paths in the cached specs were normalised at compute time, and
+        // `changed_directories` arrive already normalised from the watcher, so
+        // this hot path performs no `canonicalize` syscalls.
+        self.watcher_specs_cache.specs.iter().any(|(root, mode)| {
             changed_directories.iter().any(|changed| match mode {
                 RecursiveMode::Recursive => changed.starts_with(root),
                 RecursiveMode::NonRecursive => changed == root,
@@ -149,7 +214,10 @@ impl TabData {
         puffin::profile_scope!("lwa_fm::dir_handling::sort_entries");
         self.display_type = sort_settings.display_type;
         if let Some(dir_list) = &mut self.dir_list {
-            sort_dir_entry_data_slice(std::sync::Arc::make_mut(&mut dir_list.entries), sort_settings);
+            sort_dir_entry_data_slice(
+                std::sync::Arc::make_mut(&mut dir_list.entries),
+                sort_settings,
+            );
         } else {
             sort_entries_vec(&mut self.list, sort_settings);
         }
@@ -177,7 +245,10 @@ impl TabData {
                 return false;
             }
             let entries = std::sync::Arc::make_mut(&mut dir_list.entries);
-            if let Some(entry) = entries.iter_mut().find(|entry| entry.file_name == file_name) {
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| entry.file_name == file_name)
+            {
                 entry.meta = meta;
                 updated = true;
             }
@@ -195,9 +266,95 @@ impl TabData {
             return false;
         }
 
-        if matches!(sort_settings.sorting, Sort::Modified | Sort::Created | Sort::Size) {
+        if matches!(
+            sort_settings.sorting,
+            Sort::Modified | Sort::Created | Sort::Size
+        ) {
             self.sort_entries(sort_settings);
         }
+        self.update_visible_entries();
+        true
+    }
+
+    /// Surgically insert a newly-created file entry without a full directory
+    /// re-read. Only the lazy single-directory listing (`dir_list`) supports
+    /// this; search / multi-directory / recursive views return `false` so the
+    /// caller can fall back to a structural refresh. Returns `true` if applied.
+    pub fn insert_file_entry(
+        &mut self,
+        path: &Path,
+        sort_settings: &DirectoryViewSettings,
+    ) -> bool {
+        let Some(dir_list) = self.dir_list.as_mut() else {
+            return false;
+        };
+        let Some(parent) = path.parent().map(normalize_path) else {
+            return false;
+        };
+        if normalize_path(Path::new(dir_list.dir.as_ref())) != parent {
+            return false;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return false;
+        };
+        let meta: DirEntryMetaData = metadata.into();
+        let is_file = matches!(meta.entry_type, EntryType::File);
+        let data = DirEntryData {
+            sort_key: SortKey::new_path(file_name, is_file),
+            file_name: file_name.to_string(),
+            meta,
+        };
+        // `entries` is an `Arc<[DirEntryData]>` (an immutable-sized slice), so a
+        // length change requires rebuilding it via a `Vec`. This stays far
+        // cheaper than a full directory re-scan (one metadata syscall + an
+        // in-memory clone, no per-entry `fs` reads).
+        let mut entries: Vec<DirEntryData> = dir_list.entries.iter().cloned().collect();
+        // Replace an existing entry with the same name rather than duplicating
+        // (a re-create after a fast delete, or a same-name rename target).
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|entry| entry.file_name == data.file_name)
+        {
+            *existing = data;
+        } else {
+            entries.push(data);
+        }
+        dir_list.entries = std::sync::Arc::from(entries);
+        self.sort_entries(sort_settings);
+        self.update_visible_entries();
+        true
+    }
+
+    /// Surgically remove a deleted file entry without a full directory re-read.
+    /// Same scoping rules as [`insert_file_entry`]; returns `true` if removed.
+    pub fn remove_file_entry(
+        &mut self,
+        path: &Path,
+        sort_settings: &DirectoryViewSettings,
+    ) -> bool {
+        let Some(dir_list) = self.dir_list.as_mut() else {
+            return false;
+        };
+        let Some(parent) = path.parent().map(normalize_path) else {
+            return false;
+        };
+        if normalize_path(Path::new(dir_list.dir.as_ref())) != parent {
+            return false;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let mut entries: Vec<DirEntryData> = dir_list.entries.iter().cloned().collect();
+        let before = entries.len();
+        entries.retain(|entry| entry.file_name != file_name);
+        if entries.len() == before {
+            return false;
+        }
+        dir_list.entries = std::sync::Arc::from(entries);
+        self.sort_entries(sort_settings);
         self.update_visible_entries();
         true
     }
@@ -290,7 +447,10 @@ pub fn read_directory(
     // Dedup is only needed with multiple roots or recursive walks (symlinks may cause overlap)
     if paths.len() > 1 || depth > 1 {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::dir_handling::read_directory::dedup", list.len().to_string().as_str());
+        puffin::profile_scope!(
+            "lwa_fm::dir_handling::read_directory::dedup",
+            list.len().to_string().as_str()
+        );
         let mut seen: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(list.len());
         list.retain(|e| seen.insert(e.full_path_string()));
@@ -473,7 +633,9 @@ impl CompiledSearch {
     ) -> bool {
         let matches_one = |term: &CompiledTerm| -> bool {
             match term {
-                CompiledTerm::Plain(pattern) => plain_matches(name, pattern, case_sensitive, collator),
+                CompiledTerm::Plain(pattern) => {
+                    plain_matches(name, pattern, case_sensitive, collator)
+                }
                 CompiledTerm::Glob(glob) => glob.matches(name),
                 CompiledTerm::Regex(re) => re.is_match(name),
             }
@@ -710,10 +872,10 @@ pub fn get_directories_recursive(
 
 #[cfg(test)]
 mod tests {
-use rayon::{
-    iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
-    slice::ParallelSliceMut,
-};
+    use rayon::{
+        iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
+        slice::ParallelSliceMut,
+    };
 
     use crate::app::dock::TabData;
     use crate::data::files::{DirEntry, DirList};
@@ -817,7 +979,9 @@ use rayon::{
         ];
         let mut list: Vec<DirEntry> = entries.to_vec();
         list.par_sort_unstable_by(|a, b| {
-            a.dir.as_ref().cmp(b.dir.as_ref())
+            a.dir
+                .as_ref()
+                .cmp(b.dir.as_ref())
                 .then(a.file_name.cmp(&b.file_name))
         });
         list.dedup_by(|a, b| a.dir == b.dir && a.file_name == b.file_name);
@@ -876,6 +1040,134 @@ use rayon::{
     }
 
     #[test]
+    fn insert_file_entry_adds_new_entry_to_lazy_dir_list() {
+        let dir = unique_test_dir("insert_new");
+        let existing = dir.join("a.txt");
+        std::fs::write(&existing, b"a").expect("write existing file");
+        let new_file = dir.join("b.txt");
+        std::fs::write(&new_file, b"hello").expect("write new file");
+
+        let mut tab = TabData::from_path(&dir);
+        tab.dir_list =
+            DirList::from_owned_list(vec![DirEntry::test_new(&existing.to_string_lossy())]);
+        tab.visible_entries = vec![0];
+
+        let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
+        assert!(tab.insert_file_entry(&new_file, &settings));
+
+        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
+        assert_eq!(dir_list.entries.len(), 2, "entry should be inserted");
+        let inserted = dir_list
+            .entries
+            .iter()
+            .find(|e| e.file_name == "b.txt")
+            .expect("inserted entry present");
+        assert_eq!(inserted.meta.size, 5);
+        assert_eq!(
+            tab.visible_entries.len(),
+            2,
+            "visible indices should cover both entries"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn insert_file_entry_replaces_same_name_entry() {
+        let dir = unique_test_dir("insert_replace");
+        let file = dir.join("hot.log");
+        std::fs::write(&file, b"old").expect("write initial file");
+
+        let mut tab = TabData::from_path(&dir);
+        tab.dir_list = DirList::from_owned_list(vec![DirEntry::test_new(&file.to_string_lossy())]);
+        tab.visible_entries = vec![0];
+
+        // Simulate a rewrite of the same name: rewrite disk content first.
+        std::fs::write(&file, b"new-contents").expect("rewrite file");
+
+        let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
+        assert!(tab.insert_file_entry(&file, &settings));
+
+        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
+        assert_eq!(dir_list.entries.len(), 1, "no duplicate created");
+        assert_eq!(dir_list.entries[0].meta.size, 12, "metadata refreshed");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn insert_file_entry_returns_false_for_wrong_parent() {
+        let dir = unique_test_dir("insert_wrong");
+        let other = unique_test_dir("insert_other");
+        let file = other.join("stray.txt");
+        std::fs::write(&file, b"x").expect("write file");
+
+        let mut tab = TabData::from_path(&dir);
+        tab.dir_list = DirList::from_owned_list(vec![DirEntry::test_new(
+            &dir.join("a.txt").to_string_lossy(),
+        )]);
+        tab.visible_entries = vec![0];
+
+        let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
+        assert!(
+            !tab.insert_file_entry(&file, &settings),
+            "different parent should not apply"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(other);
+    }
+
+    #[test]
+    fn remove_file_entry_drops_entry_from_lazy_dir_list() {
+        let dir = unique_test_dir("remove_entry");
+        let keep = dir.join("keep.txt");
+        let gone = dir.join("gone.txt");
+        std::fs::write(&keep, b"k").expect("write keep");
+        std::fs::write(&gone, b"g").expect("write gone");
+
+        let mut tab = TabData::from_path(&dir);
+        tab.dir_list = DirList::from_owned_list(vec![
+            DirEntry::test_new(&keep.to_string_lossy()),
+            DirEntry::test_new(&gone.to_string_lossy()),
+        ]);
+        tab.visible_entries = vec![0, 1];
+
+        let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
+        assert!(tab.remove_file_entry(&gone, &settings));
+
+        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
+        assert_eq!(dir_list.entries.len(), 1, "entry removed");
+        assert_eq!(dir_list.entries[0].file_name, "keep.txt");
+        assert_eq!(tab.visible_entries.len(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_file_entry_returns_false_when_not_found() {
+        let dir = unique_test_dir("remove_missing");
+        std::fs::write(dir.join("a.txt"), b"a").expect("write a");
+        let missing = dir.join("nope.txt");
+
+        let mut tab = TabData::from_path(&dir);
+        tab.dir_list = DirList::from_owned_list(vec![DirEntry::test_new(
+            &dir.join("a.txt").to_string_lossy(),
+        )]);
+        tab.visible_entries = vec![0];
+
+        let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
+        assert!(
+            !tab.remove_file_entry(&missing, &settings),
+            "absent entry should not apply"
+        );
+        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
+        assert_eq!(dir_list.entries.len(), 1, "listing unchanged");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn search_depth_clamps_to_one() {
         assert_eq!(0usize.max(1), 1, "depth 0 should clamp to 1");
         assert_eq!(1usize.max(1), 1, "depth 1 should stay 1");
@@ -889,7 +1181,9 @@ use rayon::{
         let mut entry = DirEntry::test_new(&format!("/d/{name}"));
         entry.meta.size = size;
         let ts = |secs: u32| {
-            TimestampSeconds::from(std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::from(secs)))
+            TimestampSeconds::from(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::from(secs)),
+            )
         };
         entry.meta.modified_at = ts(modified);
         entry.meta.created_at = ts(created);
@@ -900,7 +1194,10 @@ use rayon::{
         entries.iter().map(|e| e.file_name.clone()).collect()
     }
 
-    fn settings(sorting: super::super::Sort, invert: bool) -> super::super::directory_view_settings::DirectoryViewSettings {
+    fn settings(
+        sorting: super::super::Sort,
+        invert: bool,
+    ) -> super::super::directory_view_settings::DirectoryViewSettings {
         super::super::directory_view_settings::DirectoryViewSettings {
             sorting,
             display_type: super::super::DisplayType::default(),
