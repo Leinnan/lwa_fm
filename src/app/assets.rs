@@ -27,7 +27,13 @@ const TEXTURE_CAPACITY: usize = 512;
 const GIF_BYTES_CAPACITY: usize = 128;
 const VIDEO_GIF_FRAMES: u32 = 15;
 const VIDEO_GIF_FRAME_DELAY_MS: u16 = 600;
-const MAX_TEXTURES_PER_FRAME: usize = 10;
+// Maximum GPU texture uploads (via `ctx.load_texture`, which uploads during the
+// render pass) processed from the job queue per frame. Each upload is ~0.6 ms,
+// so during a bulk thumbnail load (e.g. opening a large image folder) this cap
+// spreads the work across frames to avoid single-frame UI stalls. The queue
+// is drained over subsequent frames because `poll_results` calls
+// `ctx.request_repaint()` when it hits the limit.
+const MAX_TEXTURES_PER_FRAME: usize = 3;
 
 // Failure backoff: first retry after `ICON_RETRY_BASE_SECS`, doubling on each
 // consecutive failure. After `ICON_RETRY_MAX_TRIES` the file is treated as
@@ -854,7 +860,17 @@ fn icon_key(path: &Path, is_dir: bool) -> String {
         .and_then(std::ffi::OsStr::to_str)
         .map_or_else(
             || NO_EXT_ICON_KEY.to_string(),
-            |ext| format!("{ICON_EXT_PREFIX}{}", ext.to_lowercase()),
+            // Single allocation: build `icon_<ext>` and ASCII-lowercase in
+            // place (the `icon_` prefix is already lowercase, so this matches
+            // the previous `format!("{ICON_EXT_PREFIX}{}", ext.to_lowercase())`
+            // for the ascii extensions we actually cache).
+            |ext| {
+                let mut s = String::with_capacity(ICON_EXT_PREFIX.len() + ext.len());
+                s.push_str(ICON_EXT_PREFIX);
+                s.push_str(ext);
+                s.make_ascii_lowercase();
+                s
+            },
         )
 }
 
@@ -881,14 +897,19 @@ pub fn entry_has_animated_preview(entry: &DirEntry) -> bool {
 }
 
 fn thumbnail_kind(path: &Path) -> Option<ThumbnailKind> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" | "ico" | "avif"
-        | "tga" => Some(ThumbnailKind::Image),
-        "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" | "flv" | "m4v" | "3gp" | "ogv" => {
-            Some(ThumbnailKind::Video)
-        }
-        _ => None,
+    const IMAGE: &[&str] = &[
+        "png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif", "ico", "avif", "tga",
+    ];
+    const VIDEO: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "wmv", "flv", "m4v", "3gp", "ogv"];
+    // Match case-insensitively WITHOUT allocating a lowercased string (this is
+    // called for every visible row every frame).
+    let ext = path.extension()?.to_str()?;
+    if IMAGE.iter().any(|c| ext.eq_ignore_ascii_case(c)) {
+        Some(ThumbnailKind::Image)
+    } else if VIDEO.iter().any(|c| ext.eq_ignore_ascii_case(c)) {
+        Some(ThumbnailKind::Video)
+    } else {
+        None
     }
 }
 

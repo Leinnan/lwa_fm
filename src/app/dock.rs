@@ -77,25 +77,106 @@ thread_local! {
         RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
 }
 thread_local! {
-    pub static FILE_NAME_POOL: RefCell<LruCache<(String, bool), Arc<Galley>>> =
+    /// Pre-rendered galleys for file entry names, keyed by the file name string.
+    /// Keying by `String` (rather than `(String, bool)`) lets the per-row lookup
+    /// borrow the entry's `&str` name via `Borrow<str>` without allocating a
+    /// throwaway `String` key every frame. Directories use a separate cache
+    /// because the galley colour is baked in and differs between files/folders.
+    pub static FILE_NAME_POOL: RefCell<LruCache<String, Arc<Galley>>> =
+        RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
+    pub static FOLDER_NAME_POOL: RefCell<LruCache<String, Arc<Galley>>> =
         RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
 }
 
 pub fn populate_file_name_pool(entries: impl Iterator<Item = (String, bool)>, ui: &Context) {
-    FILE_NAME_POOL.with_borrow_mut(|pool| {
-        for (name, is_dir) in entries {
-            if pool.peek(&(name.clone(), is_dir)).is_some() {
+    FILE_NAME_POOL.with_borrow_mut(|files| {
+        FOLDER_NAME_POOL.with_borrow_mut(|dirs| {
+            for (name, is_dir) in entries {
+                let pool: &mut LruCache<String, Arc<Galley>> = if is_dir {
+                    &mut *dirs
+                } else {
+                    &mut *files
+                };
+                if pool.peek(&name).is_some() {
+                    continue;
+                }
+                let color = if is_dir {
+                    Color32::LIGHT_GRAY
+                } else {
+                    Color32::GRAY
+                };
+                let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
+                    name.clone(),
+                    FontId::default(),
+                    color,
+                )))
+                .into_galley_impl(
+                    ui,
+                    &ui.style(),
+                    TextWrapping::default(),
+                    FontSelection::Default,
+                    egui::Align::Center,
+                );
+                pool.put(name, galley);
+            }
+        });
+    });
+}
+
+thread_local! {
+    /// Pre-rendered galleys for the `[1]`..`[9]` quick-select hints shown next
+    /// to the first rows when the modifier key is held. Indexed by the digit
+    /// (1..=9); slot 0 is unused. Laid out lazily on first use and reused every
+    /// frame to avoid per-frame text layout.
+    static INDEXED_GALLEYS: RefCell<[Option<Arc<Galley>>; 10]> =
+        const { RefCell::new([const { None }; 10]) };
+
+    /// Galleys for the directory-prefix label shown in search / multi-dir mode.
+    /// Keyed by the directory string; laid out once and reused across frames.
+    pub static DIR_POOL: RefCell<LruCache<String, Arc<Galley>>> =
+        RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
+}
+
+/// Returns the cached galley for the `[n]` quick-select hint (n in 1..=9),
+/// laying it out on first use. The galley is reused across frames, eliminating
+/// the per-frame `LayoutJob` allocation and text-layout cost.
+fn indexed_hint_galley(ui: &Ui, n: u8) -> Arc<Galley> {
+    debug_assert!((1..=9).contains(&n));
+    INDEXED_GALLEYS.with_borrow_mut(|cache| {
+        cache[n as usize]
+            .get_or_insert_with(|| {
+                WidgetText::LayoutJob(Arc::new(LayoutJob::simple_format(
+                    format!("[{n}]"),
+                    TextFormat {
+                        color: Color32::DARK_GRAY,
+                        ..Default::default()
+                    },
+                )))
+                .into_galley_impl(
+                    ui.ctx(),
+                    &ui.style(),
+                    TextWrapping::default(),
+                    FontSelection::Default,
+                    egui::Align::Center,
+                )
+            })
+            .clone()
+    })
+}
+
+/// Pre-renders galleys for the directory-prefix labels used in search /
+/// multi-directory mode, so the per-row draw path can reuse them instead of
+/// relaying out text every frame.
+pub fn populate_dir_pool(dirs: impl Iterator<Item = String>, ui: &Context) {
+    DIR_POOL.with_borrow_mut(|pool| {
+        for dir in dirs {
+            if pool.peek(&dir).is_some() {
                 continue;
             }
-            let color = if is_dir {
-                Color32::LIGHT_GRAY
-            } else {
-                Color32::GRAY
-            };
             let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-                name.clone(),
+                dir.clone(),
                 FontId::default(),
-                color,
+                Color32::DARK_GRAY,
             )))
             .into_galley_impl(
                 ui,
@@ -104,7 +185,7 @@ pub fn populate_file_name_pool(entries: impl Iterator<Item = (String, bool)>, ui
                 FontSelection::Default,
                 egui::Align::Center,
             );
-            pool.put((name, is_dir), galley);
+            pool.put(dir, galley);
         }
     });
 }
@@ -422,6 +503,19 @@ impl TabData {
         }
     }
 
+    /// Directory prefix for the visible entry at `visible_row`, without
+    /// materialising a full [`DirEntry`]. For a single-directory view every row
+    /// shares the same prefix; for search / multi-directory reads each row may
+    /// differ.
+    pub fn visible_dir_prefix(&self, visible_row: usize) -> Option<&str> {
+        let data_idx = *self.visible_entries.get(visible_row)?;
+        if let Some(dl) = &self.dir_list {
+            Some(dl.dir.as_ref())
+        } else {
+            self.list.get(data_idx).map(|e| e.dir.as_ref())
+        }
+    }
+
     pub fn total_entry_count(&self) -> usize {
         self.dir_list
             .as_ref()
@@ -686,6 +780,15 @@ impl MyTabViewer<'_> {
             ui.ctx(),
         );
 
+        // The directory-prefix label is only drawn in search / multi-dir mode,
+        // so only pay to pre-render those galleys when needed.
+        if is_searching || multiple_dirs {
+            populate_dir_pool(
+                (0..entries_len).filter_map(|row| tab.visible_dir_prefix(row).map(str::to_string)),
+                ui.ctx(),
+            );
+        }
+
         let mut new_sort = None;
 
         // ── Unified virtual-grid: sticky header row + scrollable body ────────
@@ -847,43 +950,51 @@ impl MyTabViewer<'_> {
                                                       ui.allocate_space(Vec2::splat(render_sz));
                                                   }
                                                   if cmd && indexed < 10 {
+                                                      // Reuse a pre-rendered galley for the
+                                                      // `[1]`..`[9]` hint to avoid a text
+                                                      // layout every frame.
+                                                      let hint_galley = indexed_hint_galley(ui, indexed as u8);
                                                       ui.add(
-                                                          egui::Label::new(
-                                                             LayoutJob::simple_format(
-                                                                 format!("[{indexed}]"),
-                                                                 TextFormat {
-                                                                     color: Color32::DARK_GRAY,
-                                                                     ..Default::default()
-                                                                 },
-                                                             ),
-                                                         )
-                                                         .wrap_mode(
-                                                             egui::TextWrapMode::Truncate,
-                                                         )
-                                                         .selectable(false)
-                                                         .sense(Sense::empty()),
+                                                          egui::Label::new(WidgetText::Galley(hint_galley))
+                                                             .selectable(false)
+                                                             .sense(Sense::empty()),
                                                      );
                                                  }
                                                 if is_searching || multiple_dirs {
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            LayoutJob::simple_singleline(
-                                                                dir.into(),
-                                                                FontId::default(),
-                                                                Color32::DARK_GRAY,
-                                                            ),
-                                                        )
-                                                        .wrap_mode(
-                                                            egui::TextWrapMode::Truncate,
-                                                        )
-                                                        .selectable(false)
-                                                        .sense(Sense::empty()),
-                                                    );
+                                                    // Reuse the pooled directory galley and
+                                                    // clip to the allocated rect instead of
+                                                    // relaying out (truncating) every frame.
+                                                    let dir_galley = DIR_POOL
+                                                        .with_borrow_mut(|pool| pool.get(dir).cloned());
+                                                    if let Some(galley) = dir_galley {
+                                                        let available_width = ui.available_width();
+                                                        let w = galley.size().x.min(available_width);
+                                                        let (rect, _resp) = ui.allocate_exact_size(
+                                                            egui::vec2(w, galley.size().y),
+                                                            Sense::empty(),
+                                                        );
+                                                        if ui.is_rect_visible(rect) {
+                                                            ui.painter()
+                                                                .with_clip_rect(rect)
+                                                                .add(
+                                                                    egui::epaint::TextShape::new(
+                                                                        rect.min,
+                                                                        galley,
+                                                                        Color32::DARK_GRAY,
+                                                                    ),
+                                                                );
+                                                        }
+                                                    }
                                                 }
 
-                                                let file_name_response = FILE_NAME_POOL.with_borrow_mut(|pool| {
-                                                    pool.get(&(file.to_string(), is_dir)).cloned()
-                                                }).map(|galley| {
+                                                // Lookup borrows the `&str` name (no per-row
+                                                // `String` allocation for the key).
+                                                let pooled_galley = if is_dir {
+                                                    FOLDER_NAME_POOL.with_borrow_mut(|pool| pool.get(file).cloned())
+                                                } else {
+                                                    FILE_NAME_POOL.with_borrow_mut(|pool| pool.get(file).cloned())
+                                                };
+                                                let file_name_response = pooled_galley.map(|galley| {
                                                     let available_width = ui.available_width();
                                                     let galley_width = galley.size().x.min(available_width);
                                                     let (rect, response) = ui.allocate_exact_size(
