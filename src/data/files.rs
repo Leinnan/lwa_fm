@@ -9,7 +9,11 @@ use rayon::iter::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::{cmp::Ordering, fs::FileType, path::{Path, PathBuf}};
+use std::{
+    cmp::Ordering,
+    fs::FileType,
+    path::{Path, PathBuf},
+};
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Decode, Encode, Hash,
@@ -99,13 +103,11 @@ impl DirContent {
     #[inline]
     pub fn populate(&self, entries: &mut Vec<DirEntry>) {
         let dir: Arc<str> = Arc::from(self.path.as_str());
-        entries.par_extend(self.entries.par_iter().map(|e| {
-            DirEntry {
-                meta: e.meta,
-                sort_key: e.sort_key.clone(),
-                dir: Arc::clone(&dir),
-                file_name: e.file_name.clone(),
-            }
+        entries.par_extend(self.entries.par_iter().map(|e| DirEntry {
+            meta: e.meta,
+            sort_key: e.sort_key.clone(),
+            dir: Arc::clone(&dir),
+            file_name: e.file_name.clone(),
         }));
     }
 }
@@ -182,10 +184,10 @@ impl DirEntry {
 
     #[cfg(test)]
     pub fn test_new(path: &str) -> Self {
-        let sep = path.rfind(std::path::MAIN_SEPARATOR)
+        let sep = path
+            .rfind(std::path::MAIN_SEPARATOR)
             .or_else(|| path.rfind('/'));
-        let (dir, file_name) = sep
-            .map_or(("", path), |i| (&path[..i], &path[i + 1..]));
+        let (dir, file_name) = sep.map_or(("", path), |i| (&path[..i], &path[i + 1..]));
         // Normalize forward slashes to platform separator (preserving leading /)
         let dir = if dir.is_empty() {
             Arc::from("")
@@ -198,13 +200,17 @@ impl DirEntry {
             );
             Arc::from(normalized.as_str())
         } else {
-            Arc::from(dir.replace('/', &std::path::MAIN_SEPARATOR.to_string()).as_str())
+            Arc::from(
+                dir.replace('/', &std::path::MAIN_SEPARATOR.to_string())
+                    .as_str(),
+            )
         };
         Self {
             meta: DirEntryMetaData {
                 entry_type: EntryType::File,
                 created_at: Default::default(),
                 modified_at: Default::default(),
+                source_revision: 0,
                 since_modified: Default::default(),
                 size: 0,
             },
@@ -220,6 +226,8 @@ pub struct DirEntryMetaData {
     pub entry_type: EntryType,
     pub created_at: TimestampSeconds,
     pub modified_at: TimestampSeconds,
+    /// Nanoseconds since the Unix epoch, used to invalidate derived assets.
+    pub source_revision: u128,
     pub since_modified: ElapsedTime,
     pub size: u64,
 }
@@ -237,6 +245,7 @@ impl From<EntryType> for DirEntryMetaData {
             entry_type,
             created_at,
             modified_at,
+            source_revision: 0,
             since_modified,
             size,
         }
@@ -254,10 +263,11 @@ impl From<std::fs::Metadata> for DirEntryMetaData {
             .created()
             .map(TimestampSeconds::from)
             .unwrap_or_default();
-        let modified_at = meta
-            .modified()
-            .map(TimestampSeconds::from)
-            .unwrap_or_default();
+        let modified = meta.modified().ok();
+        let modified_at = modified.map(TimestampSeconds::from).unwrap_or_default();
+        let source_revision = modified
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
         #[cfg(windows)]
         let size = std::os::windows::fs::MetadataExt::file_size(&meta);
         #[cfg(target_os = "linux")]
@@ -269,6 +279,7 @@ impl From<std::fs::Metadata> for DirEntryMetaData {
             entry_type,
             created_at,
             modified_at,
+            source_revision,
             since_modified,
             size,
         }
@@ -491,7 +502,10 @@ mod tests {
             let materialised = list.materialize(i);
             assert_eq!(materialised.file_name, *expected, "name mismatch at {i}");
             assert!(materialised.is_file(), "expected file at {i}");
-            assert_eq!(materialised.dir, expected_dir, "shared dir prefix lost at {i}");
+            assert_eq!(
+                materialised.dir, expected_dir,
+                "shared dir prefix lost at {i}"
+            );
             assert_eq!(materialised.get_splitted_path().1, expected.as_str());
         }
     }

@@ -294,6 +294,86 @@ impl TabData {
         true
     }
 
+    /// Apply a coalesced watcher batch to a single-directory listing. The
+    /// backing slice is cloned once and sorting/filtering run once regardless
+    /// of how many files changed.
+    pub fn apply_file_changes(
+        &mut self,
+        changes: &[crate::watcher::FileChange],
+        sort_settings: &DirectoryViewSettings,
+    ) -> bool {
+        let Some(dir_list) = self.dir_list.as_mut() else {
+            return false;
+        };
+        let listing_dir = normalize_path(Path::new(dir_list.dir.as_ref()));
+        if changes.iter().any(|change| {
+            let path = match change {
+                crate::watcher::FileChange::Metadata(path)
+                | crate::watcher::FileChange::Created(path)
+                | crate::watcher::FileChange::Removed(path) => path,
+            };
+            path.parent().map(normalize_path).as_ref() != Some(&listing_dir)
+        }) {
+            return false;
+        }
+
+        let mut entries = dir_list.entries.iter().cloned().collect::<Vec<_>>();
+        for change in changes {
+            let path = match change {
+                crate::watcher::FileChange::Metadata(path)
+                | crate::watcher::FileChange::Created(path)
+                | crate::watcher::FileChange::Removed(path) => path,
+            };
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                return false;
+            };
+            match change {
+                crate::watcher::FileChange::Metadata(_) => {
+                    let Ok(metadata) = std::fs::metadata(path) else {
+                        return false;
+                    };
+                    let Some(entry) = entries
+                        .iter_mut()
+                        .find(|entry| entry.file_name == file_name)
+                    else {
+                        return false;
+                    };
+                    entry.meta = metadata.into();
+                }
+                crate::watcher::FileChange::Created(_) => {
+                    let Ok(metadata) = std::fs::metadata(path) else {
+                        continue;
+                    };
+                    let meta: DirEntryMetaData = metadata.into();
+                    let data = DirEntryData {
+                        sort_key: SortKey::new_path(
+                            file_name,
+                            matches!(meta.entry_type, EntryType::File),
+                        ),
+                        file_name: file_name.to_owned(),
+                        meta,
+                    };
+                    if let Some(existing) = entries
+                        .iter_mut()
+                        .find(|entry| entry.file_name == file_name)
+                    {
+                        *existing = data;
+                    } else {
+                        entries.push(data);
+                    }
+                }
+                crate::watcher::FileChange::Removed(_) => {
+                    entries.retain(|entry| entry.file_name != file_name);
+                }
+            }
+        }
+
+        dir_list.entries = std::sync::Arc::from(entries);
+        self.sort_entries(sort_settings);
+        self.update_visible_entries();
+        true
+    }
+
     /// Surgically insert a newly-created file entry without a full directory
     /// re-read. Only the lazy single-directory listing (`dir_list`) supports
     /// this; search / multi-directory / recursive views return `false` so the

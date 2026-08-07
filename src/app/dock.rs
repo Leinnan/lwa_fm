@@ -86,41 +86,75 @@ thread_local! {
         RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
     pub static FOLDER_NAME_POOL: RefCell<LruCache<String, Arc<Galley>>> =
         RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
+    static TEXT_CACHE_STYLE: RefCell<Option<(u32, u32, bool)>> = const { RefCell::new(None) };
 }
 
-pub fn populate_file_name_pool(entries: impl Iterator<Item = (String, bool)>, ui: &Context) {
-    FILE_NAME_POOL.with_borrow_mut(|files| {
-        FOLDER_NAME_POOL.with_borrow_mut(|dirs| {
-            for (name, is_dir) in entries {
-                let pool: &mut LruCache<String, Arc<Galley>> = if is_dir {
-                    &mut *dirs
-                } else {
-                    &mut *files
-                };
-                if pool.peek(&name).is_some() {
-                    continue;
-                }
-                let color = if is_dir {
-                    Color32::LIGHT_GRAY
-                } else {
-                    Color32::GRAY
-                };
-                let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-                    name.clone(),
-                    FontId::default(),
-                    color,
-                )))
-                .into_galley_impl(
-                    ui,
-                    &ui.style(),
-                    TextWrapping::default(),
-                    FontSelection::Default,
-                    egui::Align::Center,
-                );
-                pool.put(name, galley);
-            }
-        });
+#[cfg(test)]
+static FILE_NAME_LAYOUT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn ensure_text_cache_style(ui: &Ui) {
+    let key = (
+        ui.ctx().pixels_per_point().to_bits(),
+        egui::TextStyle::Body.resolve(ui.style()).size.to_bits(),
+        ui.visuals().dark_mode,
+    );
+    let changed = TEXT_CACHE_STYLE.with_borrow_mut(|current| {
+        if current.as_ref() == Some(&key) {
+            false
+        } else {
+            *current = Some(key);
+            true
+        }
     });
+    if changed {
+        FILE_NAME_POOL.with_borrow_mut(LruCache::clear);
+        FOLDER_NAME_POOL.with_borrow_mut(LruCache::clear);
+        DIR_POOL.with_borrow_mut(LruCache::clear);
+    }
+}
+
+fn file_name_galley(ui: &Ui, name: &str, is_dir: bool) -> Arc<Galley> {
+    let color = if is_dir {
+        Color32::LIGHT_GRAY
+    } else {
+        Color32::GRAY
+    };
+    let make = || {
+        #[cfg(test)]
+        FILE_NAME_LAYOUT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
+            name.to_owned(),
+            FontId::default(),
+            color,
+        )))
+        .into_galley_impl(
+            ui.ctx(),
+            &ui.style(),
+            TextWrapping::default(),
+            FontSelection::Default,
+            egui::Align::Center,
+        )
+    };
+    if is_dir {
+        FOLDER_NAME_POOL.with_borrow_mut(|pool| {
+            if let Some(galley) = pool.get(name) {
+                return galley.clone();
+            }
+            let galley = make();
+            pool.put(name.to_owned(), galley.clone());
+            galley
+        })
+    } else {
+        FILE_NAME_POOL.with_borrow_mut(|pool| {
+            if let Some(galley) = pool.get(name) {
+                return galley.clone();
+            }
+            let galley = make();
+            pool.put(name.to_owned(), galley.clone());
+            galley
+        })
+    }
 }
 
 thread_local! {
@@ -167,27 +201,26 @@ fn indexed_hint_galley(ui: &Ui, n: u8) -> Arc<Galley> {
 /// Pre-renders galleys for the directory-prefix labels used in search /
 /// multi-directory mode, so the per-row draw path can reuse them instead of
 /// relaying out text every frame.
-pub fn populate_dir_pool(dirs: impl Iterator<Item = String>, ui: &Context) {
+fn directory_prefix_galley(ui: &Ui, dir: &str) -> Arc<Galley> {
     DIR_POOL.with_borrow_mut(|pool| {
-        for dir in dirs {
-            if pool.peek(&dir).is_some() {
-                continue;
-            }
-            let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-                dir.clone(),
-                FontId::default(),
-                Color32::DARK_GRAY,
-            )))
-            .into_galley_impl(
-                ui,
-                &ui.style(),
-                TextWrapping::default(),
-                FontSelection::Default,
-                egui::Align::Center,
-            );
-            pool.put(dir, galley);
+        if let Some(galley) = pool.get(dir) {
+            return galley.clone();
         }
-    });
+        let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
+            dir.to_owned(),
+            FontId::default(),
+            Color32::DARK_GRAY,
+        )))
+        .into_galley_impl(
+            ui.ctx(),
+            &ui.style(),
+            TextWrapping::default(),
+            FontSelection::Default,
+            egui::Align::Center,
+        );
+        pool.put(dir.to_owned(), galley.clone());
+        galley
+    })
 }
 
 pub fn populate_sizes_pool(components: impl Iterator<Item = u64>, ui: &Context) {
@@ -753,6 +786,7 @@ impl MyTabViewer<'_> {
         self.handle_grid_keyboard_navigation(ui, tab, &mut selected_tabs, shift_pressed, columns);
     }
     fn list_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
+        ensure_text_cache_style(ui);
         let ViewHeader {
             cmd,
             shift_pressed,
@@ -771,23 +805,6 @@ impl MyTabViewer<'_> {
         let multiple_dirs = tab.deep_or_multiple_paths();
         let text_height = (egui::TextStyle::Body.resolve(ui.style()).size * 1.5).ceil();
         let entries_len = tab.visible_entries.len();
-
-        populate_file_name_pool(
-            (0..entries_len).filter_map(|row| {
-                tab.visible_name_and_type(row)
-                    .map(|(name, is_dir)| (name.to_string(), is_dir))
-            }),
-            ui.ctx(),
-        );
-
-        // The directory-prefix label is only drawn in search / multi-dir mode,
-        // so only pay to pre-render those galleys when needed.
-        if is_searching || multiple_dirs {
-            populate_dir_pool(
-                (0..entries_len).filter_map(|row| tab.visible_dir_prefix(row).map(str::to_string)),
-                ui.ctx(),
-            );
-        }
 
         let mut new_sort = None;
 
@@ -964,9 +981,7 @@ impl MyTabViewer<'_> {
                                                     // Reuse the pooled directory galley and
                                                     // clip to the allocated rect instead of
                                                     // relaying out (truncating) every frame.
-                                                    let dir_galley = DIR_POOL
-                                                        .with_borrow_mut(|pool| pool.get(dir).cloned());
-                                                    if let Some(galley) = dir_galley {
+                                                    let galley = directory_prefix_galley(ui, dir);
                                                         let available_width = ui.available_width();
                                                         let w = galley.size().x.min(available_width);
                                                         let (rect, _resp) = ui.allocate_exact_size(
@@ -984,17 +999,10 @@ impl MyTabViewer<'_> {
                                                                     ),
                                                                 );
                                                         }
-                                                    }
                                                 }
 
-                                                // Lookup borrows the `&str` name (no per-row
-                                                // `String` allocation for the key).
-                                                let pooled_galley = if is_dir {
-                                                    FOLDER_NAME_POOL.with_borrow_mut(|pool| pool.get(file).cloned())
-                                                } else {
-                                                    FILE_NAME_POOL.with_borrow_mut(|pool| pool.get(file).cloned())
-                                                };
-                                                let file_name_response = pooled_galley.map(|galley| {
+                                                let galley = file_name_galley(ui, file, is_dir);
+                                                let file_name_response = {
                                                     let available_width = ui.available_width();
                                                     let galley_width = galley.size().x.min(available_width);
                                                     let (rect, response) = ui.allocate_exact_size(
@@ -1009,20 +1017,7 @@ impl MyTabViewer<'_> {
                                                         ));
                                                     }
                                                     response
-                                                }).unwrap_or_else(|| {
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            LayoutJob::simple_singleline(
-                                                                file.into(),
-                                                                FontId::default(),
-                                                                color,
-                                                            ),
-                                                        )
-                                                        .wrap_mode(egui::TextWrapMode::Truncate)
-                                                        .selectable(false)
-                                                        .sense(Sense::empty()),
-                                                    )
-                                                });
+                                                };
 
                                                 file_name_response.on_hover_ui(|ui| {
                                                     Self::show_entry_hover_preview(
@@ -1506,17 +1501,17 @@ impl MyTabViewer<'_> {
                 let mut rendered = false;
                 if wants_inline {
                     match self.assets.request_hover_preview(entry) {
-                        HoverPreview::GifBytes { uri, bytes } => {
+                        HoverPreview::Texture(texture) => {
                             ui.add(
-                                egui::Image::from_bytes(uri, bytes)
+                                egui::Image::new(&texture)
                                     .maintain_aspect_ratio(true)
                                     .fit_to_exact_size(Vec2::new(preview_width, preview_height)),
                             );
                             rendered = true;
                         }
-                        HoverPreview::ImageUri(uri) if uri.ends_with(".gif") => {
+                        HoverPreview::GifBytes { uri, bytes } => {
                             ui.add(
-                                egui::Image::new(uri)
+                                egui::Image::from_bytes(uri, bytes)
                                     .maintain_aspect_ratio(true)
                                     .fit_to_exact_size(Vec2::new(preview_width, preview_height)),
                             );
@@ -1830,9 +1825,9 @@ impl MyTabViewer<'_> {
 
     fn show_entry_hover_preview(assets: &mut AssetManager, ui: &mut Ui, entry: &DirEntry) {
         match assets.request_hover_preview(entry) {
-            HoverPreview::ImageUri(path) => {
+            HoverPreview::Texture(texture) => {
                 ui.add(
-                    egui::Image::new(path)
+                    egui::Image::new(&texture)
                         .maintain_aspect_ratio(true)
                         .max_size(Vec2::new(300.0, 300.0)),
                 );
@@ -2073,6 +2068,8 @@ mod tests {
     use std::cell::RefCell;
     use std::sync::OnceLock;
 
+    static SNAPSHOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Build a list of [`DirEntry`] values from the project's `src/` directory.
     ///
     /// Using real filesystem entries means paths, timestamps, and sizes are all
@@ -2225,14 +2222,15 @@ mod tests {
         selected_fields: Option<&[usize]>,
         assets: &RefCell<crate::app::assets::AssetManager>,
     ) {
+        FILE_NAME_POOL.with_borrow_mut(LruCache::clear);
+        FOLDER_NAME_POOL.with_borrow_mut(LruCache::clear);
+        DIR_POOL.with_borrow_mut(LruCache::clear);
+        TIME_POOL.with_borrow_mut(LruCache::clear);
+        SIZES_POOL.with_borrow_mut(LruCache::clear);
+        INDEXED_GALLEYS.with_borrow_mut(|cache| cache.fill(None));
+        TEXT_CACHE_STYLE.with_borrow_mut(|style| *style = None);
         let mut assets = assets.borrow_mut();
         assets.poll_results(ctx);
-        // Seed the pre-computed galley pools so time / size widgets render.
-        for (_, tab) in my_tabs.dock_state.iter_all_tabs() {
-            populate_time_pool(tab.list.iter().map(|e| e.meta.modified_at.elapsed()), ctx);
-            populate_sizes_pool(tab.list.iter().map(|e| e.meta.size), ctx);
-        }
-
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(indices) = selected_fields {
                 let current_path = my_tabs
@@ -2250,15 +2248,49 @@ mod tests {
             }
             my_tabs.ui(ui, &mut assets);
         });
+        assets.wait_for_idle(ctx);
 
         // Drain the command queue so it does not fill up across frames.
         while crate::app::commands::COMMANDS_QUEUE.pop().is_some() {}
+        // Asset decoding is intentionally asynchronous. Give workers a small,
+        // deterministic opportunity to finish between synthetic frames so
+        // snapshots do not depend on host scheduling speed.
+    }
+
+    #[test]
+    fn large_list_only_lays_out_virtualized_file_names() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        FILE_NAME_LAYOUT_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+        let entries = (0..10_000)
+            .map(|index| DirEntry::test_new(&format!("/virtual/file_{index:05}.txt")))
+            .collect();
+        let assets = RefCell::new(crate::app::assets::AssetManager::default());
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 500.0))
+            .build_state(
+                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+                populated_tabs_from_entries(entries, DisplayType::List),
+            );
+
+        harness.run_steps(1);
+
+        let layouts = FILE_NAME_LAYOUT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            layouts < 256,
+            "virtualized list laid out {layouts} names for 10,000 entries"
+        );
+        FILE_NAME_POOL.with_borrow(|pool| assert!(pool.len() < 64));
     }
 
     // ── Snapshot: dock view at a standard desktop width ──────────────────────
 
     #[test]
     fn test_dock_view_wide() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(900.0, 500.0))
@@ -2279,6 +2311,9 @@ mod tests {
 
     #[test]
     fn test_dock_view_narrow() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(350.0, 500.0))
@@ -2295,6 +2330,9 @@ mod tests {
 
     #[test]
     fn test_dock_view_long_names() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Duplicate entries so we get more rows and more truncation to render.
         let entries = make_entries();
         let all: Vec<DirEntry> = entries
@@ -2329,6 +2367,9 @@ mod tests {
 
     #[test]
     fn test_dock_view_empty_tab() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tab = TabData::from_path(std::path::Path::new("src"));
         let my_tabs = MyTabs {
             dock_state: egui_dock::DockState::new(vec![tab]),
@@ -2349,6 +2390,9 @@ mod tests {
 
     #[test]
     fn test_dock_view_icons_wide() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(960.0, 620.0))
@@ -2363,6 +2407,9 @@ mod tests {
 
     #[test]
     fn test_dock_view_icons_narrow() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(420.0, 620.0))
@@ -2377,6 +2424,9 @@ mod tests {
 
     #[test]
     fn test_dock_view_icons_long_names() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(620.0, 700.0))
@@ -2391,6 +2441,9 @@ mod tests {
 
     #[test]
     fn test_dock_view_icons_mixed_thumbnails() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(820.0, 520.0))
@@ -2405,6 +2458,9 @@ mod tests {
 
     #[test]
     fn test_dock_view_icons_empty_tab() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut tab = TabData::from_path(fixture_root());
         tab.display_type = DisplayType::Icons;
         let my_tabs = MyTabs {
@@ -2426,6 +2482,9 @@ mod tests {
 
     #[test]
     fn test_dock_view_icons_selected() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(960.0, 620.0))

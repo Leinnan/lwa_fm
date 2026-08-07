@@ -52,6 +52,10 @@ enum CacheWrite {
         data: Vec<u8>,
         mtime_nanos: Option<u128>,
     },
+    ApplyChanges {
+        dir: PathBuf,
+        changes: Vec<crate::watcher::FileChange>,
+    },
 }
 
 /// Dedicated single-threaded cache writer. Processes sled writes sequentially
@@ -87,6 +91,9 @@ fn cache_writer_sender() -> mpsc::Sender<CacheWrite> {
                     _ = SLED_DIRS.insert(path, data);
                     log::info!("Data saved");
                     maybe_evict_cache();
+                }
+                CacheWrite::ApplyChanges { dir, changes } => {
+                    apply_cached_file_changes(&dir, &changes);
                 }
             }
         }
@@ -143,6 +150,70 @@ pub fn invalidate_dirs(paths: impl IntoIterator<Item = PathBuf>) {
     for path in unique_paths {
         invalidate_dir(&path);
     }
+}
+
+/// Queue a watcher batch for the dedicated cache writer. This keeps sled reads,
+/// serialization, and persistent writes off the UI thread.
+pub fn apply_file_changes(dir: PathBuf, changes: Vec<crate::watcher::FileChange>) {
+    if changes.is_empty() {
+        return;
+    }
+    _ = cache_writer_sender().send(CacheWrite::ApplyChanges { dir, changes });
+}
+
+fn apply_cached_file_changes(dir: &Path, changes: &[crate::watcher::FileChange]) {
+    enum Mutation {
+        Upsert(DirEntryData),
+        Update(String, DirEntryMetaData),
+        Remove(String),
+    }
+
+    let mutations = changes
+        .iter()
+        .filter_map(|change| {
+            let path = match change {
+                crate::watcher::FileChange::Metadata(path)
+                | crate::watcher::FileChange::Created(path)
+                | crate::watcher::FileChange::Removed(path) => path,
+            };
+            let file_name = path.file_name()?.to_str()?.to_owned();
+            match change {
+                crate::watcher::FileChange::Metadata(_) => std::fs::metadata(path)
+                    .ok()
+                    .map(DirEntryMetaData::from)
+                    .map(|meta| Mutation::Update(file_name, meta)),
+                crate::watcher::FileChange::Created(_) => std::fs::metadata(path)
+                    .ok()
+                    .map(|metadata| Mutation::Upsert(build_entry_data(metadata, file_name))),
+                crate::watcher::FileChange::Removed(_) => Some(Mutation::Remove(file_name)),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    mutate_cached_entries(dir, |entries| {
+        let mut changed = false;
+        for mutation in &mutations {
+            match mutation {
+                Mutation::Upsert(entry) => {
+                    upsert_entry(entries, entry.clone());
+                    changed = true;
+                }
+                Mutation::Update(file_name, meta) => {
+                    if let Some(entry) = entries
+                        .iter_mut()
+                        .find(|entry| entry.file_name == *file_name)
+                    {
+                        entry.meta = *meta;
+                        changed = true;
+                    }
+                }
+                Mutation::Remove(file_name) => {
+                    changed |= remove_entry(entries, file_name);
+                }
+            }
+        }
+        changed
+    });
 }
 
 pub fn update_file_metadata(path: &Path) {
@@ -268,7 +339,10 @@ where
     {
         let mut content = (*content).clone();
         changed_mem = mutate(&mut content.entries);
-        mem_cache.put(key.clone(), (cached_mtime, Arc::new(content)));
+        mem_cache.put(
+            key.clone(),
+            (new_mtime.unwrap_or(cached_mtime), Arc::new(content)),
+        );
     }
 
     if let Ok(Some(data)) = SLED_DIRS.get(&key)

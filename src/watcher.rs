@@ -4,10 +4,10 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, TryRecvError},
+        mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -252,6 +252,7 @@ impl DirectoryWatchers {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_file_system_events");
         let mut changes = FileSystemChanges::default();
+        let mut event_budget = 256usize;
         for watched in self.watchers.values_mut() {
             if watched.watcher.check_rescan() {
                 // Rescan detected: we don't know which specific paths changed,
@@ -261,8 +262,14 @@ impl DirectoryWatchers {
                     changes.structural_dirs.insert(path.clone());
                 }
             }
-            while let Some(event_changes) = watched.watcher.try_recv_event() {
+            while event_budget > 0
+                && let Some(event_changes) = watched.watcher.try_recv_event()
+            {
                 changes.extend(event_changes);
+                event_budget -= 1;
+            }
+            if event_budget == 0 {
+                break;
             }
         }
         changes
@@ -297,31 +304,54 @@ impl DirectoryWatcher {
         let event_tx = tx;
         thread::spawn(move || {
             let mut pending_renames: HashMap<usize, BTreeSet<PathBuf>> = HashMap::new();
+            while let Ok(first) = internal_rx.recv() {
+                let deadline = Instant::now() + Duration::from_millis(50);
+                let mut changes = FileSystemChanges::default();
+                let mut disconnected = false;
+                let mut next = Some(first);
 
-            for res in internal_rx {
-                match res {
-                    Ok(event) => {
-                        // Handle Rescan (buffer overflow) — set flag for full refresh
-                        if event.kind == EventKind::Other {
-                            log::warn!(
-                                "File system watcher overflow detected for {:?}, scheduling full refresh",
-                                event.paths
-                            );
-                            rescan_flag.store(true, Ordering::SeqCst);
-                            continue;
+                loop {
+                    if let Some(result) = next.take() {
+                        match result {
+                            Ok(event) if event.kind == EventKind::Other => {
+                                log::warn!(
+                                    "File system watcher overflow detected for {:?}, scheduling full refresh",
+                                    event.paths
+                                );
+                                rescan_flag.store(true, Ordering::SeqCst);
+                            }
+                            Ok(event) => {
+                                changes.extend(Self::process_event(event, &mut pending_renames));
+                            }
+                            Err(error) => {
+                                toast!(Error, "File system error: {error}");
+                            }
                         }
-                        let changes = Self::process_event(event, &mut pending_renames);
-                        if changes.is_empty() {
-                            continue;
-                        }
-                        if let Err(err) = event_tx.send(changes) {
-                            eprintln!("Failed to send processed file system event: {err}");
+                    }
+
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match internal_rx.recv_timeout(remaining) {
+                        Ok(result) => next = Some(result),
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            disconnected = true;
                             break;
                         }
                     }
-                    Err(e) => {
-                        toast!(Error, "File system error: {e}");
-                    }
+                }
+
+                collapse_large_parent_bursts(&mut changes, 128);
+                if !changes.is_empty()
+                    && let Err(err) = event_tx.send(changes)
+                {
+                    eprintln!("Failed to send processed file system event: {err}");
+                    break;
+                }
+                if disconnected {
+                    break;
                 }
             }
         });
@@ -468,6 +498,38 @@ impl DirectoryWatcher {
     }
 }
 
+fn collapse_large_parent_bursts(changes: &mut FileSystemChanges, surgical_limit: usize) {
+    let mut counts = HashMap::<PathBuf, usize>::new();
+    for change in &changes.file_changes {
+        let path = match change {
+            FileChange::Metadata(path) | FileChange::Created(path) | FileChange::Removed(path) => {
+                path
+            }
+        };
+        if let Some(parent) = path.parent() {
+            *counts.entry(normalize_path(parent)).or_default() += 1;
+        }
+    }
+    let structural = counts
+        .into_iter()
+        .filter_map(|(parent, count)| (count > surgical_limit).then_some(parent))
+        .collect::<BTreeSet<_>>();
+    if structural.is_empty() {
+        return;
+    }
+    changes.file_changes.retain(|change| {
+        let path = match change {
+            FileChange::Metadata(path) | FileChange::Created(path) | FileChange::Removed(path) => {
+                path
+            }
+        };
+        path.parent()
+            .map(normalize_path)
+            .is_none_or(|parent| !structural.contains(&parent))
+    });
+    changes.structural_dirs.extend(structural);
+}
+
 fn parent_dir_for_event_path(path: &Path) -> Option<PathBuf> {
     path.parent().map(normalize_path)
 }
@@ -496,7 +558,10 @@ impl Default for DirectoryWatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{DirectoryWatcher, FileChange, parent_dir_for_event_path};
+    use super::{
+        DirectoryWatcher, FileChange, FileSystemChanges, collapse_large_parent_bursts,
+        parent_dir_for_event_path,
+    };
     use crate::helper::normalize_path;
     use notify::{
         Event, EventKind,
@@ -685,5 +750,21 @@ mod tests {
             )))])
         );
         assert!(changes.structural_dirs.is_empty());
+    }
+
+    #[test]
+    fn large_burst_becomes_one_structural_refresh_per_parent() {
+        let parent = normalize_path(Path::new("/tmp/burst"));
+        let mut changes = FileSystemChanges {
+            file_changes: (0..1_000)
+                .map(|index| FileChange::Created(parent.join(format!("{index}.txt"))))
+                .collect(),
+            structural_dirs: BTreeSet::new(),
+        };
+
+        collapse_large_parent_bursts(&mut changes, 128);
+
+        assert!(changes.file_changes.is_empty());
+        assert_eq!(changes.structural_dirs, BTreeSet::from([parent]));
     }
 }

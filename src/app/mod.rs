@@ -95,8 +95,6 @@ pub struct App {
     pub watchers: DirectoryWatchers,
     #[serde(skip, default)]
     assets: AssetManager,
-    #[serde(skip, default)]
-    pending_modified_files: BTreeMap<PathBuf, Instant>,
     /// Structural (folder-level) changes awaiting a debounced refresh, mapped to
     /// the instant they were first seen. Coalesces bursts into one refresh.
     #[serde(skip, default)]
@@ -162,23 +160,11 @@ impl App {
 
     fn process_file_system_changes(&mut self, ctx: &egui::Context) {
         self.watchers.check_for_new_watchers();
-        const MODIFIED_FILE_COALESCE: Duration = Duration::from_millis(150);
 
         let changes = self.watchers.check_for_file_system_events();
         let now = Instant::now();
         let mut degraded_structural: BTreeSet<PathBuf> = BTreeSet::new();
-        self.route_file_changes(changes.file_changes, now, ctx, &mut degraded_structural);
-
-        let ready_modified_files = self
-            .pending_modified_files
-            .iter()
-            .filter_map(|(path, first_seen)| {
-                (now.duration_since(*first_seen) >= MODIFIED_FILE_COALESCE).then(|| path.clone())
-            })
-            .collect::<Vec<_>>();
-        for file in &ready_modified_files {
-            self.pending_modified_files.remove(file);
-        }
+        self.route_file_changes(changes.file_changes, ctx, &mut degraded_structural);
 
         // Debounce structural changes (watcher-reported + surgical fallbacks)
         // so a burst (git checkout, npm install) collapses into one refresh per
@@ -208,15 +194,10 @@ impl App {
             ctx.request_repaint_after(STRUCTURAL_COALESCE);
         }
 
-        if ready_structural.is_empty() && ready_modified_files.is_empty() {
+        if ready_structural.is_empty() {
             return;
         }
 
-        self.assets
-            .invalidate_files(ready_modified_files.iter().cloned());
-        for file in &ready_modified_files {
-            crate::app::database::update_file_metadata(file);
-        }
         self.assets
             .invalidate_directories(ready_structural.iter().cloned());
         crate::app::database::invalidate_dirs(ready_structural.iter().cloned());
@@ -232,20 +213,6 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        for tab_id in &tab_ids {
-            if affected_tabs.contains(tab_id) {
-                continue;
-            }
-            let Some(tab) = self.tabs.get_tab_by_id(*tab_id) else {
-                continue;
-            };
-            let settings =
-                ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
-            for file in &ready_modified_files {
-                tab.update_file_metadata(file, &settings.data);
-            }
-        }
-
         for tab_id in affected_tabs {
             self.handle_action(
                 ctx,
@@ -257,68 +224,60 @@ impl App {
         }
     }
 
-    /// Route per-file changes from the watcher: metadata changes are queued for
-    /// the modified-file debounce; create/delete are applied surgically to the
-    /// asset/db caches and each tab, degrading to `degraded_structural` when a
-    /// tab can't apply the change.
+    /// Route a watcher batch grouped by parent. Each tab and the persistent
+    /// directory cache see one mutation per parent, followed by one sort/filter
+    /// and one asynchronous cache write.
     fn route_file_changes(
         &mut self,
         file_changes: BTreeSet<crate::watcher::FileChange>,
-        now: Instant,
         ctx: &egui::Context,
         degraded_structural: &mut BTreeSet<PathBuf>,
     ) {
+        let mut by_parent = BTreeMap::<PathBuf, Vec<crate::watcher::FileChange>>::new();
         for change in file_changes {
-            match change {
-                crate::watcher::FileChange::Metadata(file) => {
-                    self.pending_modified_files.entry(file).or_insert(now);
-                }
-                crate::watcher::FileChange::Created(path) => {
-                    self.assets.invalidate_files(std::iter::once(path.clone()));
-                    crate::app::database::insert_file_entry(&path);
-                    self.apply_file_change_to_tabs(
-                        &path,
-                        ctx,
-                        degraded_structural,
-                        crate::app::dock::TabData::insert_file_entry,
-                    );
-                }
-                crate::watcher::FileChange::Removed(path) => {
-                    self.assets.invalidate_files(std::iter::once(path.clone()));
-                    crate::app::database::remove_file_entry(&path);
-                    self.apply_file_change_to_tabs(
-                        &path,
-                        ctx,
-                        degraded_structural,
-                        crate::app::dock::TabData::remove_file_entry,
-                    );
-                }
-            }
+            let path = match &change {
+                crate::watcher::FileChange::Metadata(path)
+                | crate::watcher::FileChange::Created(path)
+                | crate::watcher::FileChange::Removed(path) => path,
+            };
+            let Some(parent) = path.parent().map(crate::helper::normalize_path) else {
+                continue;
+            };
+            by_parent.entry(parent).or_default().push(change);
+        }
+
+        for (parent, changes) in by_parent {
+            self.assets
+                .invalidate_files(changes.iter().map(|change| match change {
+                    crate::watcher::FileChange::Metadata(path)
+                    | crate::watcher::FileChange::Created(path)
+                    | crate::watcher::FileChange::Removed(path) => path.clone(),
+                }));
+            crate::app::database::apply_file_changes(parent.clone(), changes.clone());
+            self.apply_file_changes_to_tabs(&parent, &changes, ctx, degraded_structural);
         }
     }
 
-    /// Apply a surgical file change (create/delete) to every tab's listing via
-    /// `apply`. Tabs that can't apply it (search / multi-directory / recursive
-    /// views, or an entry not present) contribute the parent directory to
-    /// `degraded` so the caller can fall back to a structural refresh.
-    fn apply_file_change_to_tabs(
+    fn apply_file_changes_to_tabs(
         &mut self,
-        path: &Path,
+        parent: &Path,
+        changes: &[crate::watcher::FileChange],
         ctx: &egui::Context,
         degraded: &mut BTreeSet<PathBuf>,
-        apply: impl Fn(&mut crate::app::dock::TabData, &Path, &DirectoryViewSettings) -> bool,
     ) {
         let tab_ids = self.tabs.get_tab_ids();
+        let affected_parent = BTreeSet::from([parent.to_path_buf()]);
         for tab_id in tab_ids {
             let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                 continue;
             };
+            if !tab.should_refresh_for_directories(&affected_parent) {
+                continue;
+            }
             let settings =
                 ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
-            if !apply(tab, path, &settings.data)
-                && let Some(parent) = path.parent()
-            {
-                degraded.insert(crate::helper::normalize_path(parent));
+            if !tab.apply_file_changes(changes, &settings.data) {
+                degraded.insert(parent.to_path_buf());
             }
         }
     }
@@ -481,7 +440,6 @@ impl Default for App {
             command_palette,
             watchers: DirectoryWatchers::default(),
             assets: AssetManager::default(),
-            pending_modified_files: BTreeMap::new(),
             pending_structural_dirs: BTreeMap::new(),
             #[cfg(feature = "profiling")]
             profiler_visible: true,
