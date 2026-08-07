@@ -27,7 +27,7 @@ use egui_taffy::{
 use taffy::prelude::*;
 use taffy::style_helpers;
 
-use super::assets::{AssetManager, HoverPreview, IconSize, entry_has_animated_preview};
+use super::assets::{AssetManager, HoverPreview, PreviewIntent, entry_has_animated_preview};
 use super::commands::ActionToPerform;
 use crate::app::command_palette::build_for_path;
 use crate::app::commands::{ModalWindow, TabAction, TabTarget};
@@ -601,6 +601,25 @@ const GRID_VIEW_PADDING: f32 = 8.0;
 const GRID_TILE_TEXT_HEIGHT: f32 = 20.0;
 const GRID_TILE_HINT_HEIGHT: f32 = 18.0;
 
+const fn tile_preview_intent(
+    eligible: bool,
+    hovered: bool,
+    selected: bool,
+    selected_budget: &mut u32,
+) -> Option<PreviewIntent> {
+    if !eligible {
+        return None;
+    }
+    if hovered {
+        return Some(PreviewIntent::Hovered);
+    }
+    if selected && *selected_budget > 0 {
+        *selected_budget = selected_budget.saturating_sub(1);
+        return Some(PreviewIntent::Selected);
+    }
+    None
+}
+
 /// Captured row interaction result collected while the taffy tui borrow is active,
 /// so they can be processed afterwards (when `tab` can be borrowed again).
 struct RowResult {
@@ -713,7 +732,6 @@ impl MyTabViewer<'_> {
 
         let entries_len = tab.visible_entries.len();
         let icon_size = self.assets.icon_size();
-        let xl = icon_size == IconSize::ExtraLarge;
         let tile_width = icon_size.tile_width();
         let tile_height = icon_size.tile_height();
         let item_spacing = ui.spacing().item_spacing;
@@ -738,6 +756,7 @@ impl MyTabViewer<'_> {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, tile_height, row_count, |ui, row_range| {
+                let visible_rows = row_range.clone();
                 for row in row_range {
                     ui.horizontal_top(|ui| {
                         ui.add_space(side_padding);
@@ -761,7 +780,6 @@ impl MyTabViewer<'_> {
                                 row_index == opened_popup,
                                 cmd,
                                 row_index + 1,
-                                xl,
                                 &mut selected_inline_budget,
                             );
                             row_results.push(RowResult {
@@ -770,6 +788,23 @@ impl MyTabViewer<'_> {
                             });
                         }
                     });
+                }
+                let overscan_rows = visible_rows.len().max(1);
+                let prefetch_start = visible_rows.start.saturating_sub(overscan_rows);
+                let prefetch_end = visible_rows
+                    .end
+                    .saturating_add(overscan_rows)
+                    .min(row_count);
+                for row in prefetch_start..prefetch_end {
+                    if visible_rows.contains(&row) {
+                        continue;
+                    }
+                    for col in 0..columns {
+                        let index = row * columns + col;
+                        if let Some(entry) = tab.entry_at(index) {
+                            self.assets.prefetch_entry_texture(&entry);
+                        }
+                    }
                 }
             });
 
@@ -1423,7 +1458,6 @@ impl MyTabViewer<'_> {
         is_popup_open: bool,
         cmd: bool,
         indexed: usize,
-        xl: bool,
         selected_inline_budget: &mut u32,
     ) -> egui::Response {
         let (rect, response) =
@@ -1494,14 +1528,14 @@ impl MyTabViewer<'_> {
             Vec2::new(text_width, preview_height),
             Layout::top_down_justified(egui::Align::Center),
             |ui| {
-                let eligible = xl && entry_has_animated_preview(entry);
-                let selected_inline = is_selected && eligible && *selected_inline_budget > 0;
-                let wants_inline = eligible && (hovered || selected_inline);
+                let eligible = entry_has_animated_preview(entry);
+                let preview_intent =
+                    tile_preview_intent(eligible, hovered, is_selected, selected_inline_budget);
 
                 let mut rendered = false;
-                if wants_inline {
-                    match self.assets.request_hover_preview(entry) {
-                        HoverPreview::Texture(texture) => {
+                if let Some(intent) = preview_intent {
+                    match self.assets.request_hover_preview(ui.ctx(), entry, intent) {
+                        HoverPreview::Ready(texture) => {
                             ui.add(
                                 egui::Image::new(&texture)
                                     .maintain_aspect_ratio(true)
@@ -1509,19 +1543,10 @@ impl MyTabViewer<'_> {
                             );
                             rendered = true;
                         }
-                        HoverPreview::GifBytes { uri, bytes } => {
-                            ui.add(
-                                egui::Image::from_bytes(uri, bytes)
-                                    .maintain_aspect_ratio(true)
-                                    .fit_to_exact_size(Vec2::new(preview_width, preview_height)),
-                            );
-                            rendered = true;
-                        }
-                        _ => {} // static image, Loading, or Fallback → thumbnail below
+                        HoverPreview::Pending
+                        | HoverPreview::Unavailable { .. }
+                        | HoverPreview::Fallback => {}
                     }
-                }
-                if rendered && selected_inline && !hovered {
-                    *selected_inline_budget = selected_inline_budget.saturating_sub(1);
                 }
                 if !rendered {
                     if let Some(texture) = self.assets.request_entry_texture(entry) {
@@ -1537,11 +1562,7 @@ impl MyTabViewer<'_> {
             },
         );
 
-        if xl {
-            response
-        } else {
-            response.on_hover_ui(|ui| Self::show_entry_hover_preview(self.assets, ui, entry))
-        }
+        response
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1824,24 +1845,44 @@ impl MyTabViewer<'_> {
     }
 
     fn show_entry_hover_preview(assets: &mut AssetManager, ui: &mut Ui, entry: &DirEntry) {
-        match assets.request_hover_preview(entry) {
-            HoverPreview::Texture(texture) => {
+        match assets.request_hover_preview(ui.ctx(), entry, PreviewIntent::Hovered) {
+            HoverPreview::Ready(texture) => {
                 ui.add(
                     egui::Image::new(&texture)
                         .maintain_aspect_ratio(true)
                         .max_size(Vec2::new(300.0, 300.0)),
                 );
             }
-            HoverPreview::GifBytes { uri, bytes } => {
-                ui.add_sized(
-                    Vec2::new(300.0, 300.0),
-                    egui::Image::from_bytes(uri, bytes)
-                        .maintain_aspect_ratio(true)
-                        .max_size(Vec2::new(300.0, 300.0)),
-                );
-            }
-            HoverPreview::Loading => {
+            HoverPreview::Pending => {
+                if let Some(texture) = assets.request_entry_texture(entry) {
+                    ui.add(
+                        egui::Image::new(&texture)
+                            .maintain_aspect_ratio(true)
+                            .max_size(Vec2::new(300.0, 300.0)),
+                    );
+                }
                 ui.label("Loading preview...");
+                ui.label(entry.full_path_string());
+            }
+            HoverPreview::Unavailable {
+                reason,
+                retry_after,
+            } => {
+                if let Some(texture) = assets.request_entry_texture(entry) {
+                    ui.add(
+                        egui::Image::new(&texture)
+                            .maintain_aspect_ratio(true)
+                            .max_size(Vec2::new(300.0, 300.0)),
+                    );
+                }
+                ui.label("Preview unavailable");
+                ui.small(reason);
+                if let Some(retry_after) = retry_after {
+                    ui.small(format!(
+                        "Retrying in {} seconds",
+                        retry_after.as_secs().max(1)
+                    ));
+                }
                 ui.label(entry.full_path_string());
             }
             HoverPreview::Fallback => {
@@ -2069,6 +2110,24 @@ mod tests {
     use std::sync::OnceLock;
 
     static SNAPSHOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn tile_preview_policy_keeps_hover_and_caps_selected_entries() {
+        let mut budget = 4;
+        for _ in 0..4 {
+            assert_eq!(
+                tile_preview_intent(true, false, true, &mut budget),
+                Some(PreviewIntent::Selected)
+            );
+        }
+        assert_eq!(budget, 0);
+        assert_eq!(tile_preview_intent(true, false, true, &mut budget), None);
+        assert_eq!(
+            tile_preview_intent(true, true, true, &mut budget),
+            Some(PreviewIntent::Hovered)
+        );
+        assert_eq!(tile_preview_intent(false, true, true, &mut budget), None);
+    }
 
     /// Build a list of [`DirEntry`] values from the project's `src/` directory.
     ///

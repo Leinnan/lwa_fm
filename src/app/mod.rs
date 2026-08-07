@@ -1030,6 +1030,7 @@ impl eframe::App for App {
                 self.frame_tracker.report_gpu_status(&render_state.device);
             }
         }
+        self.assets.begin_frame();
         self.assets.poll_results(&ctx);
         self.drain_command_queue(&ctx);
         self.process_file_system_changes(&ctx);
@@ -1153,6 +1154,7 @@ impl eframe::App for App {
             puffin::profile_scope!("lwa_fm::repaint::loading_tab");
             ctx.request_repaint_after(Duration::from_millis(80));
         }
+        self.assets.end_frame();
         #[cfg(feature = "profiling")]
         self.frame_tracker.end_frame();
     }
