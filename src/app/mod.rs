@@ -1030,6 +1030,8 @@ impl eframe::App for App {
                 self.frame_tracker.report_gpu_status(&render_state.device);
             }
         }
+        self.assets
+            .set_selected_previews_enabled(self.settings.animate_selected_previews);
         self.assets.begin_frame();
         self.assets.poll_results(&ctx);
         self.drain_command_queue(&ctx);

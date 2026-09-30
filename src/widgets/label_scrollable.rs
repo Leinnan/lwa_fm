@@ -7,6 +7,7 @@ use eframe::egui::{
 };
 
 #[derive(Debug, Default, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[allow(dead_code)]
 pub enum PauseAtEdges {
     NoPause,
     #[default]
@@ -52,6 +53,7 @@ impl ScrollableLabel {
         }
     }
 
+    #[allow(dead_code)]
     pub fn text(&self) -> &str {
         self.text.text()
     }
@@ -60,7 +62,8 @@ impl ScrollableLabel {
     ///
     /// Ignored when scrolling is active (text always starts left-aligned).
     #[inline]
-    pub fn halign(mut self, align: Align) -> Self {
+    #[allow(dead_code)]
+    pub const fn halign(mut self, align: Align) -> Self {
         self.halign = Some(align);
         self
     }
@@ -70,7 +73,7 @@ impl ScrollableLabel {
     /// Overrides [`crate::style::Interaction::selectable_labels`].
     /// Text selection is automatically disabled during scrolling.
     #[inline]
-    pub fn selectable(mut self, selectable: bool) -> Self {
+    pub const fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = Some(selectable);
         self
     }
@@ -90,7 +93,7 @@ impl ScrollableLabel {
     /// # });
     /// ```
     #[inline]
-    pub fn sense(mut self, sense: Sense) -> Self {
+    pub const fn sense(mut self, sense: Sense) -> Self {
         self.sense = Some(sense);
         self
     }
@@ -100,14 +103,15 @@ impl ScrollableLabel {
     /// When disabled, long text is truncated with ellipsis and shown on hover.
     /// Enabled by default.
     #[inline]
-    pub fn scroll(mut self, scroll: bool) -> Self {
+    pub const fn scroll(mut self, scroll: bool) -> Self {
         self.scroll = scroll;
         self
     }
 
     /// Set the scroll speed in pixels per second. Default is 40.0 px/s.
     #[inline]
-    pub fn scroll_speed(mut self, speed: f32) -> Self {
+    #[allow(dead_code)]
+    pub const fn scroll_speed(mut self, speed: f32) -> Self {
         self.scroll_speed = speed;
         self
     }
@@ -115,14 +119,16 @@ impl ScrollableLabel {
     /// Set the duration in seconds to pause at the start and/or end of the scroll
     /// cycle (depending on [`PauseAtEdges`]). Default is 1.5s.
     #[inline]
-    pub fn scroll_pause_duration(mut self, seconds: f32) -> Self {
+    #[allow(dead_code)]
+    pub const fn scroll_pause_duration(mut self, seconds: f32) -> Self {
         self.scroll_pause_duration = seconds;
         self
     }
 
     /// Configure pause behaviour when the scroll reaches the start or end of the text.
     #[inline]
-    pub fn edges_behaviour(mut self, behaviour: PauseAtEdges) -> Self {
+    #[allow(dead_code)]
+    pub const fn edges_behaviour(mut self, behaviour: PauseAtEdges) -> Self {
         self.edges_behaviour = behaviour;
         self
     }
@@ -131,7 +137,8 @@ impl ScrollableLabel {
     /// beginning of the duplicate when scrolling wraps around.
     /// Default is 50.0 px.
     #[inline]
-    pub fn gap_width(mut self, gap: f32) -> Self {
+    #[allow(dead_code)]
+    pub const fn gap_width(mut self, gap: f32) -> Self {
         self.gap_width = gap;
         self
     }
@@ -254,6 +261,7 @@ impl ScrollableLabel {
 }
 
 impl Widget for ScrollableLabel {
+    #[allow(clippy::too_many_lines)]
     fn ui(self, ui: &mut Ui) -> Response {
         let interactive = self.sense.is_some_and(|sense| sense != Sense::hover());
         let selectable = self.selectable;
@@ -276,13 +284,13 @@ impl Widget for ScrollableLabel {
                 let time = ui.input(|i| i.time as f32);
                 let state_id = response.id.with("marquee_scroll").with(&text_str);
 
-                let start_time = match ui.ctx().data_mut(|d| d.get_persisted::<f32>(state_id)) {
-                    Some(t) => t,
-                    None => {
+                let start_time = ui
+                    .ctx()
+                    .data_mut(|d| d.get_persisted::<f32>(state_id))
+                    .unwrap_or_else(|| {
                         ui.ctx().data_mut(|d| d.insert_persisted(state_id, time));
                         time
-                    }
-                };
+                    });
 
                 let offset = if text_width > 0.0 && widget_width > 0.0 && scroll_speed > 0.0 {
                     let has_start_pause = matches!(

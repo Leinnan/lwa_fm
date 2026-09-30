@@ -32,6 +32,7 @@ bevy_device_lang = "0.6"
 fuzzy-matcher = "0.3"
 itertools = "0.14.0"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 eframe = { version = "0.34", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     "default_fonts", # Embed the default egui fonts.

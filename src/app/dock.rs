@@ -716,7 +716,7 @@ impl MyTabViewer<'_> {
     }
 
     fn grid_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
-        let ViewHeader {
+        let Some(ViewHeader {
             cmd,
             shift_pressed,
             tab_popup_id,
@@ -725,15 +725,16 @@ impl MyTabViewer<'_> {
             just_changed,
             favorites,
             ..
-        } = match self.begin_view(ui, tab) {
-            Some(h) => h,
-            None => return,
+        }) = self.begin_view(ui, tab)
+        else {
+            return;
         };
 
         let entries_len = tab.visible_entries.len();
         let icon_size = self.assets.icon_size();
         let tile_width = icon_size.tile_width();
         let tile_height = icon_size.tile_height();
+        let preview_size = Vec2::new(tile_width - 20.0, tile_height - 40.0);
         let item_spacing = ui.spacing().item_spacing;
         let content_width = GRID_VIEW_PADDING
             .mul_add(-2.0, ui.available_width())
@@ -751,7 +752,7 @@ impl MyTabViewer<'_> {
         let row_count = entries_len.div_ceil(columns);
 
         let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
-        let mut selected_inline_budget: u32 = 4;
+        let mut selected_inline_budget: u32 = u32::from(self.assets.selected_previews_enabled());
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -789,23 +790,7 @@ impl MyTabViewer<'_> {
                         }
                     });
                 }
-                let overscan_rows = visible_rows.len().max(1);
-                let prefetch_start = visible_rows.start.saturating_sub(overscan_rows);
-                let prefetch_end = visible_rows
-                    .end
-                    .saturating_add(overscan_rows)
-                    .min(row_count);
-                for row in prefetch_start..prefetch_end {
-                    if visible_rows.contains(&row) {
-                        continue;
-                    }
-                    for col in 0..columns {
-                        let index = row * columns + col;
-                        if let Some(entry) = tab.entry_at(index) {
-                            self.assets.prefetch_entry_texture(&entry);
-                        }
-                    }
-                }
+                self.prefetch_grid_rows(ui.ctx(), tab, visible_rows, columns, preview_size);
             });
 
         self.process_grid_interactions(
@@ -820,6 +805,39 @@ impl MyTabViewer<'_> {
         );
         self.handle_grid_keyboard_navigation(ui, tab, &mut selected_tabs, shift_pressed, columns);
     }
+    fn prefetch_grid_rows(
+        &mut self,
+        ctx: &egui::Context,
+        tab: &TabData,
+        visible_rows: std::ops::Range<usize>,
+        columns: usize,
+        preview_size: Vec2,
+    ) {
+        let row_count = tab.visible_entries.len().div_ceil(columns);
+        let pixels_per_point = ctx.pixels_per_point();
+        let overscan_rows = visible_rows.len().max(1);
+        let prefetch_start = visible_rows.start.saturating_sub(overscan_rows);
+        let prefetch_end = visible_rows
+            .end
+            .saturating_add(overscan_rows)
+            .min(row_count);
+        for row in prefetch_start..prefetch_end {
+            if visible_rows.contains(&row) {
+                continue;
+            }
+            for col in 0..columns {
+                let index = row * columns + col;
+                if let Some(entry) = tab.entry_at(index) {
+                    self.assets.prefetch_entry_texture_for_size(
+                        &entry,
+                        preview_size,
+                        pixels_per_point,
+                    );
+                }
+            }
+        }
+    }
+
     fn list_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
         ensure_text_cache_style(ui);
         let ViewHeader {
@@ -1529,40 +1547,56 @@ impl MyTabViewer<'_> {
             Layout::top_down_justified(egui::Align::Center),
             |ui| {
                 let eligible = entry_has_animated_preview(entry);
-                let preview_intent =
-                    tile_preview_intent(eligible, hovered, is_selected, selected_inline_budget);
+                let preview_intent = tile_preview_intent(
+                    eligible,
+                    response.hovered(),
+                    is_selected,
+                    selected_inline_budget,
+                );
 
-                let mut rendered = false;
-                if let Some(intent) = preview_intent {
-                    match self.assets.request_hover_preview(ui.ctx(), entry, intent) {
-                        HoverPreview::Ready(texture) => {
-                            ui.add(
-                                egui::Image::new(&texture)
-                                    .maintain_aspect_ratio(true)
-                                    .fit_to_exact_size(Vec2::new(preview_width, preview_height)),
-                            );
-                            rendered = true;
-                        }
-                        HoverPreview::Pending
-                        | HoverPreview::Unavailable { .. }
-                        | HoverPreview::Fallback => {}
-                    }
-                }
-                if !rendered {
-                    if let Some(texture) = self.assets.request_entry_texture(entry) {
-                        ui.add(
-                            egui::Image::new(&texture)
-                                .maintain_aspect_ratio(true)
-                                .fit_to_exact_size(Vec2::new(preview_width, preview_height)),
-                        );
-                    } else {
-                        ui.allocate_space(Vec2::new(preview_width, preview_height));
-                    }
-                }
+                self.draw_grid_preview(
+                    ui,
+                    entry,
+                    preview_intent,
+                    Vec2::new(preview_width, preview_height),
+                );
             },
         );
 
         response
+    }
+
+    fn draw_grid_preview(
+        &mut self,
+        ui: &mut Ui,
+        entry: &DirEntry,
+        intent: Option<PreviewIntent>,
+        size: Vec2,
+    ) {
+        let animated = intent.and_then(|intent| {
+            match self
+                .assets
+                .request_hover_preview_at_size(ui.ctx(), entry, intent, size)
+            {
+                HoverPreview::Ready(texture) => Some(texture),
+                HoverPreview::Pending
+                | HoverPreview::Unavailable { .. }
+                | HoverPreview::Fallback => None,
+            }
+        });
+        let texture = animated.or_else(|| {
+            self.assets
+                .request_entry_texture_for_size(entry, size, ui.ctx().pixels_per_point())
+        });
+        if let Some(texture) = texture {
+            ui.add(
+                egui::Image::new(&texture)
+                    .maintain_aspect_ratio(true)
+                    .fit_to_exact_size(size),
+            );
+        } else {
+            ui.allocate_space(size);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

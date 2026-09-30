@@ -19,6 +19,7 @@ use super::commands::ActionToPerform;
 pub struct ApplicationSettings {
     pub terminal_path: String,
     pub icon_size: IconSize,
+    pub animate_selected_previews: bool,
 }
 
 impl Default for ApplicationSettings {
@@ -29,6 +30,7 @@ impl Default for ApplicationSettings {
             #[cfg(target_os = "macos")]
             terminal_path: "Terminal".into(),
             icon_size: IconSize::default(),
+            animate_selected_previews: false,
         }
     }
 }
@@ -131,6 +133,11 @@ impl ApplicationSettings {
                                 .schedule();
                         }
                     });
+                ui.add_space(10.0);
+                ui.checkbox(
+                    &mut self.animate_selected_previews,
+                    "Animate selected videos and GIFs",
+                );
                 ui.add_space(10.0);
                 ui.label("Icon Size");
                 egui::ComboBox::from_label("")
