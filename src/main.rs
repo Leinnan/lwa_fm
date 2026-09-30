@@ -19,7 +19,9 @@ mod windows_tools;
 fn parse_present_mode() -> wgpu::PresentMode {
     let mut args = std::env::args();
     while let Some(arg) = args.next() {
-        if arg == "--present-mode" && let Some(val) = args.next() {
+        if arg == "--present-mode"
+            && let Some(val) = args.next()
+        {
             return match val.to_lowercase().as_str() {
                 "fifo" => wgpu::PresentMode::Fifo,
                 "mailbox" => wgpu::PresentMode::Mailbox,
@@ -58,12 +60,12 @@ fn main() -> anyhow::Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 300.0])
+            .with_inner_size([1100.0, 720.0])
             .with_icon(
                 eframe::icon_data::from_png_bytes(include_bytes!("../static/base_icon.png"))
                     .unwrap_or_default(),
             )
-            .with_min_inner_size([300.0, 220.0]),
+            .with_min_inner_size([640.0, 420.0]),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             present_mode,
             on_surface_status: std::sync::Arc::new(|status| {

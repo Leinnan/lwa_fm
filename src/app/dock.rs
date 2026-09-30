@@ -58,7 +58,7 @@ pub fn populate_time_pool(components: impl Iterator<Item = ElapsedTime>, ui: &Co
             let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
                 component.to_string(),
                 FontId::default(),
-                Color32::DARK_GRAY,
+                ui.global_style().visuals.weak_text_color(),
             )))
             .into_galley_impl(
                 ui,
@@ -86,19 +86,40 @@ thread_local! {
         RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
     pub static FOLDER_NAME_POOL: RefCell<LruCache<String, Arc<Galley>>> =
         RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
-    static TEXT_CACHE_STYLE: RefCell<Option<(u32, u32, bool)>> = const { RefCell::new(None) };
+    static TEXT_CACHE_STYLE: RefCell<Option<TextCacheStyle>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
 static FILE_NAME_LAYOUT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[derive(PartialEq)]
+struct TextCacheStyle {
+    context_id: u64,
+    pixels_per_point: u32,
+    font: FontId,
+    text: Color32,
+    secondary: Color32,
+    options: egui::epaint::text::TextOptions,
+}
+
 fn ensure_text_cache_style(ui: &Ui) {
-    let key = (
-        ui.ctx().pixels_per_point().to_bits(),
-        egui::TextStyle::Body.resolve(ui.style()).size.to_bits(),
-        ui.visuals().dark_mode,
-    );
+    static NEXT_CONTEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let context_id = ui.ctx().data_mut(|data| {
+        *data.get_temp_mut_or_insert_with(egui::Id::new("text_cache_context"), || {
+            NEXT_CONTEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        })
+    });
+    // Appearance changes rebuild egui's font atlas on the following pass.
+    // Include the active atlas options, rather than only the requested theme.
+    let key = TextCacheStyle {
+        context_id,
+        pixels_per_point: ui.ctx().pixels_per_point().to_bits(),
+        font: egui::TextStyle::Body.resolve(ui.style()),
+        text: ui.visuals().text_color(),
+        secondary: ui.visuals().weak_text_color(),
+        options: ui.fonts(|fonts| *fonts.options()),
+    };
     let changed = TEXT_CACHE_STYLE.with_borrow_mut(|current| {
         if current.as_ref() == Some(&key) {
             false
@@ -111,15 +132,14 @@ fn ensure_text_cache_style(ui: &Ui) {
         FILE_NAME_POOL.with_borrow_mut(LruCache::clear);
         FOLDER_NAME_POOL.with_borrow_mut(LruCache::clear);
         DIR_POOL.with_borrow_mut(LruCache::clear);
+        TIME_POOL.with_borrow_mut(LruCache::clear);
+        SIZES_POOL.with_borrow_mut(LruCache::clear);
+        INDEXED_GALLEYS.with_borrow_mut(|cache| *cache = Default::default());
     }
 }
 
 fn file_name_galley(ui: &Ui, name: &str, is_dir: bool) -> Arc<Galley> {
-    let color = if is_dir {
-        Color32::LIGHT_GRAY
-    } else {
-        Color32::GRAY
-    };
+    let color = ui.visuals().text_color();
     let make = || {
         #[cfg(test)]
         FILE_NAME_LAYOUT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -182,7 +202,7 @@ fn indexed_hint_galley(ui: &Ui, n: u8) -> Arc<Galley> {
                 WidgetText::LayoutJob(Arc::new(LayoutJob::simple_format(
                     format!("[{n}]"),
                     TextFormat {
-                        color: Color32::DARK_GRAY,
+                        color: ui.visuals().weak_text_color(),
                         ..Default::default()
                     },
                 )))
@@ -209,7 +229,7 @@ fn directory_prefix_galley(ui: &Ui, dir: &str) -> Arc<Galley> {
         let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
             dir.to_owned(),
             FontId::default(),
-            Color32::DARK_GRAY,
+            ui.visuals().weak_text_color(),
         )))
         .into_galley_impl(
             ui.ctx(),
@@ -232,7 +252,7 @@ pub fn populate_sizes_pool(components: impl Iterator<Item = u64>, ui: &Context) 
             let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
                 crate::helper::format_bytes_simple(component),
                 FontId::default(),
-                Color32::DARK_GRAY,
+                ui.global_style().visuals.weak_text_color(),
             )))
             .into_galley_impl(
                 ui,
@@ -752,7 +772,12 @@ impl MyTabViewer<'_> {
         let row_count = entries_len.div_ceil(columns);
 
         let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
-        let mut selected_inline_budget: u32 = u32::from(self.assets.selected_previews_enabled());
+        let inspector_owns_preview = ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(Id::new("inspector_owns_preview")))
+            .unwrap_or(false);
+        let mut selected_inline_budget: u32 =
+            u32::from(self.assets.selected_previews_enabled() && !inspector_owns_preview);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -856,7 +881,7 @@ impl MyTabViewer<'_> {
 
         let is_searching = tab.is_searching();
         let multiple_dirs = tab.deep_or_multiple_paths();
-        let text_height = (egui::TextStyle::Body.resolve(ui.style()).size * 1.5).ceil();
+        let text_height = 28.0;
         let entries_len = tab.visible_entries.len();
 
         let mut new_sort = None;
@@ -958,7 +983,7 @@ impl MyTabViewer<'_> {
                         } else {
                             egui::Color32::TRANSPARENT
                         };
-                        let height = length(text_height.max(self.assets.render_size()) * self.assets.row_height_multiplier());
+                        let height = length(text_height);
                         let min_size = taffy::Size {
                             width: length(0.0),
                             height,
@@ -1000,14 +1025,10 @@ impl MyTabViewer<'_> {
                                         puffin::profile_scope!(
                                             "lwa_fm::MyTabViewer::ui::table_body::first_column"
                                         );
-                                        let color = if is_dir {
-                                            Color32::LIGHT_GRAY
-                                        } else {
-                                            Color32::GRAY
-                                        };
+                                        let color = ui.visuals().text_color();
 
                                           let (dir, file) = val.get_splitted_path();
-                                          let render_sz = self.assets.render_size_for(val);
+                                          let render_sz = self.assets.render_size_for(val).min(24.0);
                                           ui.with_layout(
                                               Layout::left_to_right(egui::Align::Center),
                                               |ui| {
@@ -1048,7 +1069,7 @@ impl MyTabViewer<'_> {
                                                                     egui::epaint::TextShape::new(
                                                                         rect.min,
                                                                         galley,
-                                                                        Color32::DARK_GRAY,
+                                                                        ui.global_style().visuals.weak_text_color(),
                                                                     ),
                                                                 );
                                                         }
@@ -1133,6 +1154,7 @@ impl MyTabViewer<'_> {
                                         ui.with_layout(
                                             Layout::right_to_left(egui::Align::Center),
                                             |ui| {
+                                                if *val.meta.modified_at == 0 { ui.weak("Unavailable");return; }
                                                 let elapsed = val.meta.modified_at.elapsed();
                                                 populate_time_pool(
                                                     std::iter::once(elapsed),
@@ -1978,7 +2000,62 @@ pub struct MyTabs {
     pub focused: bool,
 }
 
+#[derive(Clone, Default)]
+struct SelectionSnapshot {
+    directory: CurrentPath,
+    paths: Vec<PathBuf>,
+}
+
 impl MyTabs {
+    pub(crate) fn reconcile_selection(&mut self, ctx: &Context) {
+        for (_, tab) in self.dock_state.iter_all_tabs_mut() {
+            let Some(previous) = ctx.data_get_tab::<SelectionSnapshot>(tab.id) else {
+                continue;
+            };
+            let mut selected = ctx
+                .data_get_path::<Selected>(&tab.current_path)
+                .unwrap_or_default();
+            if previous.directory != tab.current_path {
+                selected.selected_fields.clear();
+            } else {
+                let current: Vec<_> = selected
+                    .selected_fields
+                    .iter()
+                    .filter_map(|&index| tab.entry_at(index).map(|e| e.get_path()))
+                    .collect();
+                if current != previous.paths {
+                    let wanted: std::collections::HashSet<_> = previous.paths.into_iter().collect();
+                    selected.selected_fields = (0..tab.visible_entries.len())
+                        .filter(|&index| {
+                            tab.entry_at(index)
+                                .is_some_and(|entry| wanted.contains(&entry.get_path()))
+                        })
+                        .collect();
+                }
+            }
+            ctx.data_set_path(&tab.current_path, selected);
+        }
+    }
+    fn remember_selection(&mut self, ctx: &Context) {
+        for (_, tab) in self.dock_state.iter_all_tabs_mut() {
+            let selected = ctx
+                .data_get_path::<Selected>(&tab.current_path)
+                .unwrap_or_default();
+            let paths = selected
+                .selected_fields
+                .iter()
+                .filter_map(|&index| tab.entry_at(index).map(|e| e.get_path()))
+                .collect();
+            ctx.data_set_tab(
+                tab.id,
+                SelectionSnapshot {
+                    directory: tab.current_path.clone(),
+                    paths,
+                },
+            );
+        }
+    }
+
     pub fn get_current_path(&mut self) -> Option<PathBuf> {
         let active_tab = self.get_current_tab()?;
         active_tab.current_path.single_path()
@@ -2075,6 +2152,7 @@ impl MyTabs {
             .show_add_buttons(true)
             .style(Self::get_dock_style(ui.style().as_ref(), tabs_len))
             .show_inside(ui, &mut my_tab_viewer);
+        self.remember_selection(ui.ctx());
     }
 
     pub fn open_in_new_tab(&mut self, path: &Path) {
@@ -2114,6 +2192,8 @@ impl MyTabs {
         };
         style.tab.tab_body.inner_margin = egui::Margin::same(0);
         style.tab.tab_body.stroke = egui::Stroke::NONE;
+        style.tab.tab_body.bg_fill = ui.visuals.panel_fill;
+        style.tab_bar.height = if tabs_amount > 1 { 30.0 } else { 0.0 };
         style
     }
 }
@@ -2135,7 +2215,7 @@ const fn convert_nr_to_egui_key(nr: usize) -> Option<egui::Key> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::data::files::{DirEntry, EntryType};
     use crate::helper::DataHolder;
@@ -2143,7 +2223,7 @@ mod tests {
     use std::cell::RefCell;
     use std::sync::OnceLock;
 
-    static SNAPSHOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static SNAPSHOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn tile_preview_policy_keeps_hover_and_caps_selected_entries() {

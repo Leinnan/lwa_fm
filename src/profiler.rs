@@ -59,13 +59,17 @@ impl FrameTracker {
         let prev_total_ms = self.frame_start.elapsed().as_secs_f32() * 1000.0;
         let prev_render_ms = prev_total_ms - self.prev_app_time_ms;
 
-        puffin::profile_scope!("lwa_fm::frame::metrics",
-            &format!("frame={} total={:.0}ms app={:.0}ms render={:.0}ms depth={}",
+        puffin::profile_scope!(
+            "lwa_fm::frame::metrics",
+            &format!(
+                "frame={} total={:.0}ms app={:.0}ms render={:.0}ms depth={}",
                 self.frame_index,
                 prev_total_ms,
                 self.prev_app_time_ms,
                 prev_render_ms.max(0.0),
-                self.gpu_busy_count));
+                self.gpu_busy_count
+            )
+        );
 
         self.frame_start = Instant::now();
     }

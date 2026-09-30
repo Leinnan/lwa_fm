@@ -9,6 +9,8 @@ use super::commands::ActionToPerform;
 #[derive(Default, Debug, Clone)]
 pub struct CommandPalette {
     pub commands: Vec<ValidAction>,
+    query: String,
+    selected: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -99,33 +101,69 @@ impl CommandPalette {
         favorites: &Locations,
     ) {
         self.commands = build_for_path(current_path, path, favorites);
+        self.query.clear();
+        self.selected = 0;
     }
 
-    pub fn ui(&self, ctx: &egui::Context) {
+    pub fn ui(&mut self, ctx: &egui::Context) {
         let mut action = None;
-        let modal = Modal::new("Commands".into())
-            .frame(egui::Frame::canvas(&ctx.global_style()))
-            .show(ctx, |ui| {
-                ui.vertical_centered_justified(|ui| {
-                    ui.heading("Run Command");
-                    ui.separator();
-                    for a in &self.commands {
-                        if ui.button(a.name.as_str()).clicked() {
-                            action = Some(a.action.clone());
-                        }
-                    }
-                });
-            });
-        match action {
-            Some(s) => {
-                s.schedule();
-                ActionToPerform::CloseActiveModalWindow.schedule();
+        let modal = Modal::new("Commands".into()).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 460.0));
+            ui.heading("Commands");
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.query)
+                    .hint_text("Find a command…")
+                    .desired_width(ui.available_width()),
+            );
+            if edit.changed() {
+                self.selected = 0;
             }
-            None => {
-                if modal.should_close() {
-                    ActionToPerform::CloseActiveModalWindow.schedule();
+            if !ctx.memory(|m| m.focused().is_some()) {
+                edit.request_focus();
+            }
+            ui.separator();
+            let query = self.query.to_lowercase();
+            let commands: Vec<_> = self
+                .commands
+                .iter()
+                .filter(|command| command.name.to_lowercase().contains(&query))
+                .collect();
+            if commands.is_empty() {
+                ui.weak("No matching commands.");
+            } else {
+                if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    self.selected = (self.selected + 1).min(commands.len() - 1);
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    self.selected = self.selected.saturating_sub(1);
+                }
+                self.selected = self.selected.min(commands.len() - 1);
+                egui::ScrollArea::vertical()
+                    .max_height(ctx.content_rect().height() - 180.0)
+                    .show(ui, |ui| {
+                        for (index, command) in commands.iter().enumerate() {
+                            let response = ui.add_sized(
+                                [ui.available_width(), 28.0],
+                                egui::Button::new(command.name.as_str())
+                                    .selected(index == self.selected),
+                            );
+                            if response.clicked() {
+                                action = Some(command.action.clone());
+                            }
+                        }
+                    });
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    action = Some(commands[self.selected].action.clone());
                 }
             }
+            ui.separator();
+            ui.weak("↑ ↓ to choose · Enter to run · Esc to close");
+        });
+        if let Some(action) = action {
+            action.schedule();
+            ActionToPerform::CloseActiveModalWindow.schedule();
+        } else if modal.should_close() {
+            ActionToPerform::CloseActiveModalWindow.schedule();
         }
     }
 }

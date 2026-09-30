@@ -1,11 +1,8 @@
 use std::{borrow::Cow, path::PathBuf, str::FromStr};
 
-use egui::{Align, Layout, RichText, TextBuffer, Ui, Vec2};
+use egui::{Ui, Vec2};
 
-use crate::{
-    app::{assets::AssetManager, commands::ActionToPerform},
-    helper::KeyWithCommandPressed,
-};
+use crate::{app::commands::ActionToPerform, helper::KeyWithCommandPressed};
 
 #[derive(serde::Deserialize, serde::Serialize, Default, Debug, Clone)]
 #[serde(default)]
@@ -22,72 +19,97 @@ impl Locations {
     }
 }
 
-const fn empty_icon(_ui: &mut egui::Ui, _openness: f32, _response: &egui::Response) {
-    // Empty icon function
-}
-
 impl Locations {
-    pub fn draw_ui(&self, id: &str, ui: &mut Ui, removable: bool, assets: &mut AssetManager) {
+    pub fn draw_source_list(
+        &self,
+        title: &str,
+        ui: &mut Ui,
+        removable: bool,
+        active: Option<&std::path::Path>,
+    ) {
+        use crate::app::ui::{self, Palette};
         if self.locations.is_empty() {
             return;
         }
-        egui::CollapsingHeader::new(RichText::new(id).weak().size(21.0))
-            .icon(empty_icon)
-            .default_open(true)
-            .show_unindented(ui, |ui| {
-                ui.with_layout(
-                    Layout::top_down(Align::Min).with_cross_justify(true),
-                    |ui| {
-                        for location in &self.locations {
-                            let button = ui
-                                .horizontal(|ui| {
-                                    if let Some(texture) = assets.request_sidebar_texture(
-                                        &PathBuf::from_str(&location.path).unwrap_or_default(),
-                                    ) {
-                                        ui.add(
-                                            egui::Image::new(&texture).fit_to_exact_size(
-                                                Vec2::splat(assets.render_size()),
-                                            ),
-                                        );
-                                    } else {
-                                        ui.allocate_space(Vec2::splat(assets.render_size()));
-                                    }
-                                    ui.add(
-                                        egui::Button::new(location.name.as_str())
-                                            .frame(false)
-                                            .fill(egui::Color32::from_white_alpha(0)),
-                                    )
-                                })
-                                .inner;
-                            if button.clicked() {
-                                if let Some(action) = ActionToPerform::path_from_str(
-                                    &location.path,
-                                    ui.command_pressed(),
-                                ) {
-                                    action.schedule();
-                                }
-                                return;
-                            }
-                            button.context_menu(|ui| {
-                                if ui.button("Open in new tab").clicked() {
-                                    ActionToPerform::NewTab(
-                                        PathBuf::from_str(&location.path).unwrap(),
-                                    )
-                                    .schedule();
-                                    ui.close();
-                                    return;
-                                }
-
-                                if removable && ui.button("Remove from favorites").clicked() {
-                                    ActionToPerform::RemoveFromFavorites(location.path.clone())
-                                        .schedule();
-                                    ui.close();
-                                }
-                            });
-                        }
+        ui::section(ui, title);
+        for location in &self.locations {
+            let selected =
+                active.is_some_and(|path| path == std::path::Path::new(location.path.as_ref()));
+            let (rect, response) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), egui::Sense::click());
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::SelectableLabel,
+                    true,
+                    selected,
+                    location.name.as_ref(),
+                )
+            });
+            if selected || response.hovered() || response.has_focus() {
+                ui.painter().rect_filled(
+                    rect,
+                    6,
+                    if selected {
+                        ui.visuals().selection.bg_fill
+                    } else {
+                        Palette::of(ui).card
                     },
                 );
+            }
+            if response.has_focus() {
+                ui.painter().rect_stroke(
+                    rect,
+                    6,
+                    egui::Stroke::new(1.0_f32, Palette::of(ui).accent),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let icon = if removable {
+                lucide_icons::Icon::Star
+            } else {
+                lucide_icons::Icon::Folder
+            };
+            ui.painter().text(
+                rect.left_center() + Vec2::new(16.0, 0.0),
+                egui::Align2::CENTER_CENTER,
+                char::from(icon),
+                egui::FontId::new(14.0, egui::FontFamily::Name("lucide".into())),
+                Palette::of(ui).secondary,
+            );
+            let job = egui::text::LayoutJob::simple_singleline(
+                location.name.to_string(),
+                egui::FontId::proportional(13.0),
+                Palette::of(ui).text,
+            );
+            let mut job = job;
+            job.wrap.max_width = (rect.width() - 42.0).max(0.0);
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+            ui.painter().galley(
+                rect.left_center() + Vec2::new(32.0, -galley.size().y / 2.0),
+                galley,
+                Palette::of(ui).text,
+            );
+            let response = response.on_hover_text(location.path.as_ref());
+            if response.clicked() {
+                if let Some(action) =
+                    ActionToPerform::path_from_str(&location.path, ui.command_pressed())
+                {
+                    action.schedule();
+                }
+            }
+            response.context_menu(|ui| {
+                if ui.button("Open in new tab").clicked() {
+                    ActionToPerform::NewTab(PathBuf::from(location.path.as_ref())).schedule();
+                    ui.close();
+                }
+                if removable && ui.button("Remove from favorites").clicked() {
+                    ActionToPerform::RemoveFromFavorites(location.path.clone()).schedule();
+                    ui.close();
+                }
             });
+        }
     }
 }
 

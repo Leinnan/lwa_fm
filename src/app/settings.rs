@@ -12,7 +12,18 @@ use crate::{
     helper::DataHolder,
 };
 
-use super::commands::ActionToPerform;
+use super::{
+    commands::ActionToPerform,
+    ui::{self, Appearance},
+};
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SettingsCategory {
+    #[default]
+    General,
+    Appearance,
+    Files,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -20,6 +31,13 @@ pub struct ApplicationSettings {
     pub terminal_path: String,
     pub icon_size: IconSize,
     pub animate_selected_previews: bool,
+    pub appearance: Appearance,
+    pub sidebar_visible: bool,
+    pub inspector_visible: bool,
+    pub sidebar_width: f32,
+    pub inspector_width: f32,
+    #[serde(skip)]
+    category: SettingsCategory,
 }
 
 impl Default for ApplicationSettings {
@@ -31,6 +49,12 @@ impl Default for ApplicationSettings {
             terminal_path: "Terminal".into(),
             icon_size: IconSize::default(),
             animate_selected_previews: false,
+            appearance: Appearance::System,
+            sidebar_visible: true,
+            inspector_visible: false,
+            sidebar_width: 200.0,
+            inspector_width: 280.0,
+            category: SettingsCategory::General,
         }
     }
 }
@@ -60,106 +84,166 @@ impl ApplicationSettings {
 
     /// Display the settings modal.
     /// returns true if the modal was closed.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn display(&mut self, ctx: &egui::Context) {
-        let mut close = false;
         let modal = Modal::new("Settings".into()).show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading("Settings");
-                ui.separator();
-                ui.add_space(10.0);
-                ui.label("Terminal App");
-                ui.text_edit_singleline(&mut self.terminal_path);
-                ui.add_space(10.0);
-                ui.separator();
-                ui.label("Directory View");
-                let mut changed = false;
-                let mut view_settings = ui
-                    .data_get_persisted::<DirectoryViewSettings>()
-                    .unwrap_or_default();
-                let mut show_hidden = ui
-                    .data_get_persisted::<DirectoryShowHidden>()
-                    .unwrap_or_default();
-                egui::Grid::new("directory_view")
-                    .spacing([4., 4.])
-                    .min_col_width(80.)
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        let id = ui.label("Show hidden files").id;
-                        changed |= ui
-                            .checkbox(&mut show_hidden.0, "hidden")
-                            .labelled_by(id)
-                            .changed();
-                        if changed {
-                            ui.data_set_persisted(show_hidden);
-                        }
-                        ui.end_row();
-                        ui.label("Sorting");
-                        let old_value = view_settings.sorting;
-                        egui::ComboBox::from_label("")
-                            .selected_text(format!("↕ {:?}", view_settings.sorting))
-                            .show_ui(ui, |ui| {
-                                ui.label("Sort by");
-                                ui.separator();
-                                ui.selectable_value(&mut view_settings.sorting, Sort::Name, "Name");
-                                ui.selectable_value(
-                                    &mut view_settings.sorting,
-                                    Sort::Created,
-                                    "Created",
-                                );
-                                ui.selectable_value(
-                                    &mut view_settings.sorting,
-                                    Sort::Modified,
-                                    "Modified",
-                                );
-                                ui.selectable_value(&mut view_settings.sorting, Sort::Size, "Size");
-                                ui.selectable_value(
-                                    &mut view_settings.sorting,
-                                    Sort::Random,
-                                    "Random",
+            ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 520.0));
+            ui.heading("Settings");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.category, SettingsCategory::General, "General");
+                ui.selectable_value(
+                    &mut self.category,
+                    SettingsCategory::Appearance,
+                    "Appearance",
+                );
+                ui.selectable_value(&mut self.category, SettingsCategory::Files, "Files");
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height(ctx.content_rect().height() - 160.0)
+                .show(ui, |ui| match self.category {
+                    SettingsCategory::General => {
+                        ui::section(ui, "Applications");
+                        ui::card(ui).show(ui, |ui| {
+                            ui::form_row(ui, "Terminal app", |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.terminal_path)
+                                        .desired_width(ui.available_width()),
                                 );
                             });
-                        changed |= old_value != view_settings.sorting;
-                        ui.end_row();
-                        let id = ui.label("Invert Sort").id;
-                        ui.add_enabled_ui(view_settings.sorting != Sort::Random, |ui| {
-                            changed |= ui
-                                .checkbox(&mut view_settings.invert_sort, "invert_sort")
-                                .labelled_by(id)
-                                .changed();
                         });
-                        if changed {
-                            ui.data_set_persisted(view_settings);
+                    }
+                    SettingsCategory::Appearance => {
+                        ui::section(ui, "Interface");
+                        ui::card(ui).show(ui, |ui| {
+                            ui::form_row(ui, "Appearance", |ui| {
+                                egui::ComboBox::from_id_salt("appearance")
+                                    .selected_text(format!("{:?}", self.appearance))
+                                    .show_ui(ui, |ui| {
+                                        for value in [
+                                            Appearance::System,
+                                            Appearance::Light,
+                                            Appearance::Dark,
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut self.appearance,
+                                                value,
+                                                format!("{value:?}"),
+                                            );
+                                        }
+                                    });
+                            });
+                            ui.checkbox(&mut self.sidebar_visible, "Show sidebar");
+                            ui.checkbox(&mut self.inspector_visible, "Show file inspector");
+                            ui.weak("Side panels collapse automatically in smaller windows.");
+                        });
+                    }
+                    SettingsCategory::Files => {
+                        ui::section(ui, "Directory defaults");
+                        let mut view = ui
+                            .data_get_persisted::<DirectoryViewSettings>()
+                            .unwrap_or_default();
+                        let mut hidden = ui
+                            .data_get_persisted::<DirectoryShowHidden>()
+                            .unwrap_or_default();
+                        let before = (view.sorting, view.invert_sort, hidden.0);
+                        ui::card(ui).show(ui, |ui| {
+                            ui.checkbox(&mut hidden.0, "Show hidden files");
+                            ui::form_row(ui, "Sort by", |ui| {
+                                egui::ComboBox::from_id_salt("default_sort")
+                                    .selected_text(format!("{:?}", view.sorting))
+                                    .show_ui(ui, |ui| {
+                                        for value in [
+                                            Sort::Name,
+                                            Sort::Created,
+                                            Sort::Modified,
+                                            Sort::Size,
+                                            Sort::Random,
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut view.sorting,
+                                                value,
+                                                format!("{value:?}"),
+                                            );
+                                        }
+                                    });
+                            });
+                            ui.add_enabled_ui(view.sorting != Sort::Random, |ui| {
+                                ui.checkbox(&mut view.invert_sort, "Reverse order");
+                            });
+                        });
+                        if before != (view.sorting, view.invert_sort, hidden.0) {
+                            ui.data_set_persisted(view);
+                            ui.data_set_persisted(hidden);
                             ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Settings)
                                 .schedule();
                         }
-                    });
-                ui.add_space(10.0);
-                ui.checkbox(
-                    &mut self.animate_selected_previews,
-                    "Animate selected videos and GIFs",
-                );
-                ui.add_space(10.0);
-                ui.label("Icon Size");
-                egui::ComboBox::from_label("")
-                    .selected_text(format!("{:?}", self.icon_size))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.icon_size, IconSize::Small, "Small");
-                        ui.selectable_value(&mut self.icon_size, IconSize::Medium, "Medium");
-                        ui.selectable_value(&mut self.icon_size, IconSize::Large, "Large");
-                        ui.selectable_value(
-                            &mut self.icon_size,
-                            IconSize::ExtraLarge,
-                            "Extra Large",
-                        );
-                    });
-                ui.add_space(10.0);
-                ui.separator();
-                close = ui.button("Close").clicked();
-            });
+                        ui::section(ui, "Previews");
+                        ui::card(ui).show(ui, |ui| {
+                            ui.checkbox(
+                                &mut self.animate_selected_previews,
+                                "Animate selected videos and GIFs",
+                            );
+                            ui::form_row(ui, "Icon size", |ui| {
+                                egui::ComboBox::from_id_salt("icon_size")
+                                    .selected_text(format!("{:?}", self.icon_size))
+                                    .show_ui(ui, |ui| {
+                                        for value in [
+                                            IconSize::Small,
+                                            IconSize::Medium,
+                                            IconSize::Large,
+                                            IconSize::ExtraLarge,
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut self.icon_size,
+                                                value,
+                                                format!("{value:?}"),
+                                            );
+                                        }
+                                    });
+                            });
+                        });
+                    }
+                });
+            ui.add_space(12.0);
+            if ui.button("Close").clicked() {
+                ActionToPerform::CloseActiveModalWindow.schedule();
+            }
         });
-
-        if modal.should_close() || close {
+        self.appearance.apply(ctx);
+        if modal.should_close() {
             ActionToPerform::CloseActiveModalWindow.schedule();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_settings_receive_new_defaults() {
+        let settings: ApplicationSettings = serde_json::from_str(
+            r#"{"terminal_path":"Terminal","animate_selected_previews":true}"#,
+        )
+        .expect("legacy settings");
+        assert_eq!(settings.appearance, Appearance::System);
+        assert!(settings.sidebar_visible);
+        assert!(!settings.inspector_visible);
+        assert!((settings.sidebar_width - 200.0).abs() < f32::EPSILON);
+    }
+    #[test]
+    fn panel_preferences_round_trip() {
+        let settings = ApplicationSettings {
+            appearance: Appearance::Light,
+            inspector_visible: true,
+            sidebar_width: 225.0,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&settings).expect("encode");
+        let restored: ApplicationSettings = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(restored.appearance, Appearance::Light);
+        assert!(restored.inspector_visible);
+        assert!((restored.sidebar_width - 225.0).abs() < f32::EPSILON);
     }
 }

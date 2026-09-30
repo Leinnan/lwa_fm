@@ -33,9 +33,13 @@ pub mod dir_handling;
 pub mod directory_path_info;
 mod directory_view_settings;
 pub mod dock;
+mod inspector;
 mod settings;
 mod side_panel;
 mod top_bottom;
+pub(crate) mod ui;
+#[cfg(test)]
+mod ui_tests;
 
 /// Dedicated thread pool for filesystem reads. Limited to 2 threads to bound
 /// concurrent disk I/O while keeping the UI responsive.
@@ -99,6 +103,10 @@ pub struct App {
     /// the instant they were first seen. Coalesces bursts into one refresh.
     #[serde(skip, default)]
     pending_structural_dirs: BTreeMap<PathBuf, Instant>,
+    #[serde(skip)]
+    sidebar_overlay: bool,
+    #[serde(skip)]
+    inspector_overlay: bool,
     #[cfg(feature = "profiling")]
     #[serde(skip)]
     profiler_visible: bool,
@@ -441,6 +449,8 @@ impl Default for App {
             watchers: DirectoryWatchers::default(),
             assets: AssetManager::default(),
             pending_structural_dirs: BTreeMap::new(),
+            sidebar_overlay: false,
+            inspector_overlay: false,
             #[cfg(feature = "profiling")]
             profiler_visible: true,
             #[cfg(feature = "profiling")]
@@ -462,7 +472,7 @@ impl App {
         setup_custom_fonts(&cc.egui_ctx);
 
         #[cfg(debug_assertions)]
-        cc.egui_ctx.style_mut(|style| {
+        cc.egui_ctx.global_style_mut(|style| {
             style.debug.show_unaligned = false;
         });
 
@@ -491,6 +501,20 @@ impl App {
         puffin::profile_function!("lwa_fm::handle_action");
 
         match action {
+            ActionToPerform::ToggleSidebar => {
+                if ctx.content_rect().width() < 800.0 {
+                    self.sidebar_overlay = !self.sidebar_overlay;
+                } else {
+                    self.settings.sidebar_visible = !self.settings.sidebar_visible;
+                }
+            }
+            ActionToPerform::ToggleInspector => {
+                if ctx.content_rect().width() < 1000.0 {
+                    self.inspector_overlay = !self.inspector_overlay;
+                } else {
+                    self.settings.inspector_visible = !self.settings.inspector_visible;
+                }
+            }
             ActionToPerform::TabAction(target, action) => {
                 if target == TabTarget::AllTabs {
                     let tabs_ids = self.tabs.get_tab_ids();
@@ -1013,6 +1037,19 @@ impl App {
     }
 }
 
+impl App {
+    pub(crate) fn render_browser(&mut self, root: &mut egui::Ui) {
+        let ctx = &root.ctx().clone();
+        self.settings.appearance.apply(ctx);
+        self.tabs.reconcile_selection(ctx);
+        self.top_panel(root);
+        self.bottom_panel(root);
+        self.left_side_panel(root);
+        self.central_panel(root);
+        self.panel_overlays(ctx);
+    }
+}
+
 impl eframe::App for App {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1039,12 +1076,17 @@ impl eframe::App for App {
         let active_directory = self.tabs.get_current_path();
         self.assets
             .set_active_directory(active_directory.as_deref());
-        self.top_panel(&ctx);
-        self.bottom_panel(&ctx);
-        self.left_side_panel(&ctx);
-        self.central_panel(&ctx);
+        self.render_browser(ui);
 
-        if ctx.key_with_command_pressed(egui::Key::P) {
+        if ctx.input(|i| i.modifiers.command && i.modifiers.alt && i.key_pressed(egui::Key::S)) {
+            ActionToPerform::ToggleSidebar.schedule();
+        }
+        if ctx.input(|i| i.modifiers.command && i.modifiers.alt && i.key_pressed(egui::Key::I)) {
+            ActionToPerform::ToggleInspector.schedule();
+        }
+        if ctx.key_with_command_pressed(egui::Key::P)
+            || ctx.key_with_command_pressed(egui::Key::Comma)
+        {
             ActionToPerform::ToggleModalWindow(ModalWindow::Settings).schedule();
         }
 
@@ -1165,6 +1207,7 @@ impl eframe::App for App {
 fn setup_custom_fonts(ctx: &egui::Context) {
     // Start with the default fonts (we will be adding to them rather than replacing them).
     let mut fonts = egui::FontDefinitions::default();
+    ui::register_icons(&mut fonts);
     if let Ok((regular, semibold)) = get_fonts() {
         fonts.font_data.insert(
             "regular".to_owned(),
@@ -1193,16 +1236,9 @@ fn setup_custom_fonts(ctx: &egui::Context) {
             .entry(egui::FontFamily::Monospace)
             .or_default()
             .push("regular".to_owned());
-
-        // Tell egui to use these fonts:
-        ctx.set_fonts(fonts);
     }
-
-    ctx.all_styles_mut(|style| {
-        for font_id in style.text_styles.values_mut() {
-            font_id.size *= 1.4;
-        }
-    });
+    ctx.set_fonts(fonts);
+    ui::configure(ctx);
 }
 
 #[cfg(not(windows))]

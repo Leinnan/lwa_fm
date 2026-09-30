@@ -18,6 +18,8 @@ default = []
 profiling = ["dep:puffin", "dep:puffin_http", "dep:puffin_egui", "profiling/profile-with-puffin"]
 
 [dependencies]
+lucide-icons = "=1.34.0"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 sled = "0.34"
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
 log = { version = "0.4.28", features = ["std"] }

@@ -96,6 +96,8 @@ impl Display for TabTarget {
 /// Enum representing actions that can be performed within the application.
 #[derive(Debug, Clone)]
 pub enum ActionToPerform {
+    ToggleSidebar,
+    ToggleInspector,
     TabAction(TabTarget, TabAction),
     /// Open a new tab with the specified path as the root.
     NewTab(PathBuf),
@@ -130,6 +132,8 @@ impl ActionToPerform {
 impl From<&ActionToPerform> for Cow<'static, str> {
     fn from(val: &ActionToPerform) -> Self {
         match val {
+            ActionToPerform::ToggleSidebar => Cow::Borrowed("Toggle sidebar"),
+            ActionToPerform::ToggleInspector => Cow::Borrowed("Toggle inspector"),
             ActionToPerform::TabAction(_, action) => match action {
                 TabAction::ChangePaths(_) => Cow::Borrowed("Open"),
                 TabAction::RequestFilesRefresh => Cow::Borrowed("Refresh"),
