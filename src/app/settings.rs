@@ -113,6 +113,12 @@ impl ApplicationSettings {
                                 );
                             });
                         });
+                        ui::section(ui, "About");
+                        ui::card(ui).show(ui, |ui| {
+                            ui.strong(format!("DirFleet {}", crate::consts::VERSION))
+                                .on_hover_text(crate::consts::GIT_HASH_INFO);
+                            ui.hyperlink_to("Project website", crate::consts::HOMEPAGE);
+                        });
                     }
                     SettingsCategory::Appearance => {
                         ui::section(ui, "Interface");

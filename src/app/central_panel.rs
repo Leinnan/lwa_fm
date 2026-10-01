@@ -11,11 +11,12 @@ impl App {
             self.settings.sidebar_visible,
             self.settings.inspector_visible,
         );
+        let owns_preview = (layout.inspector || self.inspector_overlay)
+            && self
+                .inspector_view(ctx)
+                .is_some_and(|view| view.paths.len() == 1);
         ctx.data_mut(|data| {
-            data.insert_temp(
-                egui::Id::new("inspector_owns_preview"),
-                layout.inspector || self.inspector_overlay,
-            )
+            data.insert_temp(egui::Id::new("inspector_owns_preview"), owns_preview)
         });
         // Reserve the right panel first, then resolve its content after dock interactions.
         let inspector_rect = if layout.inspector {

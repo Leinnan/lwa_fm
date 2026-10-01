@@ -92,12 +92,11 @@ impl Locations {
                 Palette::of(ui).text,
             );
             let response = response.on_hover_text(location.path.as_ref());
-            if response.clicked() {
-                if let Some(action) =
+            if response.clicked()
+                && let Some(action) =
                     ActionToPerform::path_from_str(&location.path, ui.command_pressed())
-                {
-                    action.schedule();
-                }
+            {
+                action.schedule();
             }
             response.context_menu(|ui| {
                 if ui.button("Open in new tab").clicked() {

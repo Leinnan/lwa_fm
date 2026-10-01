@@ -60,7 +60,11 @@ fn draw(root: &mut egui::Ui, app: &mut App) {
             ctx.data_set_path(
                 &tab.current_path,
                 Selected {
-                    selected_fields: vec![1],
+                    selected_fields: ctx
+                        .data(|data| {
+                            data.get_temp::<Vec<usize>>(egui::Id::new("initial_selection"))
+                        })
+                        .unwrap_or_else(|| vec![1]),
                     just_changed: false,
                 },
             );
@@ -80,6 +84,8 @@ fn draw(root: &mut egui::Ui, app: &mut App) {
     app.render_browser(root);
     if app.display_modal == Some(ModalWindow::Settings) {
         app.settings.display(ctx);
+    } else if app.display_modal == Some(ModalWindow::Commands) {
+        app.command_palette.ui(ctx);
     }
     app.assets.wait_for_idle(ctx);
     app.assets.end_frame();
@@ -164,6 +170,12 @@ fn search_settings_and_overlay_snapshots() {
         .build_ui_state(draw, app);
     harness.run_steps(12);
     snapshots.add(harness.try_snapshot("dirfleet_settings_light"));
+    harness.get_by_label("Appearance").click();
+    harness.run_steps(4);
+    snapshots.add(harness.try_snapshot("dirfleet_settings_appearance"));
+    harness.get_by_label("Files").click();
+    harness.run_steps(4);
+    snapshots.add(harness.try_snapshot("dirfleet_settings_files"));
     let mut app = fixture(Appearance::Dark, false, false);
     app.inspector_overlay = true;
     let mut harness = Harness::builder()
@@ -191,8 +203,8 @@ fn selection_follows_paths_across_sort_filter_and_deletion() {
         },
     );
     // Draw once to record the canonical file selection.
-    let _ = ctx.run(Default::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| app.tabs.ui(ui, &mut app.assets));
+    let _ = ctx.run_ui(egui::RawInput::default(), |root| {
+        egui::CentralPanel::default().show_inside(root, |ui| app.tabs.ui(ui, &mut app.assets));
     });
     let selected_path = app.inspector_view(&ctx).expect("view").paths[0].clone();
     app.tabs
@@ -216,7 +228,7 @@ fn auto_collapse_keeps_preferences_and_toggle_opens_overlay() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let ctx = egui::Context::default();
     let mut app = fixture(Appearance::Dark, false, true);
-    let _ = ctx.run(
+    let _ = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -224,11 +236,243 @@ fn auto_collapse_keeps_preferences_and_toggle_opens_overlay() {
             )),
             ..Default::default()
         },
-        |ctx| {
+        |root| {
+            let ctx = root.ctx();
             app.handle_action(ctx, ActionToPerform::ToggleSidebar);
             app.handle_action(ctx, ActionToPerform::ToggleInspector);
         },
     );
     assert!(app.settings.sidebar_visible && app.settings.inspector_visible);
     assert!(app.sidebar_overlay && app.inspector_overlay);
+}
+
+#[test]
+fn inspector_selection_states_and_split_panes() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut snapshots = egui_kittest::SnapshotResults::new();
+    for (name, indices) in [
+        ("dirfleet_inspector_empty", Vec::<usize>::new()),
+        ("dirfleet_inspector_multiple", vec![1usize, 2]),
+        ("dirfleet_inspector_folder", vec![0usize]),
+    ] {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1100.0, 720.0))
+            .build_ui_state(
+                move |root, app| {
+                    root.ctx().data_mut(|data| {
+                        data.insert_temp(egui::Id::new("initial_selection"), indices.clone())
+                    });
+                    draw(root, app);
+                },
+                fixture(Appearance::Dark, false, true),
+            );
+        harness.run_steps(12);
+        snapshots.add(harness.try_snapshot(name));
+    }
+    let mut app = fixture(Appearance::Dark, false, false);
+    let mut second = TabData::from_path(Path::new("/virtual/Downloads"));
+    second.current_path = CurrentPath::One("/virtual/Downloads".into());
+    second.list = vec![DirEntry::test_new(
+        "/virtual/Downloads/A long downloaded file name.txt",
+    )];
+    second.visible_entries = vec![0];
+    second.loading = false;
+    let nodes = app.tabs.dock_state.main_surface_mut().split_right(
+        egui_dock::NodeIndex::root(),
+        0.5,
+        vec![second],
+    );
+    app.tabs
+        .dock_state
+        .set_focused_node_and_surface(egui_dock::NodePath::new(
+            egui_dock::SurfaceIndex::main(),
+            nodes[0],
+        ));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 720.0))
+        .build_ui_state(draw, app);
+    harness.run_steps(12);
+    snapshots.add(harness.try_snapshot("dirfleet_split_panes"));
+    snapshots.unwrap();
+}
+
+#[test]
+fn inspector_preview_loading_ready_and_failure() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut snapshots = egui_kittest::SnapshotResults::new();
+    for (name, state) in [
+        ("dirfleet_preview_loading", 0),
+        ("dirfleet_preview_failure", 1),
+        ("dirfleet_preview_ready", 2),
+    ] {
+        let mut assets = assets::AssetManager::default();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(320.0, 300.0))
+            .build_ui(|root| {
+                ui::configure(root.ctx());
+                root.ctx().set_theme(egui::Theme::Dark);
+                egui::CentralPanel::default().show_inside(root, |ui| {
+                    let preview = match state {
+                        0 => assets::HoverPreview::Pending,
+                        1 => assets::HoverPreview::Unavailable {
+                            reason: "Decoder unavailable".into(),
+                            retry_after: None,
+                        },
+                        _ => assets::HoverPreview::Ready(ui.ctx().load_texture(
+                            "preview_fixture",
+                            egui::ColorImage::filled(
+                                [160, 90],
+                                egui::Color32::from_rgb(30, 100, 180),
+                            ),
+                            egui::TextureOptions::LINEAR,
+                        )),
+                    };
+                    ui::card(ui).show(ui, |ui| {
+                        inspector::render_preview(
+                            ui,
+                            &mut assets,
+                            &DirEntry::test_new("/virtual/movie.mp4"),
+                            preview,
+                            egui::vec2(240.0, 240.0),
+                        );
+                    });
+                });
+            });
+        harness.run_steps(12);
+        snapshots.add(harness.try_snapshot(name));
+    }
+    snapshots.unwrap();
+}
+
+#[test]
+fn appearance_change_keeps_file_labels_visible() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 720.0))
+        .build_ui_state(draw, fixture(Appearance::Dark, false, true));
+    harness.run_steps(12);
+    harness.state_mut().settings.appearance = Appearance::Light;
+    harness.run_steps(12);
+    harness.snapshot("dirfleet_appearance_changed_to_light");
+}
+
+#[test]
+fn keyboard_selection_and_search_follow_the_active_pane() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 720.0))
+        .build_ui_state(draw, fixture(Appearance::Dark, false, true));
+    harness.run_steps(12);
+    harness.hover_at(egui::pos2(380.0, 160.0));
+    harness.run_steps(2);
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    let view = harness.state_mut().inspector_view(&ctx).expect("inspector");
+    assert!(
+        view.paths[0]
+            .to_string_lossy()
+            .contains("A very long file name")
+    );
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state_mut()
+            .tabs
+            .get_current_tab()
+            .expect("tab")
+            .search
+            .is_some()
+    );
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state_mut()
+            .tabs
+            .get_current_tab()
+            .expect("tab")
+            .search
+            .is_none()
+    );
+}
+
+#[test]
+fn command_palette_supports_keyboard_choice() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let mut app = fixture(Appearance::Dark, false, false);
+    app.display_modal = Some(ModalWindow::Commands);
+    app.command_palette.commands = vec![
+        ActionToPerform::ToggleSidebar.into(),
+        ActionToPerform::ToggleInspector.into(),
+    ];
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 720.0))
+        .build_ui_state(draw, app);
+    harness.run_steps(12);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let snapshot = harness.try_snapshot("dirfleet_commands");
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    let action = COMMANDS_QUEUE.pop();
+    assert!(
+        matches!(action, Some(ActionToPerform::ToggleInspector)),
+        "received {action:?}"
+    );
+    assert!(matches!(
+        COMMANDS_QUEUE.pop(),
+        Some(ActionToPerform::CloseActiveModalWindow)
+    ));
+    snapshot.expect("command palette snapshot");
+}
+
+#[test]
+fn path_editor_takes_focus_and_compact_overlay_dismisses() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(640.0, 420.0))
+        .build_ui_state(draw, fixture(Appearance::Dark, false, true));
+    harness.run_steps(12);
+    let ctx = harness.ctx.clone();
+    let id = harness.state_mut().tabs.get_current_tab().expect("tab").id;
+    harness
+        .state_mut()
+        .handle_action(&ctx, ActionToPerform::ToggleTopEdit);
+    harness.run_steps(2);
+    assert_eq!(
+        ctx.memory(egui::Memory::focused),
+        Some(egui::Id::new(("path_editor", id)))
+    );
+    while COMMANDS_QUEUE.pop().is_some() {}
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    let action = COMMANDS_QUEUE.pop().expect("close path editor");
+    assert!(matches!(action, ActionToPerform::ToggleTopEdit));
+    harness.state_mut().handle_action(&ctx, action);
+    assert!(ctx.data_get_tab::<DirectoryPathInfo>(id).is_none());
+    harness
+        .state_mut()
+        .handle_action(&ctx, ActionToPerform::ToggleSidebar);
+    harness.run_steps(12);
+    assert!(harness.state().sidebar_overlay);
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    assert!(!harness.state().sidebar_overlay);
+    assert!(harness.state().settings.sidebar_visible);
 }

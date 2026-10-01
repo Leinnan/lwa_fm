@@ -105,15 +105,6 @@ impl IconSize {
         }
     }
 
-    pub const fn row_height_multiplier(self) -> f32 {
-        match self {
-            Self::Small => 1.1,
-            Self::Medium => 1.25,
-            Self::Large => 1.4,
-            Self::ExtraLarge => 1.75,
-        }
-    }
-
     pub const fn tile_width(self) -> f32 {
         match self {
             Self::Small => 120.0,
@@ -336,6 +327,7 @@ impl AssetJob {
 enum AssetJobClass {
     VisibleThumbnail,
     PrefetchThumbnail,
+    #[cfg_attr(not(test), allow(dead_code))]
     SidebarIcon,
     HoveredPreview,
     SelectedPreview,
@@ -1231,6 +1223,8 @@ impl AssetManager {
         self.request_file_icon_texture(&path, entry.is_file(), size, class)
     }
 
+    // Keep native location-icon requests available alongside the Lucide source list.
+    #[allow(dead_code)]
     pub fn request_sidebar_texture(&mut self, path: &Path) -> Option<TextureHandle> {
         let is_dir = path.is_dir();
         let size = self.icon_size;
@@ -1724,16 +1718,8 @@ impl Default for AssetManager {
 }
 
 impl AssetManager {
-    pub const fn render_size(&self) -> f32 {
-        self.icon_size.render_px()
-    }
-
     pub fn render_size_for(&self, entry: &DirEntry) -> f32 {
         self.effective_icon_size(entry).render_px()
-    }
-
-    pub const fn row_height_multiplier(&self) -> f32 {
-        self.icon_size.row_height_multiplier()
     }
 }
 

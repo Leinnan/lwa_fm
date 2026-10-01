@@ -69,46 +69,13 @@ impl App {
                 let width = ui.available_width();
                 ui::card(ui).show(ui, |ui| {
                     let target = Vec2::splat((width - 24.0).clamp(96.0, 300.0));
-                    match self.assets.request_hover_preview_at_size(
+                    let preview = self.assets.request_hover_preview_at_size(
                         ui.ctx(),
                         &entry,
                         PreviewIntent::Selected,
                         target,
-                    ) {
-                        HoverPreview::Ready(texture) => {
-                            ui.add(
-                                egui::Image::new(&texture)
-                                    .maintain_aspect_ratio(true)
-                                    .max_size(target),
-                            );
-                        }
-                        HoverPreview::Pending => {
-                            ui.spinner();
-                            ui.weak("Loading preview…");
-                        }
-                        HoverPreview::Unavailable {
-                            reason,
-                            retry_after,
-                        } => {
-                            ui.weak("Preview unavailable");
-                            ui.small(reason);
-                            if let Some(delay) = retry_after {
-                                ui.small(format!("Retrying in {} seconds", delay.as_secs().max(1)));
-                            }
-                        }
-                        HoverPreview::Fallback => {
-                            if let Some(texture) = self.assets.request_entry_texture(&entry) {
-                                ui.add(
-                                    egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(64.0)),
-                                );
-                            }
-                            ui.weak(if entry.is_file() {
-                                "No preview available"
-                            } else {
-                                "Folder"
-                            });
-                        }
-                    }
+                    );
+                    render_preview(ui, &mut self.assets, &entry, preview, target);
                 });
                 ui::section(ui, "Information");
                 ui::card(ui).show(ui, |ui| {
@@ -157,26 +124,30 @@ impl App {
         }
         if self.sidebar_overlay {
             let modal = egui::Modal::new("sidebar_overlay".into()).show(ctx, |ui| {
-                ui.set_width(260.0);
-                if ui.button("Close sidebar").clicked() {
-                    self.sidebar_overlay = false;
-                }
-                ui.add_space(8.0);
-                ui.set_max_height(ctx.content_rect().height() - 80.0);
-                ui.vertical(|ui| self.locations_ui(ui));
+                ui.vertical(|ui| {
+                    ui.set_width(260.0);
+                    ui.set_max_height(ctx.content_rect().height() - 80.0);
+                    if ui.button("Close sidebar").clicked() {
+                        self.sidebar_overlay = false;
+                    }
+                    ui.add_space(8.0);
+                    self.locations_ui(ui);
+                });
             });
             if modal.should_close() {
                 self.sidebar_overlay = false;
             }
         } else if self.inspector_overlay {
             let modal = egui::Modal::new("inspector_overlay".into()).show(ctx, |ui| {
-                ui.set_width(300.0);
-                if ui.button("Close inspector").clicked() {
-                    self.inspector_overlay = false;
-                }
-                ui.add_space(8.0);
-                ui.set_max_height(ctx.content_rect().height() - 80.0);
-                ui.vertical(|ui| self.inspector_ui(ui));
+                ui.vertical(|ui| {
+                    ui.set_width(300.0);
+                    ui.set_max_height(ctx.content_rect().height() - 80.0);
+                    if ui.button("Close inspector").clicked() {
+                        self.inspector_overlay = false;
+                    }
+                    ui.add_space(8.0);
+                    self.inspector_ui(ui);
+                });
             });
             if modal.should_close() {
                 self.inspector_overlay = false;
@@ -184,6 +155,48 @@ impl App {
         }
     }
 }
+pub(super) fn render_preview(
+    ui: &mut Ui,
+    assets: &mut super::assets::AssetManager,
+    entry: &DirEntry,
+    preview: HoverPreview,
+    target: Vec2,
+) {
+    match preview {
+        HoverPreview::Ready(texture) => {
+            ui.add(
+                egui::Image::new(&texture)
+                    .maintain_aspect_ratio(true)
+                    .max_size(target),
+            );
+        }
+        HoverPreview::Pending => {
+            ui.spinner();
+            ui.weak("Loading preview…");
+        }
+        HoverPreview::Unavailable {
+            reason,
+            retry_after,
+        } => {
+            ui.weak("Preview unavailable");
+            ui.small(reason);
+            if let Some(delay) = retry_after {
+                ui.small(format!("Retrying in {} seconds", delay.as_secs().max(1)));
+            }
+        }
+        HoverPreview::Fallback => {
+            if let Some(texture) = assets.request_entry_texture(entry) {
+                ui.add(egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(64.0)));
+            }
+            ui.weak(if entry.is_file() {
+                "No preview available"
+            } else {
+                "Folder"
+            });
+        }
+    }
+}
+
 fn detail(ui: &mut Ui, label: &str, value: &str) {
     ui.vertical(|ui| {
         ui.label(

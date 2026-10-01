@@ -94,6 +94,9 @@ impl App {
             [ui.available_width().max(32.0), 28.0],
             AutoCompleteTextEdit::new(&mut info.text_input, &info.possible_options)
                 .max_suggestions(10)
+                .set_text_edit_properties(move |edit| {
+                    edit.id(egui::Id::new(("path_editor", index)))
+                })
                 .highlight_matches(true),
         );
         if !response.has_focus() && !ui.ctx().memory(|m| m.focused().is_some()) {
@@ -167,12 +170,11 @@ impl App {
                         .truncate(),
                 )
                 .on_hover_text(&part.path);
-            if response.clicked() {
-                if let Some(action) =
+            if response.clicked()
+                && let Some(action) =
                     ActionToPerform::path_from_str(&part.path, ui.input(|i| i.modifiers.command))
-                {
-                    action.schedule();
-                }
+            {
+                action.schedule();
             }
             response.context_menu(|ui| {
                 breadcrumb_menu_entry(ui, part);
@@ -237,24 +239,24 @@ impl App {
                     };
                     let searching = tab.is_searching();
                     ui.add_enabled_ui(tab.can_undo() && !searching, |ui| {
-                        if ui::icon_button(ui, Icon::ArrowLeft, "Go back", false).clicked() {
-                            if let Some(action) = tab.undo() {
-                                action.schedule();
-                            }
+                        if ui::icon_button(ui, Icon::ArrowLeft, "Go back", false).clicked()
+                            && let Some(action) = tab.undo()
+                        {
+                            action.schedule();
                         }
                     });
                     ui.add_enabled_ui(tab.can_redo() && !searching, |ui| {
-                        if ui::icon_button(ui, Icon::ArrowRight, "Go forward", false).clicked() {
-                            if let Some(action) = tab.redo() {
-                                action.schedule();
-                            }
+                        if ui::icon_button(ui, Icon::ArrowRight, "Go forward", false).clicked()
+                            && let Some(action) = tab.redo()
+                        {
+                            action.schedule();
                         }
                     });
                     ui.add_enabled_ui(tab.current_path.parent().is_some() && !searching, |ui| {
-                        if ui::icon_button(ui, Icon::ArrowUp, "Parent folder", false).clicked() {
-                            if let Some(parent) = tab.current_path.parent() {
-                                TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
-                            }
+                        if ui::icon_button(ui, Icon::ArrowUp, "Parent folder", false).clicked()
+                            && let Some(parent) = tab.current_path.parent()
+                        {
+                            TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
                         }
                     });
                     let trailing = if compact { 116.0 } else { 224.0 };
@@ -263,6 +265,7 @@ impl App {
                         ui.allocate_exact_size(Vec2::new(width, 28.0), egui::Sense::hover());
                     let mut path_ui = ui.new_child(
                         egui::UiBuilder::new()
+                            .id_salt("path_controls")
                             .max_rect(path_rect)
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     );
@@ -302,13 +305,14 @@ impl App {
                             .data;
                         if ui.checkbox(&mut hidden.0, "Show hidden files").changed() {
                             ui.data_set_path(&tab.current_path, hidden);
+                            TabAction::RequestFilesRefresh.schedule_tab(tab.id);
                             ActionToPerform::ViewSettingsChanged(DataSource::Local).schedule();
                         }
-                        if let Some(path) = tab.current_path.single_path() {
-                            if ui.button("Open in terminal").clicked() {
-                                ActionToPerform::OpenInTerminal(path).schedule();
-                                ui.close();
-                            }
+                        if let Some(path) = tab.current_path.single_path()
+                            && ui.button("Open in terminal").clicked()
+                        {
+                            ActionToPerform::OpenInTerminal(path).schedule();
+                            ui.close();
                         }
                         if ui.button("Refresh · F5").clicked() {
                             TabAction::ForceRefresh.schedule_tab(tab.id);
@@ -360,6 +364,7 @@ impl App {
             return;
         };
         if tab.search.is_none() {
+            ctx.data_mut(|data| data.remove::<bool>(egui::Id::new(("search_focus", tab.id))));
             return;
         }
         let tab_id = tab.id;
@@ -382,6 +387,14 @@ impl App {
                             .hint_text("Search files…")
                             .desired_width((ui.available_width() - 150.0).max(80.0)),
                     );
+                    let focus_id = egui::Id::new(("search_focus", tab_id));
+                    if !ctx
+                        .data(|data| data.get_temp::<bool>(focus_id))
+                        .unwrap_or(false)
+                    {
+                        response.request_focus();
+                        ctx.data_mut(|data| data.insert_temp(focus_id, true));
+                    }
                     filter_changed |= response.changed();
                     let advanced = search.case_sensitive
                         || search.term_type != SearchTermType::Plain
@@ -635,27 +648,18 @@ fn view_controls(ui: &mut Ui, tab: &TabData) {
         .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path)
         .data;
     let old = (view.display_type, view.sorting, view.invert_sort);
-    if ui::icon_button(
+    if let Some(index) = ui::segmented_icons(
         ui,
-        Icon::List,
-        "List view",
-        view.display_type == DisplayType::List,
-    )
-    .clicked()
-    {
-        view.display_type = DisplayType::List;
+        &[(Icon::List, "List view"), (Icon::Grid2x2, "Grid view")],
+        usize::from(view.display_type == DisplayType::Icons),
+    ) {
+        view.display_type = if index == 0 {
+            DisplayType::List
+        } else {
+            DisplayType::Icons
+        };
     }
-    if ui::icon_button(
-        ui,
-        Icon::Grid2x2,
-        "Grid view",
-        view.display_type == DisplayType::Icons,
-    )
-    .clicked()
-    {
-        view.display_type = DisplayType::Icons;
-    }
-    ui.menu_button(ui::glyph(Icon::ArrowUpDown), |ui| {
+    let sort_menu = ui.menu_button(ui::glyph(Icon::ArrowUpDown), |ui| {
         ui.strong("Sort by");
         for sort in [
             Sort::Name,
@@ -670,9 +674,11 @@ fn view_controls(ui: &mut Ui, tab: &TabData) {
         ui.add_enabled_ui(view.sorting != Sort::Random, |ui| {
             ui.checkbox(&mut view.invert_sort, "Reverse order");
         });
-    })
-    .response
-    .on_hover_text("Sort files");
+    });
+    sort_menu.response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Sort files")
+    });
+    sort_menu.response.on_hover_text("Sort files");
     if old != (view.display_type, view.sorting, view.invert_sort) {
         ui.data_set_path(&tab.current_path, view);
         ActionToPerform::ViewSettingsChanged(DataSource::Local).schedule();

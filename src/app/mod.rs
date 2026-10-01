@@ -37,7 +37,7 @@ mod inspector;
 mod settings;
 mod side_panel;
 mod top_bottom;
-pub(crate) mod ui;
+pub mod ui;
 #[cfg(test)]
 mod ui_tests;
 
@@ -964,17 +964,22 @@ impl App {
                 self.assets.set_icon_size(self.settings.icon_size);
                 TabAction::RequestFilesRefresh.schedule_active_tab();
             }
-            ActionToPerform::ViewSettingsChanged(_) => {
-                TabAction::FilesSort.schedule_active_tab();
+            ActionToPerform::ViewSettingsChanged(source) => {
                 let Some(active_tab) = self.tabs.get_current_tab() else {
                     return;
                 };
                 let active_path = active_tab.current_path.clone();
                 for tab_id in self.tabs.get_tab_ids() {
                     if let Some(tab) = self.tabs.get_tab_by_id(tab_id)
-                        && tab.current_path == active_path
+                        && (source == DataSource::Settings || tab.current_path == active_path)
                     {
-                        TabAction::FilesSort.schedule_tab(tab_id);
+                        let hidden_before = tab.show_hidden;
+                        tab.update_settings(ctx);
+                        if tab.show_hidden == hidden_before {
+                            TabAction::FilesSort.schedule_tab(tab_id);
+                        } else {
+                            TabAction::RequestFilesRefresh.schedule_tab(tab_id);
+                        }
                     }
                 }
             }
@@ -1001,6 +1006,9 @@ impl App {
                                 index,
                                 DirectoryPathInfo::build(path.as_path(), false),
                             );
+                            ctx.memory_mut(|memory| {
+                                memory.request_focus(egui::Id::new(("path_editor", index)));
+                            });
                         }
                     }
                 }
@@ -1041,7 +1049,22 @@ impl App {
     pub(crate) fn render_browser(&mut self, root: &mut egui::Ui) {
         let ctx = &root.ctx().clone();
         self.settings.appearance.apply(ctx);
+        if self.display_modal.is_some() {
+            root.disable();
+        }
+        if self.display_modal.is_some() || self.sidebar_overlay || self.inspector_overlay {
+            self.tabs.focused = false;
+        }
         self.tabs.reconcile_selection(ctx);
+        if self.display_modal.is_none()
+            && !self.sidebar_overlay
+            && !self.inspector_overlay
+            && ctx.key_with_command_pressed(egui::Key::F)
+            && let Some(tab) = self.tabs.get_current_tab()
+        {
+            tab.toggle_search(ctx);
+            TabAction::FilterChanged.schedule_tab(tab.id);
+        }
         self.top_panel(root);
         self.bottom_panel(root);
         self.left_side_panel(root);
@@ -1121,6 +1144,9 @@ impl eframe::App for App {
                 ModalWindow::Rename => {
                     let modal_response =
                         egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(&ctx, |ui| {
+                            ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 420.0));
+                            ui.heading("Rename");
+                            ui::section(ui, "File name");
                             ui.label("Old name");
                             let (old, mut name) = ui.data_mut(|d| {
                                 let old =
@@ -1245,7 +1271,8 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 fn get_fonts() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let font_path = std::path::Path::new("/System/Library/Fonts");
 
-    let regular = fs::read(font_path.join("SFNSRounded.ttf"))?;
+    let regular = fs::read(font_path.join("SFNS.ttf"))
+        .or_else(|_| fs::read(font_path.join("SFNSRounded.ttf")))?;
     let semibold = fs::read(font_path.join("SFCompact.ttf"))?;
 
     Ok((regular, semibold))

@@ -11,6 +11,7 @@ pub struct CommandPalette {
     pub commands: Vec<ValidAction>,
     query: String,
     selected: usize,
+    focus_requested: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -103,23 +104,32 @@ impl CommandPalette {
         self.commands = build_for_path(current_path, path, favorites);
         self.query.clear();
         self.selected = 0;
+        self.focus_requested = false;
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
+        let down =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+        let up =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+        let enter =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         let mut action = None;
         let modal = Modal::new("Commands".into()).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 460.0));
             ui.heading("Commands");
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
+                    .id(egui::Id::new("command_palette_query"))
                     .hint_text("Find a command…")
                     .desired_width(ui.available_width()),
             );
             if edit.changed() {
                 self.selected = 0;
             }
-            if !ctx.memory(|m| m.focused().is_some()) {
+            if !self.focus_requested {
                 edit.request_focus();
+                self.focus_requested = true;
             }
             ui.separator();
             let query = self.query.to_lowercase();
@@ -131,10 +141,10 @@ impl CommandPalette {
             if commands.is_empty() {
                 ui.weak("No matching commands.");
             } else {
-                if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                if down {
                     self.selected = (self.selected + 1).min(commands.len() - 1);
                 }
-                if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                if up {
                     self.selected = self.selected.saturating_sub(1);
                 }
                 self.selected = self.selected.min(commands.len() - 1);
@@ -152,12 +162,12 @@ impl CommandPalette {
                             }
                         }
                     });
-                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if enter {
                     action = Some(commands[self.selected].action.clone());
                 }
             }
             ui.separator();
-            ui.weak("↑ ↓ to choose · Enter to run · Esc to close");
+            ui.weak("Up/Down to choose · Enter to run · Esc to close");
         });
         if let Some(action) = action {
             action.schedule();

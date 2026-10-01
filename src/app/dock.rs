@@ -227,7 +227,7 @@ fn directory_prefix_galley(ui: &Ui, dir: &str) -> Arc<Galley> {
             return galley.clone();
         }
         let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-            dir.to_owned(),
+            format!("{dir}{}", std::path::MAIN_SEPARATOR),
             FontId::default(),
             ui.visuals().weak_text_color(),
         )))
@@ -674,10 +674,7 @@ impl MyTabViewer<'_> {
             tab.undoer
                 .feed_state(ui.ctx().input(|input| input.time), &tab.current_path);
         }
-        if ui.key_with_command_pressed(egui::Key::F) {
-            tab.toggle_search(ui.ctx());
-        }
-        if ui.key_with_command_pressed(egui::Key::H) {
+        if self.active_tab == tab.id && ui.key_with_command_pressed(egui::Key::H) {
             let mut show_hidden =
                 ui.data_get_path_or_persisted::<DirectoryShowHidden>(&tab.current_path);
             show_hidden.0 = !show_hidden.0;
@@ -881,7 +878,7 @@ impl MyTabViewer<'_> {
 
         let is_searching = tab.is_searching();
         let multiple_dirs = tab.deep_or_multiple_paths();
-        let text_height = 28.0;
+        let text_height = 28.0_f32;
         let entries_len = tab.visible_entries.len();
 
         let mut new_sort = None;
@@ -1057,7 +1054,7 @@ impl MyTabViewer<'_> {
                                                     // relaying out (truncating) every frame.
                                                     let galley = directory_prefix_galley(ui, dir);
                                                         let available_width = ui.available_width();
-                                                        let w = galley.size().x.min(available_width);
+                                                        let w = galley.size().x.min(available_width * 0.35);
                                                         let (rect, _resp) = ui.allocate_exact_size(
                                                             egui::vec2(w, galley.size().y),
                                                             Sense::empty(),
@@ -1078,6 +1075,13 @@ impl MyTabViewer<'_> {
                                                 let galley = file_name_galley(ui, file, is_dir);
                                                 let file_name_response = {
                                                     let available_width = ui.available_width();
+                                                    let galley = if galley.size().x > available_width {
+                                                        let mut job=(*galley.job).clone();
+                                                        job.wrap.max_width=available_width.max(0.0);
+                                                        job.wrap.max_rows=1;
+                                                        job.wrap.break_anywhere=true;
+                                                        ui.fonts_mut(|fonts|fonts.layout_job(job))
+                                                    } else {galley};
                                                     let galley_width = galley.size().x.min(available_width);
                                                     let (rect, response) = ui.allocate_exact_size(
                                                         egui::vec2(galley_width, galley.size().y),
@@ -1433,7 +1437,7 @@ impl MyTabViewer<'_> {
 
             ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Local).schedule();
         }
-        if !self.focused || !self.active_tab.eq(&tab.id) {
+        if !self.focused || !self.active_tab.eq(&tab.id) || ui.ctx().text_edit_focused() {
             return;
         }
 
@@ -1571,7 +1575,14 @@ impl MyTabViewer<'_> {
                 let eligible = entry_has_animated_preview(entry);
                 let preview_intent = tile_preview_intent(
                     eligible,
-                    response.hovered(),
+                    response.hovered()
+                        && !(is_selected
+                            && ui
+                                .ctx()
+                                .data(|data| {
+                                    data.get_temp::<bool>(Id::new("inspector_owns_preview"))
+                                })
+                                .unwrap_or(false)),
                     is_selected,
                     selected_inline_budget,
                 );
@@ -1585,7 +1596,7 @@ impl MyTabViewer<'_> {
             },
         );
 
-        response
+        response.on_hover_text(&entry.file_name)
     }
 
     fn draw_grid_preview(
@@ -1829,7 +1840,7 @@ impl MyTabViewer<'_> {
         shift_pressed: bool,
         columns: usize,
     ) {
-        if !self.focused || !self.active_tab.eq(&tab.id) {
+        if !self.focused || !self.active_tab.eq(&tab.id) || ui.ctx().text_edit_focused() {
             return;
         }
 
@@ -1996,7 +2007,7 @@ impl TabViewer for MyTabViewer<'_> {
 // Here is a simple example of how you can manage a `DockState` of your application.
 #[derive(Debug)]
 pub struct MyTabs {
-    dock_state: DockState<TabData>,
+    pub(super) dock_state: DockState<TabData>,
     pub focused: bool,
 }
 
@@ -2015,9 +2026,7 @@ impl MyTabs {
             let mut selected = ctx
                 .data_get_path::<Selected>(&tab.current_path)
                 .unwrap_or_default();
-            if previous.directory != tab.current_path {
-                selected.selected_fields.clear();
-            } else {
+            if previous.directory == tab.current_path {
                 let current: Vec<_> = selected
                     .selected_fields
                     .iter()
@@ -2032,6 +2041,8 @@ impl MyTabs {
                         })
                         .collect();
                 }
+            } else {
+                selected.selected_fields.clear();
             }
             ctx.data_set_path(&tab.current_path, selected);
         }
@@ -2215,7 +2226,7 @@ const fn convert_nr_to_egui_key(nr: usize) -> Option<egui::Key> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use crate::data::files::{DirEntry, EntryType};
     use crate::helper::DataHolder;
@@ -2223,7 +2234,7 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use std::sync::OnceLock;
 
-    pub(crate) static SNAPSHOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static SNAPSHOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn tile_preview_policy_keeps_hover_and_caps_selected_entries() {
@@ -2395,6 +2406,8 @@ pub(crate) mod tests {
         selected_fields: Option<&[usize]>,
         assets: &RefCell<crate::app::assets::AssetManager>,
     ) {
+        crate::app::ui::configure(ctx);
+        ctx.set_theme(egui::Theme::Dark);
         FILE_NAME_POOL.with_borrow_mut(LruCache::clear);
         FOLDER_NAME_POOL.with_borrow_mut(LruCache::clear);
         DIR_POOL.with_borrow_mut(LruCache::clear);

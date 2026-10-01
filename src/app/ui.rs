@@ -202,6 +202,25 @@ impl PanelLayout {
         }
     }
 }
+pub fn segmented_icons(ui: &mut Ui, choices: &[(Icon, &str)], selected: usize) -> Option<usize> {
+    let mut next = None;
+    Frame::new()
+        .fill(Palette::of(ui).card)
+        .corner_radius(6)
+        .inner_margin(2)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (index, (icon, label)) in choices.iter().enumerate() {
+                    if icon_button(ui, *icon, label, index == selected).clicked() {
+                        next = Some(index);
+                    }
+                }
+            });
+        });
+    next
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
