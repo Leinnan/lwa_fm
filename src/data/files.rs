@@ -167,7 +167,7 @@ impl DirEntry {
 
     #[inline]
     #[must_use]
-    pub fn is_file(&self) -> bool {
+    pub const fn is_file(&self) -> bool {
         matches!(self.meta.entry_type, EntryType::File)
     }
 
@@ -183,6 +183,7 @@ impl DirEntry {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn test_new(path: &str) -> Self {
         let sep = path
             .rfind(std::path::MAIN_SEPARATOR)
@@ -191,27 +192,23 @@ impl DirEntry {
         // Normalize forward slashes to platform separator (preserving leading /)
         let dir = if dir.is_empty() {
             Arc::from("")
-        } else if dir.starts_with('/') {
-            let sep_str = std::path::MAIN_SEPARATOR.to_string();
+        } else if let Some(stripped) = dir.strip_prefix('/') {
             let normalized = format!(
                 "{}{}",
                 std::path::MAIN_SEPARATOR,
-                dir[1..].replace('/', &sep_str)
+                stripped.replace('/', std::path::MAIN_SEPARATOR_STR)
             );
             Arc::from(normalized.as_str())
         } else {
-            Arc::from(
-                dir.replace('/', &std::path::MAIN_SEPARATOR.to_string())
-                    .as_str(),
-            )
+            Arc::from(dir.replace('/', std::path::MAIN_SEPARATOR_STR).as_str())
         };
         Self {
             meta: DirEntryMetaData {
                 entry_type: EntryType::File,
-                created_at: Default::default(),
-                modified_at: Default::default(),
+                created_at: TimestampSeconds::default(),
+                modified_at: TimestampSeconds::default(),
                 source_revision: 0,
-                since_modified: Default::default(),
+                since_modified: ElapsedTime::default(),
                 size: 0,
             },
             dir,
@@ -336,9 +333,9 @@ impl TryFrom<std::fs::DirEntry> for DirEntry {
         let sort_key = SortKey::new_path(&file_name, file_type.is_file());
         Ok(Self {
             meta,
+            sort_key,
             dir,
             file_name,
-            sort_key,
         })
     }
 }
@@ -372,6 +369,7 @@ impl DirList {
     }
 
     #[inline]
+    #[must_use]
     pub fn from_content(content: &DirContent) -> Self {
         Self::new(Arc::from(content.path.as_str()), content.entries.clone())
     }
@@ -392,7 +390,7 @@ impl DirList {
     /// Number of entries passing the current filter.
     #[inline]
     #[must_use]
-    pub fn visible_count(&self) -> usize {
+    pub const fn visible_count(&self) -> usize {
         self.visible.len()
     }
 
@@ -418,6 +416,7 @@ impl DirList {
     /// is replaced by a single shared `Arc<str>`. Returns `None` for an empty
     /// list. Index order is preserved, so indices computed against `list`
     /// remain valid against [`Self::entries`] / [`Self::materialize`].
+    #[must_use]
     pub fn from_owned_list(list: Vec<DirEntry>) -> Option<Self> {
         let dir = list.first()?.dir.clone();
         let entries: Vec<DirEntryData> = list
@@ -433,6 +432,7 @@ impl DirList {
 
     /// Build a `DirList` from an already-sorted `Vec<DirEntry>`.
     /// All entries MUST share the same `dir` prefix.
+    #[must_use]
     pub fn from_sorted_list(list: &[DirEntry]) -> Option<Self> {
         let dir = list.first()?.dir.clone();
         let entries: Vec<DirEntryData> = list
@@ -447,6 +447,7 @@ impl DirList {
     }
 
     /// Build a sorted `DirList` from a raw `DirContent`.
+    #[must_use]
     pub fn from_sorted_content(content: &DirContent) -> Self {
         let mut dl = Self::from_content(content);
         dl.sorted = (0..dl.entries.len()).collect();
@@ -471,9 +472,9 @@ impl TryFrom<walkdir::DirEntry> for DirEntry {
         let sort_key = SortKey::new_path(&file_name, meta.entry_type.eq(&EntryType::File));
         Ok(Self {
             meta,
+            sort_key,
             dir,
             file_name,
-            sort_key,
         })
     }
 }

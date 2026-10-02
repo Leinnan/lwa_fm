@@ -3,7 +3,7 @@ use crate::app::commands::{COMMANDS_QUEUE, TabAction, TabTarget};
 use crate::app::directory_path_info::DirectoryPathInfo;
 use crate::app::directory_view_settings::DirectoryViewSettings;
 use crate::app::dock::CurrentPath;
-use crate::data::files::{DirEntry, DirList};
+use crate::data::files::DirEntry;
 use crate::helper::{DataHolder, KeyWithCommandPressed};
 use crate::locations::Locations;
 use crate::watcher::DirectoryWatchers;
@@ -116,6 +116,80 @@ pub struct App {
 }
 
 impl App {
+    fn render_modal(&mut self, ctx: &egui::Context) {
+        if let Some(modal) = &self.display_modal {
+            match modal {
+                ModalWindow::Settings => {
+                    self.settings.display(ctx);
+                }
+                ModalWindow::Commands => {
+                    self.command_palette.ui(ctx);
+                } // ModalWindow::NewDirectory => todo!(),
+                ModalWindow::Rename => {
+                    let modal_response =
+                        egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(ctx, |ui| {
+                            ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 420.0));
+                            ui.heading("Rename");
+                            ui::section(ui, "File name");
+                            ui.label("Old name");
+                            let (old, mut name) = ui.data_mut(|d| {
+                                let old =
+                                    d.get_temp::<DirEntry>(egui::Id::new(ModalWindow::Rename));
+                                let new = d
+                                    .get_temp::<String>(
+                                        egui::Id::new(ModalWindow::Rename).with("new"),
+                                    )
+                                    .unwrap_or_else(|| {
+                                        old.as_ref()
+                                            .map(|d| d.get_splitted_path().1.to_string())
+                                            .unwrap_or_default()
+                                    });
+                                (old, new)
+                            });
+                            let Some(old) = old else {
+                                return;
+                            };
+                            let mut old_file_name = old.get_splitted_path().1.to_string();
+                            ui.add_enabled(false, egui::TextEdit::singleline(&mut old_file_name));
+                            ui.label("New name");
+                            ui.text_edit_singleline(&mut name);
+                            let valid = !Path::new(&name).try_exists().is_ok_and(|f| f);
+                            if ui.add_enabled(valid, egui::Button::new("Rename")).clicked() {
+                                if fs::rename(
+                                    old.get_path(),
+                                    Path::new(old.get_splitted_path().0).join(&name),
+                                )
+                                .is_ok()
+                                {
+                                    crate::app::database::invalidate_dir(Path::new(
+                                        old.get_splitted_path().0,
+                                    ));
+                                    TabAction::RequestFilesRefresh.schedule_active_tab();
+                                }
+                                ui.data_mut(|w| {
+                                    w.remove_temp::<String>(
+                                        egui::Id::new(ModalWindow::Rename).with("new"),
+                                    )
+                                });
+                                ui.close();
+                            } else {
+                                ui.data_mut(|w| {
+                                    w.insert_temp(
+                                        egui::Id::new(ModalWindow::Rename).with("new"),
+                                        name.clone(),
+                                    );
+                                });
+                            }
+                        });
+
+                    if modal_response.should_close() {
+                        ActionToPerform::CloseActiveModalWindow.schedule();
+                    }
+                }
+            }
+        }
+    }
+
     fn reconcile_tab_watchers(&mut self, tab_id: u32) {
         let (old_watcher_specs, new_watcher_specs) = {
             let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
@@ -123,7 +197,7 @@ impl App {
             };
             let old_watcher_specs = tab.active_watch_specs.clone();
             let new_watcher_specs = tab.watcher_specs();
-            tab.active_watch_specs = new_watcher_specs.clone();
+            tab.active_watch_specs.clone_from(&new_watcher_specs);
             (old_watcher_specs, new_watcher_specs)
         };
 
@@ -167,6 +241,7 @@ impl App {
     }
 
     fn process_file_system_changes(&mut self, ctx: &egui::Context) {
+        const STRUCTURAL_COALESCE: Duration = Duration::from_millis(150);
         self.watchers.check_for_new_watchers();
 
         let changes = self.watchers.check_for_file_system_events();
@@ -178,7 +253,6 @@ impl App {
         // so a burst (git checkout, npm install) collapses into one refresh per
         // tab instead of one per frame. Modified-file changes above are handled
         // independently and stay near-instant.
-        const STRUCTURAL_COALESCE: Duration = Duration::from_millis(150);
         for dir in changes
             .structural_dirs
             .iter()
@@ -191,9 +265,8 @@ impl App {
         let ready_structural: BTreeSet<PathBuf> = self
             .pending_structural_dirs
             .iter()
-            .filter_map(|(dir, first_seen)| {
-                (now.duration_since(*first_seen) >= STRUCTURAL_COALESCE).then(|| dir.clone())
-            })
+            .filter(|&(_dir, first_seen)| now.duration_since(*first_seen) >= STRUCTURAL_COALESCE)
+            .map(|(dir, _first_seen)| dir.clone())
             .collect();
         for dir in &ready_structural {
             self.pending_structural_dirs.remove(dir);
@@ -312,13 +385,6 @@ pub enum DisplayType {
     #[default]
     List,
     Icons,
-}
-
-impl DisplayType {
-    /// returns if it is a list
-    pub const fn is_list(&self) -> bool {
-        matches!(self, Self::List)
-    }
 }
 
 #[derive(Deserialize, Serialize, Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,7 +669,7 @@ impl App {
                             }
                             dirs
                         };
-                        crate::app::database::invalidate_dirs(force_dirs.into_iter());
+                        crate::app::database::invalidate_dirs(force_dirs);
                         // Fall through to normal refresh
                         self.handle_action(
                             ctx,
@@ -1133,77 +1199,7 @@ impl eframe::App for App {
             TabAction::ForceRefresh.schedule_active_tab();
         }
 
-        if let Some(modal) = &self.display_modal {
-            match modal {
-                ModalWindow::Settings => {
-                    self.settings.display(&ctx);
-                }
-                ModalWindow::Commands => {
-                    self.command_palette.ui(&ctx);
-                } // ModalWindow::NewDirectory => todo!(),
-                ModalWindow::Rename => {
-                    let modal_response =
-                        egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(&ctx, |ui| {
-                            ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 420.0));
-                            ui.heading("Rename");
-                            ui::section(ui, "File name");
-                            ui.label("Old name");
-                            let (old, mut name) = ui.data_mut(|d| {
-                                let old =
-                                    d.get_temp::<DirEntry>(egui::Id::new(ModalWindow::Rename));
-                                let new = d
-                                    .get_temp::<String>(
-                                        egui::Id::new(ModalWindow::Rename).with("new"),
-                                    )
-                                    .unwrap_or_else(|| {
-                                        old.as_ref()
-                                            .map(|d| d.get_splitted_path().1.to_string())
-                                            .unwrap_or_default()
-                                    });
-                                (old, new)
-                            });
-                            let Some(old) = old else {
-                                return;
-                            };
-                            let mut old_file_name = old.get_splitted_path().1.to_string();
-                            ui.add_enabled(false, egui::TextEdit::singleline(&mut old_file_name));
-                            ui.label("New name");
-                            ui.text_edit_singleline(&mut name);
-                            let valid = !Path::new(&name).try_exists().is_ok_and(|f| f);
-                            if ui.add_enabled(valid, egui::Button::new("Rename")).clicked() {
-                                if fs::rename(
-                                    old.get_path(),
-                                    Path::new(old.get_splitted_path().0).join(&name),
-                                )
-                                .is_ok()
-                                {
-                                    crate::app::database::invalidate_dir(Path::new(
-                                        old.get_splitted_path().0,
-                                    ));
-                                    TabAction::RequestFilesRefresh.schedule_active_tab();
-                                }
-                                ui.data_mut(|w| {
-                                    w.remove_temp::<String>(
-                                        egui::Id::new(ModalWindow::Rename).with("new"),
-                                    )
-                                });
-                                ui.close();
-                            } else {
-                                ui.data_mut(|w| {
-                                    w.insert_temp(
-                                        egui::Id::new(ModalWindow::Rename).with("new"),
-                                        name.clone(),
-                                    );
-                                });
-                            }
-                        });
-
-                    if modal_response.should_close() {
-                        ActionToPerform::CloseActiveModalWindow.schedule();
-                    }
-                }
-            }
-        }
+        self.render_modal(&ctx);
 
         #[cfg(feature = "profiling")]
         {

@@ -241,6 +241,7 @@ impl TabData {
         }
     }
 
+    #[cfg(test)]
     pub fn update_file_metadata(
         &mut self,
         path: &Path,
@@ -378,6 +379,7 @@ impl TabData {
     /// re-read. Only the lazy single-directory listing (`dir_list`) supports
     /// this; search / multi-directory / recursive views return `false` so the
     /// caller can fall back to a structural refresh. Returns `true` if applied.
+    #[cfg(test)]
     pub fn insert_file_entry(
         &mut self,
         path: &Path,
@@ -428,6 +430,7 @@ impl TabData {
 
     /// Surgically remove a deleted file entry without a full directory re-read.
     /// Same scoping rules as [`insert_file_entry`]; returns `true` if removed.
+    #[cfg(test)]
     pub fn remove_file_entry(
         &mut self,
         path: &Path,
@@ -680,22 +683,6 @@ enum CompiledTerm {
     Plain(String),
     Glob(glob::Pattern),
     Regex(regex::Regex),
-}
-
-impl CompiledTerm {
-    fn matches(&self, name: &str, case_sensitive: bool) -> bool {
-        match self {
-            Self::Plain(pattern) => {
-                if case_sensitive {
-                    name.contains(pattern.as_str())
-                } else {
-                    name.to_lowercase().contains(pattern.as_str())
-                }
-            }
-            Self::Glob(pattern) => pattern.matches(name),
-            Self::Regex(re) => re.is_match(name),
-        }
-    }
 }
 
 fn compile_term(
@@ -970,10 +957,7 @@ pub fn get_directories_recursive(
 
 #[cfg(test)]
 mod tests {
-    use rayon::{
-        iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
-        slice::ParallelSliceMut,
-    };
+    use rayon::slice::ParallelSliceMut;
 
     use crate::app::dock::TabData;
     use crate::data::files::{DirEntry, DirList};
@@ -1267,13 +1251,19 @@ mod tests {
 
     #[test]
     fn search_depth_clamps_to_one() {
-        assert_eq!(0usize.max(1), 1, "depth 0 should clamp to 1");
-        assert_eq!(1usize.max(1), 1, "depth 1 should stay 1");
-        assert_eq!(3usize.max(1), 3, "depth 3 should stay 3");
+        let mut tab = TabData::from_path(std::path::Path::new("/virtual"));
+        assert_eq!(tab.search_depth(), 1, "no search should use depth 1");
+        for (depth, expected) in [(0, 1), (1, 1), (3, 3)] {
+            tab.search = Some(Search {
+                depth,
+                ..Default::default()
+            });
+            assert_eq!(tab.search_depth(), expected, "unexpected depth for {depth}");
+        }
     }
 
     /// Build a file entry with explicit size and modification/creation times so
-    /// the numeric sort keys can be exercised (DirEntry::test_new zeroes them).
+    /// the numeric sort keys can be exercised (`DirEntry::test_new` zeroes them).
     fn entry_with(name: &str, size: u64, modified: u32, created: u32) -> DirEntry {
         use crate::data::time::TimestampSeconds;
         let mut entry = DirEntry::test_new(&format!("/d/{name}"));

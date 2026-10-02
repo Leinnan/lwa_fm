@@ -430,7 +430,7 @@ impl Widget for ScrollableLabel {
                 };
 
                 let underline = if response.has_focus() || response.highlighted() {
-                    Stroke::new(1.0, response_color)
+                    Stroke::new(1.0_f32, response_color)
                 } else {
                     Stroke::NONE
                 };

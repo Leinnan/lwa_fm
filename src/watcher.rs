@@ -163,10 +163,10 @@ impl DirectoryWatchers {
         }
     }
 
-    pub fn start(&mut self, path: PathBuf, mode: RecursiveMode) {
+    pub fn start(&mut self, path: &Path, mode: RecursiveMode) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::DirectoryWatchers::start");
-        let path = normalize_path(&path);
+        let path = normalize_path(path);
         if let Some(watched) = self.watchers.get_mut(&path) {
             watched.ref_count += 1;
             return;
@@ -208,7 +208,7 @@ impl DirectoryWatchers {
 
     pub fn start_many(&mut self, paths: impl IntoIterator<Item = (PathBuf, RecursiveMode)>) {
         for (path, mode) in paths {
-            self.start(path, mode);
+            self.start(&path, mode);
         }
     }
 
@@ -367,8 +367,7 @@ impl DirectoryWatcher {
     pub fn watch_directory<P: AsRef<Path>>(&mut self, path: P, mode: RecursiveMode) -> Result<()> {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::watch_directory");
-        let path = path.as_ref().to_path_buf();
-        let path = normalize_path(&path);
+        let path = normalize_path(path.as_ref());
 
         self.watcher
             .watch(&path, mode)
@@ -422,19 +421,9 @@ impl DirectoryWatcher {
                 file_changes: file_changes_from(paths, FileChange::Created),
                 ..Default::default()
             },
-            // A new folder may pull in a whole subtree: structural refresh.
-            EventKind::Create(CreateKind::Folder) => FileSystemChanges {
-                structural_dirs: parent_dirs_for_paths(paths),
-                ..Default::default()
-            },
             // A deleted file: can be removed surgically once the handler is wired.
             EventKind::Remove(RemoveKind::File) => FileSystemChanges {
                 file_changes: file_changes_from(paths, FileChange::Removed),
-                ..Default::default()
-            },
-            // A deleted folder may take a subtree with it: structural refresh.
-            EventKind::Remove(RemoveKind::Folder) => FileSystemChanges {
-                structural_dirs: parent_dirs_for_paths(paths),
                 ..Default::default()
             },
             // Rename "From" half. The source path is gone regardless of whether
@@ -488,7 +477,10 @@ impl DirectoryWatcher {
                 file_changes: file_changes_from(paths, FileChange::Metadata),
                 ..Default::default()
             },
-            EventKind::Modify(ModifyKind::Name(_) | ModifyKind::Any | ModifyKind::Other)
+            // Folder changes and ambiguous events require a structural refresh.
+            EventKind::Create(CreateKind::Folder)
+            | EventKind::Remove(RemoveKind::Folder)
+            | EventKind::Modify(ModifyKind::Name(_) | ModifyKind::Any | ModifyKind::Other)
             | EventKind::Any => FileSystemChanges {
                 structural_dirs: parent_dirs_for_paths(paths),
                 ..Default::default()
@@ -578,7 +570,7 @@ mod tests {
                 Path::new("/tmp/from.txt").into(),
                 Path::new("/tmp/to.txt").into(),
             ],
-            attrs: Default::default(),
+            attrs: notify::event::EventAttributes::default(),
         };
 
         let mut pending = HashMap::new();
@@ -596,7 +588,7 @@ mod tests {
         let event = Event {
             kind: EventKind::Modify(ModifyKind::Name(RenameMode::To)),
             paths: vec![Path::new("/tmp/to.txt").into()],
-            attrs: Default::default(),
+            attrs: notify::event::EventAttributes::default(),
         };
 
         let mut pending = HashMap::new();

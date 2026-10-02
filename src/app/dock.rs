@@ -35,7 +35,7 @@ use crate::app::dir_handling::WatcherSpecsCache;
 use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
 use crate::app::top_bottom::TopDisplayPath;
 use crate::app::{DisplayType, LUA_INSTANCE, Search, Sort};
-use crate::data::files::{DirEntry, DirList, EntryType};
+use crate::data::files::{DirEntry, DirList};
 use crate::data::time::ElapsedTime;
 use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer, PathHelper};
 use crate::locations::Locations;
@@ -62,7 +62,7 @@ pub fn populate_time_pool(components: impl Iterator<Item = ElapsedTime>, ui: &Co
             )))
             .into_galley_impl(
                 ui,
-                &ui.style(),
+                &ui.global_style(),
                 TextWrapping::default(),
                 FontSelection::Default,
                 egui::Align::Center,
@@ -150,7 +150,7 @@ fn file_name_galley(ui: &Ui, name: &str, is_dir: bool) -> Arc<Galley> {
         )))
         .into_galley_impl(
             ui.ctx(),
-            &ui.style(),
+            ui.style(),
             TextWrapping::default(),
             FontSelection::Default,
             egui::Align::Center,
@@ -208,7 +208,7 @@ fn indexed_hint_galley(ui: &Ui, n: u8) -> Arc<Galley> {
                 )))
                 .into_galley_impl(
                     ui.ctx(),
-                    &ui.style(),
+                    ui.style(),
                     TextWrapping::default(),
                     FontSelection::Default,
                     egui::Align::Center,
@@ -233,7 +233,7 @@ fn directory_prefix_galley(ui: &Ui, dir: &str) -> Arc<Galley> {
         )))
         .into_galley_impl(
             ui.ctx(),
-            &ui.style(),
+            ui.style(),
             TextWrapping::default(),
             FontSelection::Default,
             egui::Align::Center,
@@ -256,7 +256,7 @@ pub fn populate_sizes_pool(components: impl Iterator<Item = u64>, ui: &Context) 
             )))
             .into_galley_impl(
                 ui,
-                &ui.style(),
+                &ui.global_style(),
                 TextWrapping::default(),
                 FontSelection::Default,
                 egui::Align::Center,
@@ -533,40 +533,10 @@ impl TabData {
     /// populated store and the entry is cloned from it.
     pub fn entry_at(&self, visible_row: usize) -> Option<DirEntry> {
         let data_idx = *self.visible_entries.get(visible_row)?;
-        match &self.dir_list {
-            Some(dl) => Some(dl.materialize(data_idx)),
-            None => self.list.get(data_idx).cloned(),
-        }
-    }
-
-    /// File name + "is directory" flag for the visible entry at `visible_row`,
-    /// without materialising a full [`DirEntry`] (avoids cloning the sort key,
-    /// which the file-name galley pool does not need).
-    pub fn visible_name_and_type(&self, visible_row: usize) -> Option<(&str, bool)> {
-        let data_idx = *self.visible_entries.get(visible_row)?;
-        if let Some(dl) = &self.dir_list {
-            let data = &dl.entries[data_idx];
-            Some((
-                &data.file_name,
-                !matches!(data.meta.entry_type, EntryType::File),
-            ))
-        } else {
-            let entry = self.list.get(data_idx)?;
-            Some((entry.get_splitted_path().1, !entry.is_file()))
-        }
-    }
-
-    /// Directory prefix for the visible entry at `visible_row`, without
-    /// materialising a full [`DirEntry`]. For a single-directory view every row
-    /// shares the same prefix; for search / multi-directory reads each row may
-    /// differ.
-    pub fn visible_dir_prefix(&self, visible_row: usize) -> Option<&str> {
-        let data_idx = *self.visible_entries.get(visible_row)?;
-        if let Some(dl) = &self.dir_list {
-            Some(dl.dir.as_ref())
-        } else {
-            self.list.get(data_idx).map(|e| e.dir.as_ref())
-        }
+        self.dir_list.as_ref().map_or_else(
+            || self.list.get(data_idx).cloned(),
+            |list| Some(list.materialize(data_idx)),
+        )
     }
 
     pub fn total_entry_count(&self) -> usize {
@@ -682,9 +652,7 @@ impl MyTabViewer<'_> {
             ActionToPerform::ViewSettingsChanged(super::DataSource::Local).schedule();
         }
         if self.focused && ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
-            let Some(parent) = tab.current_path.parent() else {
-                return None;
-            };
+            let parent = tab.current_path.parent()?;
             TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
             return None;
         }
@@ -860,9 +828,11 @@ impl MyTabViewer<'_> {
         }
     }
 
+    // Keep the virtualized grid layout together, as in the icon view.
+    #[allow(clippy::too_many_lines)]
     fn list_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
         ensure_text_cache_style(ui);
-        let ViewHeader {
+        let Some(ViewHeader {
             cmd,
             shift_pressed,
             tab_id,
@@ -871,9 +841,9 @@ impl MyTabViewer<'_> {
             opened_popup,
             just_changed,
             favorites,
-        } = match self.begin_view(ui, tab) {
-            Some(h) => h,
-            None => return,
+        }) = self.begin_view(ui, tab)
+        else {
+            return;
         };
 
         let is_searching = tab.is_searching();
@@ -911,8 +881,8 @@ impl MyTabViewer<'_> {
                 bottom: LengthPercentageAuto::ZERO,
             },
             flex_direction: taffy::FlexDirection::Column,
-            size: percent(1.),
-            max_size: percent(1.),
+            size: percent(1_f32),
+            max_size: percent(1_f32),
             ..Default::default()
         })
         .show(|tui| {
@@ -936,12 +906,12 @@ impl MyTabViewer<'_> {
                     bottom: LengthPercentage::ZERO,
                 },
                 // 3 columns: Name (1fr, fills remaining), Modified (fixed), Size (fixed)
-                grid_template_columns: vec![fr(1.), length(COL_MODIFIED_W), length(COL_SIZE_W)],
+                grid_template_columns: vec![fr(1_f32), length(COL_MODIFIED_W), length(COL_SIZE_W)],
                 size: taffy::Size {
-                    width: percent(1.),
+                    width: percent(1_f32),
                     height: auto(),
                 },
-                max_size: percent(1.),
+                max_size: percent(1_f32),
                 grid_auto_rows: vec![min_content()],
                 ..Default::default()
             })
@@ -982,7 +952,7 @@ impl MyTabViewer<'_> {
                         };
                         let height = length(text_height);
                         let min_size = taffy::Size {
-                            width: length(0.0),
+                            width: length(0.0_f32),
                             height,
                         };
 
@@ -1012,7 +982,7 @@ impl MyTabViewer<'_> {
                                                 top: LengthPercentage::ZERO,
                                                 bottom: LengthPercentage::ZERO,
                                             };
-                                        style.size.width = percent(1.);
+                                        style.size.width = percent(1_f32);
                                         style.overflow.x = taffy::Overflow::Hidden;
                                         style.align_items =
                                             Some(taffy::AlignItems::Center);
@@ -1147,7 +1117,7 @@ impl MyTabViewer<'_> {
                                 },
                                 |tui, ()| {
                                     tui.mut_style(|style| {
-                                        style.size.width = percent(1.);
+                                        style.size.width = percent(1_f32);
                                     })
                                     .ui(|ui: &mut Ui| {
                                         #[cfg(feature = "profiling")]
@@ -1207,7 +1177,7 @@ impl MyTabViewer<'_> {
                                 },
                                 |tui, ()| {
                                     tui.mut_style(|style| {
-                                        style.size.width = percent(1.);
+                                        style.size.width = percent(1_f32);
                                     })
                                     .ui(|ui: &mut Ui| {
                                         #[cfg(feature = "profiling")]
@@ -1269,17 +1239,17 @@ impl MyTabViewer<'_> {
                     .mut_style(|style| {
                         style.grid_row = style_helpers::line(1);
                         style.grid_column = line(1);
-                        style.padding = length(4.);
+                        style.padding = length(4_f32);
                         style.align_items = Some(taffy::AlignItems::Center);
                         // Allow the Name cell to shrink with the column but
                         // never below zero; text uses Extend so it is never
                         // clipped to "…" regardless of the measured width.
-                        style.min_size.width = length(0.0);
+                        style.min_size.width = length(0.0_f32);
                         style.overflow.x = taffy::Overflow::Hidden;
                     })
                     .add_with_background_color(|tui| {
                         tui.mut_style(|style| {
-                            style.size.width = percent(1.);
+                            style.size.width = percent(1_f32);
                             style.overflow.x = taffy::Overflow::Hidden;
                         })
                         .ui(|ui: &mut Ui| {
@@ -1304,7 +1274,7 @@ impl MyTabViewer<'_> {
                     .mut_style(|style| {
                         style.grid_row = style_helpers::line(1);
                         style.grid_column = line(2);
-                        style.padding = length(4.);
+                        style.padding = length(4_f32);
                         style.align_items = Some(taffy::AlignItems::Center);
                         style.justify_content = Some(taffy::JustifyContent::FlexEnd);
                         style.size = taffy::Size {
@@ -1322,7 +1292,7 @@ impl MyTabViewer<'_> {
                     })
                     .add_with_background_color(|tui| {
                         tui.mut_style(|style| {
-                            style.size.width = percent(1.);
+                            style.size.width = percent(1_f32);
                         })
                         .ui(|ui: &mut Ui| {
                             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1345,7 +1315,7 @@ impl MyTabViewer<'_> {
                     .mut_style(|style| {
                         style.grid_row = style_helpers::line(1);
                         style.grid_column = line(3);
-                        style.padding = length(4.);
+                        style.padding = length(4_f32);
                         style.align_items = Some(taffy::AlignItems::Center);
                         style.justify_content = Some(taffy::JustifyContent::FlexEnd);
                         style.size = taffy::Size {
@@ -1363,7 +1333,7 @@ impl MyTabViewer<'_> {
                     })
                     .add_with_background_color(|tui| {
                         tui.mut_style(|style| {
-                            style.size.width = percent(1.);
+                            style.size.width = percent(1_f32);
                         })
                         .ui(|ui: &mut Ui| {
                             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1634,7 +1604,7 @@ impl MyTabViewer<'_> {
 
     #[allow(clippy::too_many_arguments)]
     fn process_grid_interactions(
-        &mut self,
+        &self,
         ui: &Ui,
         tab: &TabData,
         selected_tabs: &mut Selected,
@@ -1739,14 +1709,14 @@ impl MyTabViewer<'_> {
                             for other in matching_dirs {
                                 let other = PathBuf::from(
                                     std::fs::canonicalize(other)
-                                        .unwrap_or_else(|_| val.get_path().to_path_buf())
+                                        .unwrap_or_else(|_| val.get_path())
                                         .to_fixed_string(),
                                 );
 
                                 if ui
                                     .button(format!(
                                         "{}",
-                                        &other.file_name().expect("Failed").to_string_lossy()
+                                        other.file_name().expect("Failed").to_string_lossy()
                                     ))
                                     .on_hover_text(other.display().to_string())
                                     .clicked()
@@ -1755,7 +1725,7 @@ impl MyTabViewer<'_> {
                                     let filename =
                                         path.file_name().expect("NO FILENAME").to_os_string();
                                     let target_path = other.join(&filename);
-                                    println!("{}", &target_path.display());
+                                    println!("{}", target_path.display());
                                     let move_result = fs::rename(&path, &target_path);
                                     let mut success = move_result.is_ok();
                                     let _ = move_result.inspect_err(|e| {
@@ -1980,7 +1950,7 @@ impl TabViewer for MyTabViewer<'_> {
         if tab.is_searching() {
             tab.search
                 .as_ref()
-                .map(|s| format!("Searching: {}", &s.value))
+                .map(|s| format!("Searching: {}", s.value))
                 .unwrap_or_default()
                 .into()
         } else {
@@ -2083,16 +2053,6 @@ impl MyTabs {
 
     pub fn get_current_index(&mut self) -> Option<u32> {
         self.get_current_tab().map(|tab| tab.id)
-    }
-
-    #[inline]
-    pub fn try_get_tab_by_target(&mut self, target: TabTarget) -> Option<&mut TabData> {
-        let tab_id = match target {
-            TabTarget::ActiveTab => self.get_current_index(),
-            TabTarget::TabWithId(id) => Some(id),
-            TabTarget::AllTabs => None,
-        }?;
-        self.get_tab_by_id(tab_id)
     }
 
     pub fn has_loading(&mut self) -> bool {
@@ -2261,7 +2221,7 @@ pub mod tests {
     fn make_entries() -> Vec<DirEntry> {
         std::fs::read_dir("src")
             .expect("src/ must exist")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter_map(|e| DirEntry::try_from(e).ok())
             .take(20)
             .collect()
@@ -2329,7 +2289,7 @@ pub mod tests {
     fn grid_entries() -> Vec<DirEntry> {
         let mut entries: Vec<_> = std::fs::read_dir(fixture_root())
             .expect("grid fixture root must exist")
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .filter_map(|entry| DirEntry::try_from(entry).ok())
             .collect();
         entries.sort_by(|left, right| left.get_splitted_path().1.cmp(right.get_splitted_path().1));
@@ -2393,21 +2353,28 @@ pub mod tests {
 
     /// Draw one frame of the dock view, seeding galley pools and draining commands.
     fn draw_frame(
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         my_tabs: &mut MyTabs,
         assets: &RefCell<crate::app::assets::AssetManager>,
     ) {
-        draw_frame_with_selection(ctx, my_tabs, None, assets);
+        draw_frame_with_selection(ui, my_tabs, None, assets);
     }
 
     fn draw_frame_with_selection(
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         my_tabs: &mut MyTabs,
         selected_fields: Option<&[usize]>,
         assets: &RefCell<crate::app::assets::AssetManager>,
     ) {
-        crate::app::ui::configure(ctx);
+        let ctx = ui.ctx().clone();
+        crate::app::ui::configure(&ctx);
         ctx.set_theme(egui::Theme::Dark);
+        // The UI harness adds an outer margin; paint it like the full-window panel.
+        ui.painter().with_clip_rect(ctx.content_rect()).rect_filled(
+            ctx.content_rect(),
+            0.0,
+            ctx.global_style().visuals.panel_fill,
+        );
         FILE_NAME_POOL.with_borrow_mut(LruCache::clear);
         FOLDER_NAME_POOL.with_borrow_mut(LruCache::clear);
         DIR_POOL.with_borrow_mut(LruCache::clear);
@@ -2416,8 +2383,8 @@ pub mod tests {
         INDEXED_GALLEYS.with_borrow_mut(|cache| cache.fill(None));
         TEXT_CACHE_STYLE.with_borrow_mut(|style| *style = None);
         let mut assets = assets.borrow_mut();
-        assets.poll_results(ctx);
-        egui::CentralPanel::default().show(ctx, |ui| {
+        assets.poll_results(&ctx);
+        {
             if let Some(indices) = selected_fields {
                 let current_path = my_tabs
                     .get_current_tab()
@@ -2433,8 +2400,8 @@ pub mod tests {
                 );
             }
             my_tabs.ui(ui, &mut assets);
-        });
-        assets.wait_for_idle(ctx);
+        }
+        assets.wait_for_idle(&ctx);
 
         // Drain the command queue so it does not fill up across frames.
         while crate::app::commands::COMMANDS_QUEUE.pop().is_some() {}
@@ -2455,8 +2422,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(900.0, 500.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 populated_tabs_from_entries(entries, DisplayType::List),
             );
 
@@ -2480,8 +2447,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(900.0, 500.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 populated_tabs(),
             );
 
@@ -2503,8 +2470,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(350.0, 500.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 populated_tabs(),
             );
 
@@ -2524,8 +2491,8 @@ pub mod tests {
         let all: Vec<DirEntry> = entries
             .iter()
             .chain(entries.iter())
-            .cloned()
             .take(20)
+            .cloned()
             .collect();
 
         let path = std::path::Path::new("src");
@@ -2540,8 +2507,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(400.0, 600.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 my_tabs,
             );
 
@@ -2565,8 +2532,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(700.0, 400.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 my_tabs,
             );
 
@@ -2582,8 +2549,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(960.0, 620.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 populated_tabs_from_entries(grid_entries(), DisplayType::Icons),
             );
 
@@ -2599,8 +2566,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(420.0, 620.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 populated_tabs_from_entries(grid_entries(), DisplayType::Icons),
             );
 
@@ -2616,8 +2583,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(620.0, 700.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 populated_tabs_from_entries(long_name_entries(), DisplayType::Icons),
             );
 
@@ -2633,8 +2600,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(820.0, 520.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 populated_tabs_from_entries(mixed_thumbnail_entries(), DisplayType::Icons),
             );
 
@@ -2657,8 +2624,8 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(720.0, 420.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| draw_frame(ctx, my_tabs, &assets),
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
                 my_tabs,
             );
 
@@ -2674,9 +2641,9 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(960.0, 620.0))
-            .build_state(
-                |ctx, my_tabs: &mut MyTabs| {
-                    draw_frame_with_selection(ctx, my_tabs, Some(&[2]), &assets)
+            .build_ui_state(
+                |ui, my_tabs: &mut MyTabs| {
+                    draw_frame_with_selection(ui, my_tabs, Some(&[2]), &assets);
                 },
                 populated_tabs_from_entries(grid_entries(), DisplayType::Icons),
             );
