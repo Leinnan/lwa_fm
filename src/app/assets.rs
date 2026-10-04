@@ -1,6 +1,9 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet, hash_map::DefaultHasher};
+#[cfg(target_os = "macos")]
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
@@ -48,9 +51,10 @@ const MAX_STATIC_TEXTURES_PER_FRAME: usize = 3;
 const MAX_RESULTS_PER_FRAME: usize = 64;
 const MAX_ASSET_JOBS: usize = 512;
 const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
+static QUEUE_WAIT_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // Failure backoff: first retry after `ICON_RETRY_BASE_SECS`, doubling on each
-// consecutive failure. Only invalid media and fixed resource-limit failures
+// consecutive failure. Only invalid/unsupported media and fixed resource-limit failures
 // become permanent after three attempts. Missing tools and timeouts can recover.
 const ICON_RETRY_BASE_SECS: u64 = 30;
 const ICON_RETRY_MAX_TRIES: u32 = 3;
@@ -284,6 +288,7 @@ enum AssetJob {
         source_size: u64,
         request_id: u64,
         target_edge: u32,
+        cache_checked: bool,
         cancel: Arc<AtomicBool>,
     },
     SystemIcon {
@@ -387,6 +392,8 @@ struct JobSchedulerState {
     next_order: u64,
     closed: bool,
     running: HashMap<(String, u64), AssetJobClass>,
+    classes: HashMap<String, (u64, AssetJobClass)>,
+    priority_rebuilds: u64,
 }
 
 #[derive(Debug, Default)]
@@ -431,6 +438,7 @@ impl JobScheduler {
                         drop(state);
                         return result;
                     }
+                    state.classes.remove(&worst_key);
                     let mut removed = false;
                     let entries = state.queue.drain().filter(|entry| {
                         if !removed && entry.job.request_key() == worst_key {
@@ -447,6 +455,9 @@ impl JobScheduler {
                     return result;
                 }
             }
+            state
+                .classes
+                .insert(job.request_key().to_owned(), (job.request_id(), class));
             state.queue.push(HeapEntry {
                 priority: JobPriority(rank, order),
                 enqueued_at: Instant::now(),
@@ -487,6 +498,14 @@ impl JobScheduler {
 
     fn reprioritize(&self, request_key: &str, class: AssetJobClass) {
         let mut state = self.state.lock().expect("job scheduler mutex poisoned");
+        let Some((_, previous)) = state.classes.get_mut(request_key) else {
+            return;
+        };
+        if *previous == class {
+            return;
+        }
+        *previous = class;
+        state.priority_rebuilds += 1;
         for ((key, _), running_class) in &mut state.running {
             if key == request_key {
                 *running_class = class;
@@ -509,6 +528,9 @@ impl JobScheduler {
         }
         let mut state = self.state.lock().expect("job scheduler mutex poisoned");
         let mut removed = Vec::new();
+        for key in request_keys {
+            state.classes.remove(key);
+        }
         let entries = state.queue.drain().filter(|entry| {
             if request_keys.contains(entry.job.request_key()) {
                 removed.push(entry.job.request_key().to_owned());
@@ -542,6 +564,10 @@ impl JobScheduler {
             entry.class,
         );
         drop(state);
+        QUEUE_WAIT_MICROS.fetch_add(
+            entry.enqueued_at.elapsed().as_micros() as u64,
+            AtomicOrdering::Relaxed,
+        );
         #[cfg(not(feature = "profiling"))]
         let _queue_delay = entry.enqueued_at.elapsed();
         #[cfg(feature = "profiling")]
@@ -552,11 +578,39 @@ impl JobScheduler {
         Some(entry)
     }
     fn finish(&self, identity: &(String, u64)) -> Option<AssetJobClass> {
-        self.state
-            .lock()
-            .expect("scheduler state")
-            .running
-            .remove(identity)
+        let mut state = self.state.lock().expect("scheduler state");
+        if state
+            .classes
+            .get(&identity.0)
+            .is_some_and(|(id, _)| *id == identity.1)
+        {
+            state.classes.remove(&identity.0);
+        }
+        state.running.remove(identity)
+    }
+    fn transfer(&self, mut entry: HeapEntry) -> bool {
+        let mut state = self.state.lock().expect("scheduler transfer");
+        if state.closed || state.queue.len() + state.running.len() >= MAX_ASSET_JOBS {
+            return false;
+        }
+        entry.priority = JobPriority(
+            job_rank(
+                entry.class,
+                entry.directory.as_deref(),
+                state.active_directory.as_deref(),
+            ),
+            state.next_order,
+        );
+        state.next_order = state.next_order.wrapping_add(1);
+        entry.enqueued_at = Instant::now();
+        state.classes.insert(
+            entry.job.request_key().to_owned(),
+            (entry.job.request_id(), entry.class),
+        );
+        state.queue.push(entry);
+        drop(state);
+        self.has_jobs.notify_one();
+        true
     }
     fn resume(&self, mut entry: HeapEntry) {
         let identity = (entry.job.request_key().to_owned(), entry.job.request_id());
@@ -570,6 +624,10 @@ impl JobScheduler {
             entry.directory.as_deref(),
             state.active_directory.as_deref(),
         );
+        if matches!(&entry.job, AssetJob::AnimatedPreview { task: Some(task), .. } if task.is_refinement())
+        {
+            entry.priority.0 = 4; // Initial feedback stays urgent; refinement follows visible posters.
+        }
         entry.priority.1 = state.next_order;
         state.next_order = state.next_order.wrapping_add(1);
         entry.enqueued_at = Instant::now();
@@ -586,6 +644,7 @@ impl JobScheduler {
         let mut state = self.state.lock().expect("scheduler state");
         state.closed = true;
         state.queue.clear();
+        state.classes.clear();
         drop(state);
         self.has_jobs.notify_all();
     }
@@ -606,9 +665,9 @@ fn job_rank(class: AssetJobClass, directory: Option<&str>, active_directory: Opt
         (AssetJobClass::SelectedPreview, _) => 1,
         (AssetJobClass::VisibleThumbnail, true) => 2,
         (AssetJobClass::VisibleThumbnail, false) => 3,
-        (AssetJobClass::PrefetchThumbnail, true) => 4,
-        (AssetJobClass::PrefetchThumbnail, false) => 5,
-        (AssetJobClass::SidebarIcon, _) => 6,
+        (AssetJobClass::PrefetchThumbnail, true) => 5,
+        (AssetJobClass::PrefetchThumbnail, false) => 6,
+        (AssetJobClass::SidebarIcon, _) => 7,
     }
 }
 
@@ -756,6 +815,7 @@ impl AssetManager {
         for worker_scheduler in std::iter::repeat_n(Arc::clone(&scheduler), worker_count)
             .chain(std::iter::once(Arc::clone(&preview_scheduler)))
         {
+            let video_queue = Arc::clone(&preview_scheduler);
             let tx = result_tx.clone();
             let repaint = Arc::clone(&repaint_ctx);
             let backend = Arc::clone(&media_backend);
@@ -764,6 +824,7 @@ impl AssetManager {
             workers.push(thread::spawn(move || {
                 asset_worker(
                     &worker_scheduler,
+                    &video_queue,
                     &tx,
                     &repaint,
                     backend.as_ref(),
@@ -816,11 +877,18 @@ impl AssetManager {
     }
 
     pub fn begin_frame(&mut self) {
+        #[cfg(not(test))]
+        media::check_backend_async();
         let epoch = media::BACKEND_EPOCH.load(AtomicOrdering::Acquire);
         if epoch != self.backend_epoch {
             self.backend_epoch = epoch;
-            self.failed
-                .retain(|_, failure| failure.kind != ErrorKind::Unavailable);
+            let keys = self.requests.keys().cloned().collect();
+            self.cancel_requests(&keys);
+            self.textures.clear();
+            self.animations.clear();
+            self.texture_bytes = 0;
+            self.animation_bytes = 0;
+            self.failed.clear();
         }
         self.desired_previews.clear();
         self.frame_uploads = 0;
@@ -834,7 +902,7 @@ impl AssetManager {
         puffin::profile_scope!(
             "lwa_fm::assets::metrics",
             &format!(
-                "processes={} samples={} disk_hits={} stale={} cancelled={} uploads={} result_bytes={} static_bytes={} animation_bytes={}",
+                "processes={} samples={} disk_hits={} stale={} cancelled={} uploads={} result_bytes={} static_bytes={} animation_bytes={} queue_us={} process_us={} permit_us={} pipe_bytes={} writes_dropped={} writes_coalesced={} writes_failed={}",
                 process::PROCESS_COUNT.load(AtomicOrdering::Relaxed),
                 media::SAMPLES.load(AtomicOrdering::Relaxed),
                 media::CACHE_HITS.load(AtomicOrdering::Relaxed),
@@ -843,7 +911,14 @@ impl AssetManager {
                 self.total_uploads,
                 self.result_bytes.load(AtomicOrdering::Relaxed),
                 self.texture_bytes,
-                self.animation_bytes
+                self.animation_bytes,
+                QUEUE_WAIT_MICROS.load(AtomicOrdering::Relaxed),
+                process::PROCESS_MICROS.load(AtomicOrdering::Relaxed),
+                process::PERMIT_WAIT_MICROS.load(AtomicOrdering::Relaxed),
+                process::OUTPUT_BYTES.load(AtomicOrdering::Relaxed),
+                media::WRITES_DROPPED.load(AtomicOrdering::Relaxed),
+                media::WRITES_COALESCED.load(AtomicOrdering::Relaxed),
+                media::WRITES_FAILED.load(AtomicOrdering::Relaxed)
             )
         );
         let obsolete: HashSet<_> = self
@@ -1165,9 +1240,8 @@ impl AssetManager {
             && let Some(kind) = thumbnail_kind(&path)
         {
             let key = format!(
-                "{}{}#{}:{}#px{}",
-                path.to_full_path_string(),
-                size.cache_suffix(),
+                "{}#{}:{}#thumb_px{}",
+                entry.full_path_string(),
                 entry.meta.source_revision,
                 entry.meta.size,
                 edge
@@ -1177,16 +1251,15 @@ impl AssetManager {
                 return Some(texture.clone());
             }
             if self.pending.contains(&key) && class == AssetJobClass::VisibleThumbnail {
+                self.scheduler.reprioritize(&key, class);
                 if kind == ThumbnailKind::Video {
                     self.preview_scheduler.reprioritize(&key, class);
-                } else {
-                    self.scheduler.reprioritize(&key, class);
                 }
             }
             if !self.is_pending_or_failed(&key) {
                 let (request_id, cancel) = self.start_request(
                     &key,
-                    Some(SourceKey::new(
+                    Some(SourceKey::from_normalized(
                         &path,
                         entry.meta.source_revision,
                         entry.meta.size,
@@ -1201,18 +1274,12 @@ impl AssetManager {
                     source_size: entry.meta.size,
                     request_id,
                     target_edge: edge,
+                    cache_checked: false,
                     cancel,
                 };
-                let scheduler = if kind == ThumbnailKind::Video {
-                    &self.video_thumbnail_scheduler
-                } else {
-                    &self.scheduler
-                };
-                let enqueue = scheduler.enqueue(
-                    job,
-                    class,
-                    path.parent().map(|path| path.to_full_path_string()),
-                );
+                let enqueue = self
+                    .scheduler
+                    .enqueue(job, class, Some(entry.dir.to_string()));
                 self.clear_evicted_requests(enqueue.evicted);
                 if enqueue.accepted {
                     self.pending.insert(key);
@@ -1261,7 +1328,8 @@ impl AssetManager {
                 cancel,
             },
             AssetJobClass::SidebarIcon,
-            path.parent().map(|path| path.to_full_path_string()),
+            path.parent()
+                .map(|path| path.to_string_lossy().replace("\\\\?\\", "")),
         );
         self.clear_evicted_requests(enqueue.evicted);
         if enqueue.accepted {
@@ -1322,11 +1390,13 @@ impl AssetManager {
     pub fn invalidate_files(&mut self, files: impl IntoIterator<Item = PathBuf>) {
         let files: Vec<PathBuf> = files
             .into_iter()
-            .map(|path| crate::helper::normalize_path(&path))
+            .map(|path| PathBuf::from(crate::helper::normalize_path_string(&path)))
             .collect();
         if files.is_empty() {
             return;
         }
+
+        media::invalidate_sources(&files, false);
 
         let file_prefixes: Vec<String> =
             files.iter().map(PathHelper::to_full_path_string).collect();
@@ -1382,10 +1452,15 @@ impl AssetManager {
     }
 
     pub fn invalidate_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
-        let directories: Vec<PathBuf> = directories.into_iter().collect();
+        let directories: Vec<PathBuf> = directories
+            .into_iter()
+            .map(|path| PathBuf::from(crate::helper::normalize_path_string(&path)))
+            .collect();
         if directories.is_empty() {
             return;
         }
+
+        media::invalidate_sources(&directories, true);
 
         let matches_dir = |key: &str| -> bool {
             let entry_path = source_path_from_asset_key(key)
@@ -1458,8 +1533,8 @@ impl AssetManager {
         }
         let path = entry.get_path();
         let key = format!(
-            "{}#{}:{}#overview_v6_px{}",
-            path.to_full_path_string(),
+            "{}#{}:{}#overview_v7_px{}",
+            entry.full_path_string(),
             entry.meta.source_revision,
             entry.meta.size,
             spec.max_edge
@@ -1523,7 +1598,7 @@ impl AssetManager {
         }
         let (request_id, cancel) = self.start_request(
             &key,
-            Some(SourceKey::new(
+            Some(SourceKey::from_normalized(
                 &path,
                 entry.meta.source_revision,
                 entry.meta.size,
@@ -1542,7 +1617,8 @@ impl AssetManager {
                 task: None,
             },
             intent.job_class(),
-            path.parent().map(|path| path.to_full_path_string()),
+            path.parent()
+                .map(|path| path.to_string_lossy().replace("\\\\?\\", "")),
         );
         self.clear_evicted_requests(enqueue.evicted);
         if enqueue.accepted {
@@ -1613,7 +1689,10 @@ impl AssetManager {
     fn preview_failure_state(&self, key: &str) -> Option<HoverPreview> {
         let record = self.failed.get(key)?;
         if record.tries >= ICON_RETRY_MAX_TRIES
-            && matches!(record.kind, ErrorKind::InvalidMedia | ErrorKind::Limit)
+            && matches!(
+                record.kind,
+                ErrorKind::InvalidMedia | ErrorKind::Unsupported | ErrorKind::Limit
+            )
         {
             return Some(HoverPreview::Unavailable {
                 reason: record.reason.clone(),
@@ -1669,7 +1748,8 @@ impl AssetManager {
                 cancel,
             },
             class,
-            path.parent().map(|path| path.to_full_path_string()),
+            path.parent()
+                .map(|path| path.to_string_lossy().replace("\\\\?\\", "")),
         );
         self.clear_evicted_requests(enqueue.evicted);
         if enqueue.accepted {
@@ -1699,7 +1779,10 @@ impl AssetManager {
             // Exponential backoff (30s, 60s, 120s); once we hit the max tries
             // the entry is considered permanently failed and never retried.
             if record.tries >= ICON_RETRY_MAX_TRIES
-                && matches!(record.kind, ErrorKind::InvalidMedia | ErrorKind::Limit)
+                && matches!(
+                    record.kind,
+                    ErrorKind::InvalidMedia | ErrorKind::Unsupported | ErrorKind::Limit
+                )
             {
                 return true;
             }
@@ -1727,7 +1810,7 @@ fn directory_icon_key(path: &Path) -> String {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = path;
-        return FOLDER_ICON_KEY.to_string();
+        FOLDER_ICON_KEY.to_string()
     }
     #[cfg(target_os = "macos")]
     {
@@ -1739,6 +1822,7 @@ fn directory_icon_key(path: &Path) -> String {
 }
 
 enum JobStep {
+    Transfer(AssetJob),
     Complete(AssetJobResult),
     Continue(AssetJob, Option<AssetJobResult>),
 }
@@ -1844,6 +1928,7 @@ fn publish_result(
 
 fn asset_worker(
     scheduler: &JobScheduler,
+    video_scheduler: &JobScheduler,
     tx: &mpsc::SyncSender<AssetJobResult>,
     repaint: &Mutex<Option<Context>>,
     backend: &dyn MediaBackend,
@@ -1856,6 +1941,24 @@ fn asset_worker(
         }
         let identity = (entry.job.request_key().to_owned(), entry.job.request_id());
         match process_asset_job(entry.job, backend) {
+            JobStep::Transfer(job) => {
+                scheduler.finish(&identity);
+                entry.job = job;
+                if !video_scheduler.transfer(entry)
+                    && !publish_result(
+                        tx,
+                        repaint,
+                        stop,
+                        AssetJobResult::Cancelled {
+                            request_key: identity.0,
+                            request_id: identity.1,
+                        },
+                        bytes,
+                    )
+                {
+                    return;
+                }
+            }
             JobStep::Complete(result) => {
                 #[cfg(not(test))]
                 if let AssetJobResult::Failed { kind, .. } = &result {
@@ -1894,8 +1997,43 @@ fn process_asset_job(job: AssetJob, media_backend: &dyn MediaBackend) -> JobStep
             source_size,
             request_id,
             target_edge,
+            cache_checked,
             cancel,
         } => {
+            if kind == ThumbnailKind::Video && !cache_checked {
+                if cancel.load(AtomicOrdering::Acquire) {
+                    return JobStep::Complete(AssetJobResult::Cancelled {
+                        request_key,
+                        request_id,
+                    });
+                }
+                let source = SourceKey::new(&source_path, source_revision, source_size);
+                if let Some(image) = media::cached_poster_image(&source, target_edge, &cancel) {
+                    if source_revision != 0 && !source.unchanged() {
+                        return JobStep::Complete(AssetJobResult::Cancelled {
+                            request_key,
+                            request_id,
+                        });
+                    }
+                    return JobStep::Complete(AssetJobResult::Ready {
+                        request_key,
+                        request_id,
+                        image,
+                    });
+                }
+                return JobStep::Transfer(AssetJob::Thumbnail {
+                    source_path,
+                    request_key,
+                    kind,
+                    icon_size,
+                    source_revision,
+                    source_size,
+                    request_id,
+                    target_edge,
+                    cache_checked: true,
+                    cancel,
+                });
+            }
             let result = load_or_generate_thumbnail(
                 &source_path,
                 kind,
@@ -2044,7 +2182,9 @@ fn source_path_from_asset_key(key: &str) -> Option<&str> {
     let (revision, size) = revision.split_once(':')?;
     revision.parse::<u128>().ok()?;
     size.parse::<u64>().ok()?;
-    if spec.starts_with("px") {
+    if spec.starts_with("thumb_px") {
+        Some(path)
+    } else if spec.starts_with("px") {
         ["_xl", "_l", "_m", "_s"]
             .iter()
             .find_map(|suffix| path.strip_suffix(suffix))
@@ -2153,14 +2293,19 @@ fn load_or_generate_thumbnail(
         source_revision,
         source_size,
     );
-    if let Some(image) = decode_image_file(&path, source_path.to_full_path_string()) {
+    let source = SourceKey::new(source_path, source_revision, source_size);
+    if kind == ThumbnailKind::Video {
+        if let Some(image) = media::cached_poster_image(&source, target_edge, cancel) {
+            media::schedule_poster_cache(source, path, target_edge, image.clone());
+            return Ok(image);
+        }
+    } else if let Some(image) = decode_image_file(&path, source_path.to_full_path_string()) {
         cache::touch(&path);
         return Ok(image);
     }
     if path.exists() {
         let _ = fs::remove_file(&path);
     }
-    let source = SourceKey::new(source_path, source_revision, source_size);
     let image = match kind {
         ThumbnailKind::Video => media::poster(&source, target_edge, cancel)?,
         ThumbnailKind::Image => {
@@ -2178,12 +2323,15 @@ fn load_or_generate_thumbnail(
     };
     process::check(cancel, deadline)?;
     if kind == ThumbnailKind::Video {
-        media::schedule_poster_cache(source, path, image.clone());
+        media::schedule_poster_cache(source, path, target_edge, image.clone());
     } else if source.unchanged()
         && let Some(rgba) =
             image::RgbaImage::from_raw(image.width as u32, image.height as u32, image.rgba.to_vec())
     {
-        atomic_save_image(&image::DynamicImage::ImageRgba8(rgba), &path);
+        let _publication = media::PUBLICATION.lock().expect("asset publication");
+        if source.unchanged() {
+            atomic_save_image(&image::DynamicImage::ImageRgba8(rgba), &path);
+        }
     }
     Ok(image)
 }
@@ -2347,6 +2495,34 @@ fn encode_animation_gif(animation: &DecodedAnimation) -> Result<Vec<u8>, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unchanged_priority_does_not_rebuild_the_queue() {
+        let scheduler = JobScheduler::default();
+        scheduler.enqueue(icon_job("pending"), AssetJobClass::PrefetchThumbnail, None);
+        for _ in 0..100 {
+            scheduler.reprioritize("pending", AssetJobClass::PrefetchThumbnail);
+        }
+        assert_eq!(
+            scheduler
+                .state
+                .lock()
+                .expect("asset fixture operation")
+                .priority_rebuilds,
+            0
+        );
+        scheduler.reprioritize("pending", AssetJobClass::VisibleThumbnail);
+        for _ in 0..100 {
+            scheduler.reprioritize("pending", AssetJobClass::VisibleThumbnail);
+        }
+        assert_eq!(
+            scheduler
+                .state
+                .lock()
+                .expect("asset fixture operation")
+                .priority_rebuilds,
+            1
+        );
+    }
 
     fn tiny_animation() -> DecodedAnimation {
         DecodedAnimation {
@@ -2368,7 +2544,7 @@ mod tests {
             "/media/clip#scene.mp4"
         ));
         assert!(!asset_key_matches_file(
-            "/media/clip.mp4#scene.mp4#1:20#overview_v6_px240",
+            "/media/clip.mp4#scene.mp4#1:20#overview_v7_px240",
             "/media/clip.mp4"
         ));
         assert!(!asset_key_matches_file(
@@ -2963,7 +3139,7 @@ mod tests {
         let first = thumbnail_cache_path(path, IconSize::Medium, 96, 1, 10);
         let second = thumbnail_cache_path(path, IconSize::Medium, 96, 2, 10);
         assert_ne!(first, second);
-        assert!(first.to_string_lossy().contains("_v4.jpg"));
+        assert!(first.to_string_lossy().contains("_v6.jpg"));
     }
 
     #[test]
@@ -2972,7 +3148,7 @@ mod tests {
         let first = animated_preview_cache_path(path, 1, 10);
         let second = animated_preview_cache_path(path, 2, 10);
         assert_ne!(first, second);
-        assert!(first.to_string_lossy().contains("_overview_v6.bin"));
+        assert!(first.to_string_lossy().contains("_overview_v7.bin"));
     }
 
     #[test]
@@ -3093,22 +3269,29 @@ mod tests {
     #[test]
     fn permanent_preview_failure_is_not_reported_as_pending() {
         let mut assets = AssetManager::new();
-        assets.failed.insert(
-            "broken".to_owned(),
-            FailureRecord {
-                last_attempt: Instant::now(),
-                tries: ICON_RETRY_MAX_TRIES,
-                reason: "Unsupported codec".to_owned(),
-                kind: ErrorKind::InvalidMedia,
-            },
-        );
-        assert!(matches!(
-            assets.preview_failure_state("broken"),
-            Some(HoverPreview::Unavailable {
-                retry_after: None,
-                ..
-            })
-        ));
+        for kind in [
+            ErrorKind::InvalidMedia,
+            ErrorKind::Unsupported,
+            ErrorKind::Limit,
+        ] {
+            assets.failed.insert(
+                "broken".to_owned(),
+                FailureRecord {
+                    last_attempt: Instant::now(),
+                    tries: ICON_RETRY_MAX_TRIES,
+                    reason: "Unsupported codec".to_owned(),
+                    kind,
+                },
+            );
+            assert!(matches!(
+                assets.preview_failure_state("broken"),
+                Some(HoverPreview::Unavailable {
+                    retry_after: None,
+                    ..
+                })
+            ));
+            assert!(assets.is_pending_or_failed("broken"));
+        }
     }
 
     #[test]

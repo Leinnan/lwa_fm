@@ -24,9 +24,10 @@ sled = "0.34"
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
 log = { version = "0.4.28", features = ["std"] }
 profiling = { version = "1.0.18", default-features = false }
-puffin = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git" }
-puffin_http = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git" }
-puffin_egui = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git" }
+# Keep the profiler UI on the same egui version as the app.
+puffin = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
+puffin_http = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
+puffin_egui = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 icu = {git = "https://github.com/unicode-org/icu4x", rev = "4d2b015"}
 notify = "6.1"
 smallvec = "1.15"
@@ -52,7 +53,7 @@ image = { version = "0.25", features = ["jpeg", "png"] }
 ffmpeg-sidecar = "2.4.0"
 rand = "0.8"
 anyhow = "1"
-egui-notify = "*"
+egui-notify = "0.22"
 crossbeam = "0.8"
 egui_dock = "0.19"
 trash = "5.2"
@@ -68,7 +69,7 @@ regex = "1"
 wgpu = { version = "29", default-features = false }
 
 [patch.crates-io]
-puffin = { git = "https://github.com/EmbarkStudios/puffin.git" }
+puffin = { git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [

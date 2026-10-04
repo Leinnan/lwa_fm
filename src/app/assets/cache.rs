@@ -42,6 +42,24 @@ pub(super) fn read_bounded(path: &Path, limit: usize) -> std::io::Result<Vec<u8>
     Ok(bytes)
 }
 
+pub(super) fn read_overview_first(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    if file.metadata()?.len() > limit as u64 {
+        return Err(std::io::Error::other("Overview exceeds limit"));
+    }
+    let mut bytes = vec![0; 76];
+    file.read_exact(&mut bytes)?;
+    let length = u32::from_le_bytes(bytes[64..68].try_into().expect("frame length")) as usize;
+    let total = 76usize
+        .checked_add(length)
+        .filter(|total| *total <= limit)
+        .ok_or_else(|| std::io::Error::other("Overview frame exceeds limit"))?;
+    bytes.resize(total, 0);
+    file.read_exact(&mut bytes[76..])?;
+    touch(path);
+    Ok(bytes)
+}
+
 fn note_write(path: &Path) {
     if let Ok(metadata) = fs::metadata(path) {
         WRITTEN_BYTES.fetch_add(metadata.len(), Ordering::Relaxed);
@@ -50,12 +68,14 @@ fn note_write(path: &Path) {
     maybe_maintain();
 }
 
-pub(super) fn atomic_save_bytes(bytes: &[u8], path: &Path) {
+pub(super) fn atomic_save_bytes(bytes: &[u8], path: &Path) -> bool {
     let tmp = atomic_temp_path(path, "bin");
     if fs::write(&tmp, bytes).is_ok() && fs::rename(&tmp, path).is_ok() {
         note_write(path);
+        true
     } else {
         let _ = fs::remove_file(tmp);
+        false
     }
 }
 
@@ -80,6 +100,7 @@ pub(super) fn maybe_maintain() {
 
 pub(super) fn maintain(root: &Path, max_bytes: u64, target_bytes: u64) {
     let mut files = Vec::new();
+    let mut groups = std::collections::HashMap::<String, (SystemTime, u64, Vec<PathBuf>)>::new();
     for entry in walkdir::WalkDir::new(root)
         .min_depth(1)
         .into_iter()
@@ -121,20 +142,36 @@ pub(super) fn maintain(root: &Path, max_bytes: u64, target_bytes: u64) {
             .peek(&path)
             .copied()
             .unwrap_or(modified);
-        files.push((recency, metadata.len(), path));
+        let group = name
+            .split_once('_')
+            .filter(|(prefix, _)| {
+                prefix.len() == 16 && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .map_or_else(
+                || path.to_string_lossy().into_owned(),
+                |(prefix, _)| prefix.to_owned(),
+            );
+        let group = groups.entry(group).or_insert((recency, 0, Vec::new()));
+        group.0 = group.0.max(recency);
+        group.1 += metadata.len();
+        group.2.push(path);
     }
+    files.extend(groups.into_values());
     let mut total: u64 = files.iter().map(|(_, size, _)| *size).sum();
     if total <= max_bytes {
         return;
     }
     files.sort_by_key(|(time, _, _)| *time);
-    for (_, size, path) in files {
+    for (_, _, paths) in files {
         if total <= target_bytes {
             break;
         }
-        if fs::remove_file(&path).is_ok() {
-            total = total.saturating_sub(size);
-            RECENCY.lock().expect("cache recency mutex").pop(&path);
+        for path in paths {
+            let size = fs::metadata(&path).map_or(0, |metadata| metadata.len());
+            if fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(size);
+                RECENCY.lock().expect("cache recency mutex").pop(&path);
+            }
         }
     }
 }
@@ -151,15 +188,72 @@ pub(super) fn thumbnail_cache_ext(source_path: &Path) -> &'static str {
     }
 }
 
+pub(super) fn register_source(path: &Path, prefix: &str) {
+    let shard = thumbnail_cache_dir().join(&prefix[..2]);
+    let _ = fs::create_dir_all(&shard);
+    let owner = shard.join(format!("{prefix}_owner.json"));
+    if !owner.exists()
+        && let Ok(bytes) = serde_json::to_vec(path)
+    {
+        atomic_save_bytes(&bytes, &owner);
+    }
+}
+
+pub(super) fn purge_sources(paths: &[PathBuf], directories: bool) {
+    let mut prefixes: std::collections::HashSet<String> =
+        paths.iter().map(|path| source_prefix(path)).collect();
+    if directories {
+        prefixes.clear();
+        for entry in walkdir::WalkDir::new(thumbnail_cache_dir())
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry.file_name().to_string_lossy().ends_with("_owner.json")
+            })
+        {
+            if let Ok(bytes) = read_bounded(entry.path(), 64 * 1024)
+                && let Ok(source) = serde_json::from_slice::<PathBuf>(&bytes)
+                && paths.iter().any(|directory| source.starts_with(directory))
+                && let Some(prefix) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.strip_suffix("_owner.json"))
+            {
+                prefixes.insert(prefix.to_owned());
+            }
+        }
+    }
+    for prefix in prefixes {
+        if let Ok(entries) = fs::read_dir(thumbnail_cache_dir().join(&prefix[..2])) {
+            for entry in entries.filter_map(Result::ok) {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{prefix}_"))
+                {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn source_prefix(path: &Path) -> String {
+    let mut hash = DefaultHasher::new();
+    crate::helper::normalize_path_string(path).hash(&mut hash);
+    format!("{:016x}", hash.finish())
+}
+
 pub(super) fn thumbnail_cache_path(
     path: &Path,
-    size: IconSize,
+    _size: IconSize,
     target_edge: u32,
     source_revision: u128,
     source_size: u64,
 ) -> PathBuf {
     let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
+    crate::helper::normalize_path_string(path).hash(&mut hasher);
     if super::thumbnail_kind(path) == Some(super::ThumbnailKind::Video) {
         super::media::backend_revision().hash(&mut hasher);
     }
@@ -168,9 +262,14 @@ pub(super) fn thumbnail_cache_path(
     target_edge.hash(&mut hasher);
     let ext = thumbnail_cache_ext(path);
     let hash = format!("{:016x}", hasher.finish());
-    let shard = thumbnail_cache_dir().join(&hash[..2]);
+    let prefix = source_prefix(path);
+    register_source(
+        Path::new(&crate::helper::normalize_path_string(path)),
+        &prefix,
+    );
+    let shard = thumbnail_cache_dir().join(&prefix[..2]);
     let _ = fs::create_dir_all(&shard);
-    shard.join(format!("{}{}_v4.{}", hash, size.cache_suffix(), ext))
+    shard.join(format!("{prefix}_{hash}_v6.{ext}"))
 }
 
 pub(super) fn thumbnail_cache_dir() -> PathBuf {
@@ -229,6 +328,25 @@ pub(super) fn atomic_temp_path(cache_path: &Path, extension: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn directory_purge_preserves_other_sources_and_sizes_share_entries() {
+        let directory =
+            std::env::temp_dir().join(format!("lwa_cache_ownership_{}", std::process::id()));
+        let inside = directory.join("nested/movie.mp4");
+        let outside = directory.with_extension("other").join("movie.mp4");
+        let first = thumbnail_cache_path(&inside, IconSize::Small, 160, 1, 10);
+        assert_eq!(
+            first,
+            thumbnail_cache_path(&inside, IconSize::ExtraLarge, 160, 1, 10)
+        );
+        let second = thumbnail_cache_path(&outside, IconSize::Small, 160, 1, 10);
+        assert!(atomic_save_bytes(b"inside", &first));
+        assert!(atomic_save_bytes(b"outside", &second));
+        purge_sources(std::slice::from_ref(&directory), true);
+        assert!(!first.exists());
+        assert!(second.exists());
+        purge_sources(&[outside], false);
+    }
 
     #[test]
     fn maintenance_repeats_and_uses_read_recency() {
@@ -246,7 +364,9 @@ mod tests {
         let stale = root.join("stale.bin.tmp");
         let fresh = root.join("live.bin.tmp");
         fs::write(&stale, [0; 4]).expect("old temp");
-        fs::File::open(&stale)
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
             .expect("temp")
             .set_modified(SystemTime::UNIX_EPOCH)
             .expect("set old time");
