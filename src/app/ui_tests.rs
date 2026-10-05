@@ -36,6 +36,8 @@ fn fixture(appearance: Appearance, grid: bool, inspector: bool) -> App {
     App {
         tabs,
         settings,
+        #[cfg(not(target_os = "macos"))]
+        drives_locations: Locations::default(),
         user_locations: Locations {
             locations: vec![
                 Location::from_path(root, "DirFleet"),
@@ -55,7 +57,11 @@ fn draw(root: &mut egui::Ui, app: &mut App) {
         let mut fonts = egui::FontDefinitions::default();
         ui::register_icons(&mut fonts);
         ctx.set_fonts(fonts);
-        ui::configure(ctx);
+        ui::configure_test(
+            ctx,
+            ctx.data(|data| data.get_temp::<bool>(egui::Id::new("fluent_fixture")))
+                .unwrap_or(false),
+        );
         if let Some(tab) = app.tabs.get_current_tab() {
             ctx.data_set_path(
                 &tab.current_path,
@@ -82,13 +88,161 @@ fn draw(root: &mut egui::Ui, app: &mut App) {
     app.assets.begin_frame();
     app.assets.poll_results(ctx);
     app.render_browser(root);
-    if app.display_modal == Some(ModalWindow::Settings) {
-        app.settings.display(ctx);
-    } else if app.display_modal == Some(ModalWindow::Commands) {
-        app.command_palette.ui(ctx);
-    }
+    app.render_modal(ctx);
     app.assets.wait_for_idle(ctx);
     app.assets.end_frame();
+}
+
+fn draw_fluent(root: &mut egui::Ui, app: &mut App) {
+    root.ctx()
+        .data_mut(|data| data.insert_temp(egui::Id::new("fluent_fixture"), true));
+    draw(root, app);
+}
+
+#[cfg(windows)]
+#[test]
+fn fluent_windows_grids_compact_settings_and_appearance_switching() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut snapshots = egui_kittest::SnapshotResults::new();
+    for (suffix, appearance) in [("dark", Appearance::Dark), ("light", Appearance::Light)] {
+        for (layout, size, grid) in [
+            ("full", egui::vec2(1100.0, 720.0), false),
+            ("grid", egui::vec2(1100.0, 720.0), true),
+            ("compact", egui::vec2(640.0, 420.0), false),
+        ] {
+            let mut harness = Harness::builder()
+                .with_options(ui::snapshot_options())
+                .with_size(size)
+                .build_ui_state(draw_fluent, fixture(appearance, grid, true));
+            harness.run_steps(12);
+            snapshots.add(harness.try_snapshot(format!("fluent_{layout}_{suffix}")));
+        }
+        let mut app = fixture(appearance, false, false);
+        app.display_modal = Some(ModalWindow::Settings);
+        let mut harness = Harness::builder()
+            .with_options(ui::snapshot_options())
+            .with_size(egui::vec2(1100.0, 720.0))
+            .build_ui_state(draw_fluent, app);
+        harness.run_steps(12);
+        snapshots.add(harness.try_snapshot(format!("fluent_settings_{suffix}")));
+        harness.get_by_label("Appearance").click();
+        harness.run_steps(4);
+        snapshots.add(harness.try_snapshot(format!("fluent_settings_appearance_{suffix}")));
+    }
+    let mut harness = Harness::builder()
+        .with_options(ui::snapshot_options())
+        .with_size(egui::vec2(1100.0, 720.0))
+        .build_ui_state(draw_fluent, fixture(Appearance::Dark, false, true));
+    harness.run_steps(12);
+    harness.state_mut().settings.appearance = Appearance::Light;
+    harness.run_steps(12);
+    snapshots.add(harness.try_snapshot("fluent_appearance_changed_to_light"));
+    harness.state_mut().settings.appearance = Appearance::Dark;
+    harness.run_steps(12);
+    snapshots.add(harness.try_snapshot("fluent_appearance_changed_to_dark"));
+    snapshots.unwrap();
+}
+
+#[test]
+fn fluent_keyboard_search_dialogs_and_split_panes_survive_theme_changes() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let mut harness = Harness::builder()
+        .with_options(ui::snapshot_options())
+        .with_size(egui::vec2(1100.0, 720.0))
+        .build_ui_state(draw_fluent, fixture(Appearance::Dark, false, true));
+    harness.run_steps(12);
+    harness.hover_at(egui::pos2(380.0, 180.0));
+    harness.run_steps(2);
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    let selected = harness
+        .state_mut()
+        .inspector_view(&ctx)
+        .expect("selection")
+        .paths;
+    assert!(
+        selected[0]
+            .to_string_lossy()
+            .contains("A very long file name")
+    );
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        harness.state_mut().settings.appearance = appearance;
+        harness.run_steps(12);
+        assert_eq!(
+            harness
+                .state_mut()
+                .inspector_view(&ctx)
+                .expect("selection")
+                .paths,
+            selected
+        );
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+        harness.run_steps(2);
+        assert!(
+            harness
+                .state_mut()
+                .tabs
+                .get_current_tab()
+                .expect("tab")
+                .search
+                .is_some()
+        );
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+        harness.run_steps(2);
+    }
+    // Add a second dock pane and render with the changed text cache and theme.
+    let mut second = TabData::from_path(Path::new("/virtual/Downloads"));
+    second.current_path = CurrentPath::One("/virtual/Downloads".into());
+    second.list = vec![DirEntry::test_new("/virtual/Downloads/Download.txt")];
+    second.visible_entries = vec![0];
+    second.loading = false;
+    let nodes = harness
+        .state_mut()
+        .tabs
+        .dock_state
+        .main_surface_mut()
+        .split_right(egui_dock::NodeIndex::root(), 0.5, vec![second]);
+    harness
+        .state_mut()
+        .tabs
+        .dock_state
+        .set_focused_node_and_surface(egui_dock::NodePath::new(
+            egui_dock::SurfaceIndex::main(),
+            nodes[0],
+        ));
+    harness.run_steps(12);
+    assert!(harness.state_mut().tabs.get_current_tab().is_some());
+    let table_right = ctx.content_rect().right() - harness.state().settings.inspector_width;
+    let headers: Vec<_> = harness
+        .get_all_by_label("Size")
+        .filter(|node| node.rect().top() < 150.0)
+        .collect();
+    assert_eq!(headers.len(), 2);
+    assert!(
+        headers
+            .iter()
+            .all(|node| node.rect().right() <= table_right)
+    );
+    #[cfg(windows)]
+    harness.snapshot("fluent_split_panes_dark");
+    harness.state_mut().display_modal = Some(ModalWindow::Rename);
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new(ModalWindow::Rename),
+            DirEntry::test_new("/virtual/Download.txt"),
+        )
+    });
+    harness.run_steps(12);
+    let _ = harness.get_by_label("New name");
+    #[cfg(windows)]
+    harness.snapshot("fluent_split_panes_rename");
+    while COMMANDS_QUEUE.pop().is_some() {}
 }
 
 #[test]
@@ -136,6 +290,7 @@ fn full_window_appearances_and_compact_layouts() {
         ),
     ] {
         let mut harness = Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(size)
             .build_ui_state(draw, fixture(appearance, grid, true));
         harness.run_steps(12);
@@ -157,6 +312,7 @@ fn search_settings_and_overlay_snapshots() {
         ..Default::default()
     });
     let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -166,6 +322,7 @@ fn search_settings_and_overlay_snapshots() {
     let mut app = fixture(Appearance::Light, false, false);
     app.display_modal = Some(ModalWindow::Settings);
     let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -179,6 +336,7 @@ fn search_settings_and_overlay_snapshots() {
     let mut app = fixture(Appearance::Dark, false, false);
     app.inspector_overlay = true;
     let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
         .with_size(egui::vec2(640.0, 420.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -203,9 +361,10 @@ fn selection_follows_paths_across_sort_filter_and_deletion() {
         },
     );
     // Draw once to record the canonical file selection.
-    let _ = ctx.run_ui(egui::RawInput::default(), |root| {
-        egui::CentralPanel::default().show_inside(root, |ui| app.tabs.ui(ui, &mut app.assets));
+    let mut output = ctx.run_ui(egui::RawInput::default(), |root| {
+        egui::CentralPanel::default().show(root, |ui| app.tabs.ui(ui, &mut app.assets));
     });
+    output.textures_delta.clear();
     let selected_path = app.inspector_view(&ctx).expect("view").paths[0].clone();
     app.tabs
         .get_tab_by_id(id)
@@ -228,7 +387,7 @@ fn auto_collapse_keeps_preferences_and_toggle_opens_overlay() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let ctx = egui::Context::default();
     let mut app = fixture(Appearance::Dark, false, true);
-    let _ = ctx.run_ui(
+    let mut output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -242,6 +401,7 @@ fn auto_collapse_keeps_preferences_and_toggle_opens_overlay() {
             app.handle_action(ctx, ActionToPerform::ToggleInspector);
         },
     );
+    output.textures_delta.clear();
     assert!(app.settings.sidebar_visible && app.settings.inspector_visible);
     assert!(app.sidebar_overlay && app.inspector_overlay);
 }
@@ -258,6 +418,7 @@ fn inspector_selection_states_and_split_panes() {
         ("dirfleet_inspector_folder", vec![0usize]),
     ] {
         let mut harness = Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::vec2(1100.0, 720.0))
             .build_ui_state(
                 move |root, app| {
@@ -291,6 +452,7 @@ fn inspector_selection_states_and_split_panes() {
             nodes[0],
         ));
     let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -311,11 +473,12 @@ fn inspector_preview_loading_ready_and_failure() {
     ] {
         let mut assets = assets::AssetManager::default();
         let mut harness = Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::vec2(320.0, 300.0))
             .build_ui(|root| {
-                ui::configure(root.ctx());
+                ui::configure_test(root.ctx(), false);
                 root.ctx().set_theme(egui::Theme::Dark);
-                egui::CentralPanel::default().show_inside(root, |ui| {
+                egui::CentralPanel::default().show(root, |ui| {
                     let preview = match state {
                         0 => assets::HoverPreview::Pending,
                         1 => assets::HoverPreview::Unavailable {
@@ -354,6 +517,7 @@ fn appearance_change_keeps_file_labels_visible() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, fixture(Appearance::Dark, false, true));
     harness.run_steps(12);
@@ -368,6 +532,7 @@ fn keyboard_selection_and_search_follow_the_active_pane() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, fixture(Appearance::Dark, false, true));
     harness.run_steps(12);
@@ -419,6 +584,7 @@ fn command_palette_supports_keyboard_choice() {
         ActionToPerform::ToggleInspector.into(),
     ];
     let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -446,6 +612,7 @@ fn path_editor_takes_focus_and_compact_overlay_dismisses() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
         .with_size(egui::vec2(640.0, 420.0))
         .build_ui_state(draw, fixture(Appearance::Dark, false, true));
     harness.run_steps(12);

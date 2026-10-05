@@ -21,3 +21,5 @@ Please keep PRs (reasonably) small and scoped.
   <img src="https://contrib.rocks/image?repo=Leinnan/lwa_fm"/>
 </a>
 </p>
+
+Development requires Rust 1.95 or newer. Windows uses Fluent styling with the system accent (read at startup), Segoe UI and Cascadia Mono when available, and native rounded window/caption styling. The saved System/Light/Dark appearance setting is preserved; light/dark changes apply live.

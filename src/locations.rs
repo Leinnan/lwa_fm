@@ -35,8 +35,10 @@ impl Locations {
         for location in &self.locations {
             let selected =
                 active.is_some_and(|path| path == std::path::Path::new(location.path.as_ref()));
-            let (rect, response) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), egui::Sense::click());
+            let (rect, response) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), ui::nav_row_height(ui)),
+                egui::Sense::click(),
+            );
             response.widget_info(|| {
                 egui::WidgetInfo::selected(
                     egui::WidgetType::SelectableLabel,
@@ -48,18 +50,24 @@ impl Locations {
             if selected || response.hovered() || response.has_focus() {
                 ui.painter().rect_filled(
                     rect,
-                    6,
-                    if selected {
-                        ui.visuals().selection.bg_fill
-                    } else {
-                        Palette::of(ui).card
-                    },
+                    ui::control_radius(ui),
+                    ui::navigation_fill(ui, selected),
+                );
+            }
+            if selected && ui::is_fluent(ui.ctx()) {
+                ui.painter().rect_filled(
+                    egui::Rect::from_center_size(
+                        egui::pos2(rect.left() + 3.0, rect.center().y),
+                        Vec2::new(3.0, 16.0),
+                    ),
+                    2,
+                    Palette::of(ui).accent,
                 );
             }
             if response.has_focus() {
                 ui.painter().rect_stroke(
                     rect,
-                    6,
+                    ui::control_radius(ui),
                     egui::Stroke::new(1.0_f32, Palette::of(ui).accent),
                     egui::StrokeKind::Inside,
                 );
@@ -78,7 +86,7 @@ impl Locations {
             );
             let job = egui::text::LayoutJob::simple_singleline(
                 location.name.to_string(),
-                egui::FontId::proportional(13.0),
+                egui::TextStyle::Body.resolve(ui.style()),
                 Palette::of(ui).text,
             );
             let mut job = job;

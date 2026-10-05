@@ -1,6 +1,7 @@
 [package]
 name = "lwa_fm"
 edition = "2024"
+rust-version = "1.95"
 version = "0.0.1"
 homepage = "https://github.com/Leinnan/lwa_fm"
 
@@ -27,7 +28,7 @@ profiling = { version = "1.0.18", default-features = false }
 # Keep the profiler UI on the same egui version as the app.
 puffin = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 puffin_http = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
-puffin_egui = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
+puffin_egui = { optional = true, path = "vendor/puffin_egui" }
 icu = {git = "https://github.com/unicode-org/icu4x", rev = "4d2b015"}
 notify = "6.1"
 smallvec = "1.15"
@@ -36,15 +37,15 @@ fuzzy-matcher = "0.3"
 itertools = "0.14.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-eframe = { version = "0.34", default-features = false, features = [
+eframe = { version = "=0.36.2", default-features = false, features = [
     #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
     "default_fonts", # Embed the default egui fonts.
-    "wgpu",          # Use the glow rendering backend. Alternative: "wgpu".
+    "wgpu",          # Use the WGPU rendering backend.
     "persistence",   # Enable restoring app state when restarting the app.
     "wayland",       # To support Linux (and CI)
 ] }
-egui = "0.34"
-egui_extras = { version = "0.34", features = ["all_loaders", "gif"] }
+egui = "=0.36.2"
+egui_extras = { version = "=0.36.2", features = ["all_loaders", "gif"] }
 open = "5.3"
 walkdir = "2"
 sysinfo = "0.33"
@@ -53,26 +54,28 @@ image = { version = "0.25", features = ["jpeg", "png"] }
 ffmpeg-sidecar = "2.4.0"
 rand = "0.8"
 anyhow = "1"
-egui-notify = "0.22"
+egui-notify = { path = "vendor/egui-notify" }
 crossbeam = "0.8"
-egui_dock = "0.19"
+egui_dock = "=0.21.1"
 trash = "5.2"
 arboard = "3.4.1"
 embed_plist = "1.2"
 rayon = "1.10"
 bincode = "=2.0.1"
-egui_taffy = "0.12"
+egui_taffy = "=0.14.0"
 systemicons = { git = "https://github.com/Leinnan/systemicons.git" }
 lru = "0.16.3"
 glob = "0.3"
 regex = "1"
-wgpu = { version = "29", default-features = false }
+wgpu = { version = "30", default-features = false }
 
 [patch.crates-io]
 puffin = { git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
 windows = { version = "0.59", features = [
+    "Win32_Graphics_Dwm",
     "Win32_UI_Shell",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
@@ -81,8 +84,8 @@ windows = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
-egui_kittest = { version = "0.34", features = ["snapshot", "wgpu"] }
-egui-winit = { version = "0.34", features = ["accesskit"] }
+egui_kittest = { version = "=0.36.2", features = ["snapshot", "wgpu"] }
+egui-winit = { version = "=0.36.2", features = ["accesskit"] }
 
 [build-dependencies]
 anyhow = "1.0"

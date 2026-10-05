@@ -67,7 +67,10 @@ fn main() -> anyhow::Result<()> {
             )
             .with_min_inner_size([640.0, 420.0]),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
-            present_mode,
+            surface: eframe::egui_wgpu::SurfaceConfig {
+                present_mode,
+                ..eframe::egui_wgpu::SurfaceConfig::HIGH_THROUGHPUT
+            },
             on_surface_status: std::sync::Arc::new(|status| {
                 #[cfg(feature = "profiling")]
                 puffin::profile_scope!("lwa_fm::surface::error", &format!("{status:?}"));

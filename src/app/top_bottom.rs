@@ -91,7 +91,7 @@ impl App {
             return;
         };
         let response = ui.add_sized(
-            [ui.available_width().max(32.0), 28.0],
+            [ui.available_width().max(32.0), ui::control_height(ui)],
             AutoCompleteTextEdit::new(&mut info.text_input, &info.possible_options)
                 .max_suggestions(10)
                 .set_text_edit_properties(move |edit| {
@@ -118,6 +118,8 @@ impl App {
         ui.data_set_tab(index, info);
     }
     pub(crate) fn top_display(tab: &TabData, ui: &mut Ui) {
+        let text_color = Palette::of(ui).text;
+        let font = egui::TextStyle::Body.resolve(ui.style());
         let parts = &tab.top_display_path;
         if parts.is_empty() {
             ui.label(tab.current_path.get_name_from_path());
@@ -126,15 +128,10 @@ impl App {
         let widths: Vec<f32> = parts
             .iter()
             .map(|p| {
-                ui.fonts_mut(|f| {
-                    f.layout_no_wrap(
-                        p.text.clone(),
-                        egui::FontId::proportional(13.0),
-                        Palette::of(ui).text,
-                    )
-                })
-                .size()
-                .x + 36.0
+                ui.fonts_mut(|f| f.layout_no_wrap(p.text.clone(), font.clone(), text_color))
+                    .size()
+                    .x
+                    + 36.0
             })
             .collect();
         let collapse = widths.iter().sum::<f32>() > ui.available_width();
@@ -219,10 +216,10 @@ impl App {
         egui::Panel::top("top_panel")
             .frame(
                 egui::Frame::new()
-                    .fill(Palette::for_theme(ctx.global_style().visuals.dark_mode).toolbar)
+                    .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).toolbar)
                     .inner_margin(egui::Margin::symmetric(8, 6)),
             )
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 ui.horizontal_centered(|ui| {
                     if ui::icon_button(
                         ui,
@@ -259,10 +256,26 @@ impl App {
                             TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
                         }
                     });
-                    let trailing = if compact { 116.0 } else { 224.0 };
+                    let trailing = if ui::is_fluent(ui.ctx()) {
+                        let button_width = ui::control_height(ui)
+                            .max(2.0_f32.mul_add(ui.spacing().button_padding.x, 16.0));
+                        if compact {
+                            3.0 * (button_width + ui.spacing().item_spacing.x)
+                        } else {
+                            // Six buttons; the two view choices share a segment
+                            // with a 2px margin and no spacing between them.
+                            5.0_f32.mul_add(ui.spacing().item_spacing.x, 6.0 * button_width) + 4.0
+                        }
+                    } else if compact {
+                        116.0
+                    } else {
+                        224.0
+                    };
                     let width = (ui.available_width() - trailing).max(48.0);
-                    let (path_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(width, 28.0), egui::Sense::hover());
+                    let (path_rect, _) = ui.allocate_exact_size(
+                        Vec2::new(width, ui::control_height(ui)),
+                        egui::Sense::hover(),
+                    );
                     let mut path_ui = ui.new_child(
                         egui::UiBuilder::new()
                             .id_salt("path_controls")
@@ -376,14 +389,16 @@ impl App {
         egui::Panel::top("search_row")
             .frame(
                 egui::Frame::new()
-                    .fill(Palette::for_theme(ctx.global_style().visuals.dark_mode).toolbar)
+                    .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).toolbar)
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(ui::glyph(Icon::Search));
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut search.value)
+                            .min_size(crate::app::ui::text_edit_min_size(ui))
+                            .vertical_align(crate::app::ui::text_edit_align(ui))
                             .hint_text("Search files…")
                             .desired_width((ui.available_width() - 150.0).max(80.0)),
                     );
@@ -505,6 +520,8 @@ impl App {
                                 ui.horizontal(|ui| {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut search.new_dir_input)
+                                            .min_size(crate::app::ui::text_edit_min_size(ui))
+                                            .vertical_align(crate::app::ui::text_edit_align(ui))
                                             .hint_text("Folder path")
                                             .desired_width(230.0),
                                     );
@@ -559,6 +576,8 @@ impl App {
                                 ui.horizontal(|ui| {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut search.save_name_input)
+                                            .min_size(crate::app::ui::text_edit_min_size(ui))
+                                            .vertical_align(crate::app::ui::text_edit_align(ui))
                                             .hint_text("Search name")
                                             .desired_width(230.0),
                                     );
@@ -597,10 +616,10 @@ impl App {
         egui::Panel::bottom("bottomPanel")
             .frame(
                 egui::Frame::new()
-                    .fill(Palette::for_theme(ctx.global_style().visuals.dark_mode).toolbar)
+                    .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).toolbar)
                     .inner_margin(egui::Margin::symmetric(12, 4)),
             )
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     let Some(tab) = self.tabs.get_current_tab() else {
                         return;

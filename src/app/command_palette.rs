@@ -120,6 +120,8 @@ impl CommandPalette {
             ui.heading("Commands");
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
+                    .min_size(crate::app::ui::text_edit_min_size(ui))
+                    .vertical_align(crate::app::ui::text_edit_align(ui))
                     .id(egui::Id::new("command_palette_query"))
                     .hint_text("Find a command…")
                     .desired_width(ui.available_width()),
@@ -153,7 +155,7 @@ impl CommandPalette {
                     .show(ui, |ui| {
                         for (index, command) in commands.iter().enumerate() {
                             let response = ui.add_sized(
-                                [ui.available_width(), 28.0],
+                                [ui.available_width(), crate::app::ui::control_height(ui)],
                                 egui::Button::new(command.name.as_str())
                                     .selected(index == self.selected),
                             );

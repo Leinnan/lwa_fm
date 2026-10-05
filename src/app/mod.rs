@@ -36,6 +36,8 @@ pub mod dock;
 mod inspector;
 mod settings;
 mod side_panel;
+#[cfg(any(windows, test))]
+mod theme;
 mod top_bottom;
 pub mod ui;
 #[cfg(test)]
@@ -85,6 +87,9 @@ macro_rules! toast{
 #[derive(Deserialize, Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct App {
+    #[cfg(windows)]
+    #[serde(skip)]
+    chrome: theme::win32::WindowChrome,
     user_locations: Locations,
     #[cfg(not(target_os = "macos"))]
     drives_locations: Locations,
@@ -150,9 +155,18 @@ impl App {
                                 return;
                             };
                             let mut old_file_name = old.get_splitted_path().1.to_string();
-                            ui.add_enabled(false, egui::TextEdit::singleline(&mut old_file_name));
+                            ui.add_enabled(
+                                false,
+                                egui::TextEdit::singleline(&mut old_file_name)
+                                    .min_size(crate::app::ui::text_edit_min_size(ui))
+                                    .vertical_align(crate::app::ui::text_edit_align(ui)),
+                            );
                             ui.label("New name");
-                            ui.text_edit_singleline(&mut name);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut name)
+                                    .min_size(ui::text_edit_min_size(ui))
+                                    .vertical_align(ui::text_edit_align(ui)),
+                            );
                             let valid = !Path::new(&name).try_exists().is_ok_and(|f| f);
                             if ui.add_enabled(valid, egui::Button::new("Rename")).clicked() {
                                 if fs::rename(
@@ -507,6 +521,8 @@ impl Default for App {
         Self {
             #[cfg(not(target_os = "macos"))]
             drives_locations,
+            #[cfg(windows)]
+            chrome: theme::win32::WindowChrome::default(),
             user_locations: Locations::get_user_dirs(),
             tabs: crate::app::dock::MyTabs::new(&get_starting_path()),
             settings: ApplicationSettings::default(),
@@ -1200,6 +1216,8 @@ impl eframe::App for App {
         }
 
         self.render_modal(&ctx);
+        #[cfg(windows)]
+        self.chrome.sync(frame, ctx.theme());
 
         #[cfg(feature = "profiling")]
         {
@@ -1227,40 +1245,47 @@ impl eframe::App for App {
 }
 
 fn setup_custom_fonts(ctx: &egui::Context) {
-    // Start with the default fonts (we will be adding to them rather than replacing them).
-    let mut fonts = egui::FontDefinitions::default();
-    ui::register_icons(&mut fonts);
-    if let Ok((regular, semibold)) = get_fonts() {
-        fonts.font_data.insert(
-            "regular".to_owned(),
-            egui::FontData::from_owned(regular).into(),
-        );
-        fonts.font_data.insert(
-            "semibold".to_owned(),
-            egui::FontData::from_owned(semibold).into(),
-        );
-
-        // Put my font first (highest priority) for proportional text:
-        fonts
-            .families
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .insert(0, "regular".to_owned());
-        fonts
-            .families
-            .entry(egui::FontFamily::Name("semibold".into()))
-            .or_default()
-            .insert(0, "semibold".to_owned());
-
-        // Put my font as last fallback for monospace:
-        fonts
-            .families
-            .entry(egui::FontFamily::Monospace)
-            .or_default()
-            .push("regular".to_owned());
+    #[cfg(windows)]
+    {
+        theme::configure(ctx, theme::Config::platform());
     }
-    ctx.set_fonts(fonts);
-    ui::configure(ctx);
+    #[cfg(not(windows))]
+    {
+        // Start with the default fonts (we will be adding to them rather than replacing them).
+        let mut fonts = egui::FontDefinitions::default();
+        ui::register_icons(&mut fonts);
+        if let Ok((regular, semibold)) = get_fonts() {
+            fonts.font_data.insert(
+                "regular".to_owned(),
+                egui::FontData::from_owned(regular).into(),
+            );
+            fonts.font_data.insert(
+                "semibold".to_owned(),
+                egui::FontData::from_owned(semibold).into(),
+            );
+
+            // Put my font first (highest priority) for proportional text:
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "regular".to_owned());
+            fonts
+                .families
+                .entry(egui::FontFamily::Name("semibold".into()))
+                .or_default()
+                .insert(0, "semibold".to_owned());
+
+            // Put my font as last fallback for monospace:
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("regular".to_owned());
+        }
+        ctx.set_fonts(fonts);
+        ui::configure(ctx);
+    }
 }
 
 #[cfg(not(windows))]
@@ -1270,17 +1295,6 @@ fn get_fonts() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let regular = fs::read(font_path.join("SFNS.ttf"))
         .or_else(|_| fs::read(font_path.join("SFNSRounded.ttf")))?;
     let semibold = fs::read(font_path.join("SFCompact.ttf"))?;
-
-    Ok((regular, semibold))
-}
-
-#[cfg(windows)]
-fn get_fonts() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-    let app_data = std::env::var("APPDATA")?;
-    let font_path = std::path::Path::new(&app_data);
-
-    let regular = fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos.ttf"))?;
-    let semibold = fs::read(font_path.join("../Local/Microsoft/Windows/Fonts/aptos-semibold.ttf"))?;
 
     Ok((regular, semibold))
 }

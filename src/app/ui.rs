@@ -27,6 +27,7 @@ pub struct Palette {
     pub sidebar: Color32,
     pub toolbar: Color32,
     pub card: Color32,
+    pub card_border: Color32,
     pub border: Color32,
     pub text: Color32,
     pub secondary: Color32,
@@ -40,6 +41,7 @@ impl Palette {
                 sidebar: Color32::from_rgb(38, 38, 40),
                 toolbar: Color32::from_rgb(43, 43, 45),
                 card: Color32::from_rgb(48, 48, 51),
+                card_border: Color32::from_rgb(61, 61, 65),
                 border: Color32::from_rgb(61, 61, 65),
                 text: Color32::from_rgb(236, 236, 240),
                 secondary: Color32::from_rgb(152, 152, 158),
@@ -51,6 +53,7 @@ impl Palette {
                 sidebar: Color32::from_rgb(242, 242, 245),
                 toolbar: Color32::from_rgb(247, 247, 249),
                 card: Color32::from_rgb(250, 250, 252),
+                card_border: Color32::from_rgb(216, 216, 222),
                 border: Color32::from_rgb(216, 216, 222),
                 text: Color32::from_rgb(30, 30, 34),
                 secondary: Color32::from_rgb(100, 100, 108),
@@ -59,11 +62,37 @@ impl Palette {
         }
     }
     pub fn of(ui: &Ui) -> Self {
-        Self::for_theme(ui.visuals().dark_mode)
+        Self::for_context(ui.ctx(), ui.visuals().dark_mode)
+    }
+    pub fn for_context(ctx: &Context, dark: bool) -> Self {
+        #[cfg(any(windows, test))]
+        if super::theme::config(ctx).fluent {
+            let p = super::theme::palette(ctx, dark);
+            return Self {
+                content: p.panel_bg,
+                sidebar: p.sidebar_bg,
+                toolbar: p.toolbar_bg,
+                card: p.card_bg,
+                card_border: p.card_stroke,
+                border: p.border,
+                text: p.text,
+                secondary: p.hint_text,
+                accent: p.accent,
+            };
+        }
+        #[cfg(not(any(windows, test)))]
+        let _ = ctx;
+        Self::for_theme(dark)
     }
 }
 
 pub fn configure(ctx: &Context) {
+    #[cfg(any(windows, test))]
+    if super::theme::config(ctx).fluent {
+        super::theme::apply_styles(ctx);
+        return;
+    }
+
     ctx.all_styles_mut(|style| {
         let p = Palette::for_theme(style.visuals.dark_mode);
         style
@@ -139,7 +168,7 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, active: bool) -> Respon
         egui::Button::new(glyph(icon))
             .selected(active)
             .frame(active)
-            .min_size(Vec2::new(28.0, 28.0)),
+            .min_size(Vec2::splat(control_height(ui))),
     );
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, label)
@@ -147,7 +176,7 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, active: bool) -> Respon
     if response.has_focus() {
         ui.painter().rect_stroke(
             response.rect,
-            6,
+            control_radius(ui),
             Stroke::new(1.0_f32, Palette::of(ui).accent),
             egui::StrokeKind::Inside,
         );
@@ -157,8 +186,8 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, active: bool) -> Respon
 pub fn card(ui: &Ui) -> Frame {
     Frame::new()
         .fill(Palette::of(ui).card)
-        .stroke(Stroke::new(1.0_f32, Palette::of(ui).border))
-        .corner_radius(10)
+        .stroke(Stroke::new(1.0_f32, Palette::of(ui).card_border))
+        .corner_radius(card_radius(ui))
         .inner_margin(12)
 }
 pub fn section(ui: &mut Ui, title: &str) {
@@ -182,7 +211,10 @@ pub fn badge(ui: &mut Ui, text: &str) {
 }
 pub fn form_row(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
-        ui.add_sized([110.0, 26.0], egui::Label::new(label));
+        ui.add_sized(
+            [110.0, ui.spacing().interact_size.y],
+            egui::Label::new(label),
+        );
         content(ui);
     });
 }
@@ -206,7 +238,7 @@ pub fn segmented_icons(ui: &mut Ui, choices: &[(Icon, &str)], selected: usize) -
     let mut next = None;
     Frame::new()
         .fill(Palette::of(ui).card)
-        .corner_radius(6)
+        .corner_radius(control_radius(ui))
         .inner_margin(2)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -219,6 +251,96 @@ pub fn segmented_icons(ui: &mut Ui, choices: &[(Icon, &str)], selected: usize) -
             });
         });
     next
+}
+
+#[cfg(test)]
+pub fn snapshot_options() -> egui_kittest::SnapshotOptions {
+    let options = egui_kittest::SnapshotOptions::new();
+    if cfg!(windows) {
+        options.output_path("tests/snapshots/windows")
+    } else {
+        options
+    }
+}
+
+pub fn is_fluent(ctx: &Context) -> bool {
+    #[cfg(any(windows, test))]
+    {
+        super::theme::config(ctx).fluent
+    }
+    #[cfg(not(any(windows, test)))]
+    {
+        let _ = ctx;
+        false
+    }
+}
+pub fn control_height(ui: &Ui) -> f32 {
+    if is_fluent(ui.ctx()) { 32.0 } else { 28.0 }
+}
+pub fn text_edit_min_size(ui: &Ui) -> Vec2 {
+    if is_fluent(ui.ctx()) {
+        Vec2::new(0.0, 32.0)
+    } else {
+        Vec2::ZERO
+    }
+}
+pub fn text_edit_align(ui: &Ui) -> egui::Align {
+    if is_fluent(ui.ctx()) {
+        egui::Align::Center
+    } else {
+        egui::Align::Min
+    }
+}
+pub fn control_radius(ui: &Ui) -> u8 {
+    #[cfg(any(windows, test))]
+    if is_fluent(ui.ctx()) {
+        return super::theme::metrics::FLUENT_METRICS.control_radius;
+    }
+    let _ = ui;
+    6
+}
+pub fn card_radius(ui: &Ui) -> u8 {
+    #[cfg(any(windows, test))]
+    if is_fluent(ui.ctx()) {
+        return super::theme::metrics::FLUENT_METRICS.card_radius;
+    }
+    let _ = ui;
+    10
+}
+pub fn nav_row_height(ui: &Ui) -> f32 {
+    #[cfg(any(windows, test))]
+    if is_fluent(ui.ctx()) {
+        return super::theme::metrics::FLUENT_METRICS.nav_row_height;
+    }
+    let _ = ui;
+    28.0
+}
+pub fn navigation_fill(ui: &Ui, selected: bool) -> Color32 {
+    #[cfg(any(windows, test))]
+    if is_fluent(ui.ctx()) {
+        let p = super::theme::palette(ui.ctx(), ui.visuals().dark_mode);
+        return if selected {
+            p.subtle_selected
+        } else {
+            p.subtle_hover
+        };
+    }
+    if selected {
+        ui.visuals().selection.bg_fill
+    } else {
+        Palette::of(ui).card
+    }
+}
+#[cfg(test)]
+pub fn configure_test(ctx: &Context, fluent: bool) {
+    super::theme::configure(
+        ctx,
+        super::theme::Config {
+            fluent,
+            system_fonts: false,
+            accent: super::theme::palette::AccentShades::WINDOWS_DEFAULT,
+        },
+    );
 }
 
 #[cfg(test)]

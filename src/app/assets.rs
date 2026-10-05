@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -2365,40 +2365,55 @@ fn decoded_from_dynamic(image: &image::DynamicImage, name: String) -> DecodedIma
     clippy::items_after_statements,
     reason = "test fixture bypass precedes platform icon extraction"
 )]
+#[cfg_attr(
+    all(test, windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the deterministic test loader preserves the fallible native API"
+    )
+)]
 fn load_system_icon_image(lookup_arg: &str, icon_size: IconSize) -> Option<DecodedImage> {
-    #[cfg(test)]
-    if Path::new(lookup_arg)
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .is_none_or(|ext| ext.eq_ignore_ascii_case("txt"))
-        && lookup_arg != "folder"
+    #[cfg(all(test, windows))]
     {
-        return Some(deterministic_test_document_icon(lookup_arg, icon_size));
+        Some(deterministic_test_document_icon(lookup_arg, icon_size))
     }
 
-    // The Windows shell/GDI extraction used by `systemicons` is not reliably
-    // re-entrant. Serializing this short call prevents corrupt/alternate
-    // generic icons when several quick workers request extensions together.
-    static SYSTEM_ICON_EXTRACTION: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    let _guard = SYSTEM_ICON_EXTRACTION
-        .lock()
-        .expect("system icon extraction mutex poisoned");
-    let px = icon_size.system_icon_px();
-    let bytes = match systemicons::get_icon(lookup_arg, px) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("systemicons::get_icon failed for {lookup_arg:?}: {e:?}");
-            return None;
+    #[cfg(not(all(test, windows)))]
+    {
+        #[cfg(test)]
+        if Path::new(lookup_arg)
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_none_or(|ext| ext.eq_ignore_ascii_case("txt"))
+            && lookup_arg != "folder"
+        {
+            return Some(deterministic_test_document_icon(lookup_arg, icon_size));
         }
-    };
-    let image = match image::load_from_memory(&bytes) {
-        Ok(img) => img,
-        Err(e) => {
-            log::warn!("image::load_from_memory failed for {lookup_arg:?}: {e}");
-            return None;
-        }
-    };
-    Some(decoded_from_dynamic(&image, lookup_arg.to_string()))
+        // The Windows shell/GDI extraction used by `systemicons` is not reliably
+        // re-entrant. Serializing this short call prevents corrupt/alternate
+        // generic icons when several quick workers request extensions together.
+        static SYSTEM_ICON_EXTRACTION: std::sync::LazyLock<Mutex<()>> =
+            std::sync::LazyLock::new(|| Mutex::new(()));
+        let _guard = SYSTEM_ICON_EXTRACTION
+            .lock()
+            .expect("system icon extraction mutex poisoned");
+        let px = icon_size.system_icon_px();
+        let bytes = match systemicons::get_icon(lookup_arg, px) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("systemicons::get_icon failed for {lookup_arg:?}: {e:?}");
+                return None;
+            }
+        };
+        let image = match image::load_from_memory(&bytes) {
+            Ok(img) => img,
+            Err(e) => {
+                log::warn!("image::load_from_memory failed for {lookup_arg:?}: {e}");
+                return None;
+            }
+        };
+        Some(decoded_from_dynamic(&image, lookup_arg.to_string()))
+    }
 }
 
 #[cfg(test)]

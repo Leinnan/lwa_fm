@@ -26,10 +26,12 @@ impl App {
                 .resizable(true)
                 .frame(
                     egui::Frame::new()
-                        .fill(Palette::for_theme(ctx.global_style().visuals.dark_mode).sidebar)
+                        .fill(
+                            Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).sidebar,
+                        )
                         .inner_margin(12),
                 )
-                .show_inside(root, |ui| {
+                .show(root, |ui| {
                     let rect = ui.available_rect_before_wrap();
                     ui.allocate_space(rect.size());
                     rect
@@ -46,7 +48,7 @@ impl App {
                     .inner_margin(egui::Margin::ZERO)
                     .outer_margin(egui::Margin::ZERO),
             )
-            .show_inside(root, |ui| self.tabs.ui(ui, &mut self.assets))
+            .show(root, |ui| self.tabs.ui(ui, &mut self.assets))
             .response;
         self.tabs.focused = self.display_modal.is_none()
             && !self.sidebar_overlay

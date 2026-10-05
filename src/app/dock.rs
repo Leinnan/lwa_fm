@@ -360,7 +360,7 @@ impl CurrentPath {
                 {
                     let mut result = path
                         .iter()
-                        .last()
+                        .next_back()
                         .expect("FAILED")
                         .to_string_lossy()
                         .into_owned();
@@ -848,7 +848,31 @@ impl MyTabViewer<'_> {
 
         let is_searching = tab.is_searching();
         let multiple_dirs = tab.deep_or_multiple_paths();
-        let text_height = 28.0_f32;
+        let text_height = crate::app::ui::control_height(ui);
+        let fluent = crate::app::ui::is_fluent(ui.ctx());
+        let name_column = if fluent {
+            minmax(length(0.0_f32), fr(1.0_f32))
+        } else {
+            fr(1.0_f32)
+        };
+        // Narrow Fluent split panes still need useful file-name space.
+        // Keep the legacy column layout on other platforms and in its tests.
+        let (modified_width, modified_min, modified_max, size_width, size_min, size_max) = if fluent
+        {
+            let modified = (ui.available_width() * 0.28).clamp(104.0, COL_MODIFIED_W);
+            let size = (ui.available_width() * 0.20).clamp(64.0, COL_SIZE_W);
+            (modified, modified, modified, size, size, size)
+        } else {
+            (
+                COL_MODIFIED_W,
+                COL_MODIFIED_MIN,
+                COL_MODIFIED_MAX,
+                COL_SIZE_W,
+                COL_SIZE_MIN,
+                COL_SIZE_MAX,
+            )
+        };
+
         let entries_len = tab.visible_entries.len();
 
         let mut new_sort = None;
@@ -906,7 +930,7 @@ impl MyTabViewer<'_> {
                     bottom: LengthPercentage::ZERO,
                 },
                 // 3 columns: Name (1fr, fills remaining), Modified (fixed), Size (fixed)
-                grid_template_columns: vec![fr(1_f32), length(COL_MODIFIED_W), length(COL_SIZE_W)],
+                grid_template_columns: vec![name_column, length(modified_width), length(size_width)],
                 size: taffy::Size {
                     width: percent(1_f32),
                     height: auto(),
@@ -1093,15 +1117,15 @@ impl MyTabViewer<'_> {
                                     bottom: LengthPercentage::ZERO,
                                 };
                                 style.size = taffy::Size {
-                                    width: length(COL_MODIFIED_W),
+                                    width: length(modified_width),
                                     height: auto(),
                                 };
                                 style.min_size = taffy::Size {
-                                    width: length(COL_MODIFIED_MIN),
+                                    width: length(modified_min),
                                     height,
                                 };
                                 style.max_size = taffy::Size {
-                                    width: length(COL_MODIFIED_MAX),
+                                    width: length(modified_max),
                                     height: auto(),
                                 };
                                 style.align_items = Some(taffy::AlignItems::Stretch);
@@ -1153,15 +1177,15 @@ impl MyTabViewer<'_> {
                                     bottom: LengthPercentage::ZERO,
                                 };
                                 style.size = taffy::Size {
-                                    width: length(COL_SIZE_W),
+                                    width: length(size_width),
                                     height: auto(),
                                 };
                                 style.min_size = taffy::Size {
-                                    width: length(COL_SIZE_MIN),
+                                    width: length(size_min),
                                     height,
                                 };
                                 style.max_size = taffy::Size {
-                                    width: length(COL_SIZE_MAX),
+                                    width: length(size_max),
                                     height: auto(),
                                 };
                                 style.align_items = Some(taffy::AlignItems::Stretch);
@@ -1278,15 +1302,15 @@ impl MyTabViewer<'_> {
                         style.align_items = Some(taffy::AlignItems::Center);
                         style.justify_content = Some(taffy::JustifyContent::FlexEnd);
                         style.size = taffy::Size {
-                            width: length(COL_MODIFIED_W),
+                            width: length(modified_width),
                             height: auto(),
                         };
                         style.min_size = taffy::Size {
-                            width: length(COL_MODIFIED_MIN),
+                            width: length(modified_min),
                             height: auto(),
                         };
                         style.max_size = taffy::Size {
-                            width: length(COL_MODIFIED_MAX),
+                            width: length(modified_max),
                             height: auto(),
                         };
                     })
@@ -1319,15 +1343,15 @@ impl MyTabViewer<'_> {
                         style.align_items = Some(taffy::AlignItems::Center);
                         style.justify_content = Some(taffy::JustifyContent::FlexEnd);
                         style.size = taffy::Size {
-                            width: length(COL_SIZE_W),
+                            width: length(size_width),
                             height: auto(),
                         };
                         style.min_size = taffy::Size {
-                            width: length(COL_SIZE_MIN),
+                            width: length(size_min),
                             height: auto(),
                         };
                         style.max_size = taffy::Size {
-                            width: length(COL_SIZE_MAX),
+                            width: length(size_max),
                             height: auto(),
                         };
                     })
@@ -2164,7 +2188,11 @@ impl MyTabs {
         style.tab.tab_body.inner_margin = egui::Margin::same(0);
         style.tab.tab_body.stroke = egui::Stroke::NONE;
         style.tab.tab_body.bg_fill = ui.visuals.panel_fill;
-        style.tab_bar.height = if tabs_amount > 1 { 30.0 } else { 0.0 };
+        style.tab_bar.height = if tabs_amount > 1 {
+            ui.spacing.interact_size.y.max(30.0)
+        } else {
+            0.0
+        };
         style
     }
 }
@@ -2367,7 +2395,7 @@ pub mod tests {
         assets: &RefCell<crate::app::assets::AssetManager>,
     ) {
         let ctx = ui.ctx().clone();
-        crate::app::ui::configure(&ctx);
+        crate::app::ui::configure_test(&ctx, false);
         ctx.set_theme(egui::Theme::Dark);
         // The UI harness adds an outer margin; paint it like the full-window panel.
         ui.painter().with_clip_rect(ctx.content_rect()).rect_filled(
@@ -2421,6 +2449,7 @@ pub mod tests {
             .collect();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(900.0, 500.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2446,6 +2475,7 @@ pub mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(900.0, 500.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2469,6 +2499,7 @@ pub mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(350.0, 500.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2506,6 +2537,7 @@ pub mod tests {
 
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(400.0, 600.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2531,6 +2563,7 @@ pub mod tests {
 
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(700.0, 400.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2548,6 +2581,7 @@ pub mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(960.0, 620.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2565,6 +2599,7 @@ pub mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(420.0, 620.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2582,6 +2617,7 @@ pub mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(620.0, 700.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2599,6 +2635,7 @@ pub mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(820.0, 520.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2623,6 +2660,7 @@ pub mod tests {
 
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(720.0, 420.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
@@ -2640,6 +2678,7 @@ pub mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(960.0, 620.0))
             .build_ui_state(
                 |ui, my_tabs: &mut MyTabs| {

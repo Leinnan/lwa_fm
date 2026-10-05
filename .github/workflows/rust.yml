@@ -30,6 +30,14 @@ jobs:
             target/
           key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-build-
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: extractions/setup-just@v2
       - name: Validate
         run: just validate
+      - name: Validate profiling
+        run: |
+          cargo check --locked --features profiling
+          cargo test --locked --features profiling
+          cargo clippy --locked --all-targets --features profiling -- -D warnings

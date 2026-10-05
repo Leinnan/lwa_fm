@@ -109,6 +109,8 @@ impl ApplicationSettings {
                             ui::form_row(ui, "Terminal app", |ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.terminal_path)
+                                        .min_size(crate::app::ui::text_edit_min_size(ui))
+                                        .vertical_align(crate::app::ui::text_edit_align(ui))
                                         .desired_width(ui.available_width()),
                                 );
                             });

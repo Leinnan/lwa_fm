@@ -35,10 +35,10 @@ impl App {
             .resizable(true)
             .frame(
                 egui::Frame::new()
-                    .fill(Palette::for_theme(ctx.global_style().visuals.dark_mode).sidebar)
+                    .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).sidebar)
                     .inner_margin(8),
             )
-            .show_inside(root, |ui| self.locations_ui(ui));
+            .show(root, |ui| self.locations_ui(ui));
         self.settings.sidebar_width = panel.response.rect.width().clamp(160.0, 280.0);
     }
 }
