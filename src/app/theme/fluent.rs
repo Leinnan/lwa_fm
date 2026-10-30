@@ -54,7 +54,7 @@ fn visuals(theme: Theme, p: &Palette) -> Visuals {
         Theme::Light => Visuals::light(),
     };
     v.override_text_color = None;
-    v.weak_text_color = Some(p.hint_text);
+    v.weak_text_color = Some(p.text_weak);
     v.hyperlink_color = p.accent;
     v.panel_fill = p.panel_bg;
     v.window_fill = p.window_bg;

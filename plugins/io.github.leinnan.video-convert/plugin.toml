@@ -1,0 +1,35 @@
+api_version = 1
+id = "io.github.leinnan.video-convert"
+name = "Video Converter"
+version = "1.0.0"
+author = "DirFleet"
+description = "Converts videos with FFmpeg: MOV and AVI to MP4 in one click, or any format, quality and fragment."
+permissions = ["fs.read", "ffmpeg"]
+# Conversions are heavy: one at a time.
+max_jobs = 1
+
+# One click: `clip.mov` becomes `clip.mp4` next to it.
+[[action]]
+id = "to_mp4"
+title = "Convert to MP4"
+icon = "film"
+context_menu = "entry"
+targets = { kind = "files", ext = ["mov", "avi"] }
+mode = "job"
+per_item = true
+
+# Asks for the format, quality, size and range first.
+[[action]]
+id = "convert"
+title = "Convert video…"
+icon = "settings-2"
+shortcut = "Ctrl+Alt+M"
+context_menu = "entry"
+targets = { kind = "files", ext = ["mov", "avi", "mp4", "m4v", "mkv", "webm", "wmv", "flv", "mpg", "mpeg", "3gp", "ts", "mts", "m2ts"] }
+form = "dynamic"
+mode = "job"
+per_item = true
+
+[inspector]
+title = "Media"
+targets = { kind = "files", max = 1, ext = ["mov", "avi", "mp4", "m4v", "mkv", "webm", "wmv", "flv", "mpg", "mpeg", "3gp", "ts", "mts", "m2ts", "mp3", "wav", "flac", "m4a", "ogg", "opus"] }

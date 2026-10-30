@@ -1,4 +1,3 @@
-pub const VERSION: &str = concat!(" v ", env!("CARGO_PKG_VERSION"), " ");
 pub const HOMEPAGE: &str = env!("CARGO_PKG_HOMEPAGE");
 #[cfg(debug_assertions)]
 pub const GIT_HASH_INFO: &str =

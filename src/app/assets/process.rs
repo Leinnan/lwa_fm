@@ -6,6 +6,12 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use crate::child_process::CREATE_NO_WINDOW;
+use crate::child_process::{ProcessTree, READER_GRACE, join_reader};
+
+/// How much of a tool's stderr is kept: the end, where the frame
+/// timestamps and errors are, survives a burst of warnings at the start.
 const STDERR_LIMIT: usize = 64 * 1024;
 static VIDEO_SLOT: Mutex<usize> = Mutex::new(0);
 #[cfg(test)]
@@ -80,8 +86,13 @@ impl VideoPermit {
         let mut busy = VIDEO_SLOT.lock().expect("video slot mutex");
         while *busy >= process_limit() {
             check(cancel, deadline)?;
+            // Woken when a permit is released; the timeout only bounds how
+            // late a cancel or the deadline is noticed.
+            let wait = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(100));
             busy = VIDEO_AVAILABLE
-                .wait_timeout(busy, Duration::from_millis(10))
+                .wait_timeout(busy, wait)
                 .expect("video slot wait")
                 .0;
         }
@@ -96,62 +107,6 @@ impl Drop for VideoPermit {
         *VIDEO_SLOT.lock().expect("video slot mutex") -= 1;
         VIDEO_AVAILABLE.notify_one();
     }
-}
-
-fn kill_and_reap(child: &mut std::process::Child) {
-    // A PATH executable can be a launcher. Stop descendants before closing pipe readers.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        let executable = std::env::var_os("SystemRoot").map_or_else(
-            || std::path::PathBuf::from("taskkill.exe"),
-            |root| std::path::PathBuf::from(root).join("System32/taskkill.exe"),
-        );
-        if let Ok(mut killer) = Command::new(executable)
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .creation_flags(0x0800_0000)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            let deadline = Instant::now() + Duration::from_secs(1);
-            while matches!(killer.try_wait(), Ok(None)) && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
-            }
-            let _ = killer.kill();
-            let _ = killer.wait();
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::All,
-            true,
-            sysinfo::ProcessRefreshKind::nothing(),
-        );
-        let mut descendants = vec![sysinfo::Pid::from_u32(child.id())];
-        let mut index = 0;
-        while index < descendants.len() {
-            let parent = descendants[index];
-            descendants.extend(
-                system
-                    .processes()
-                    .iter()
-                    .filter(|(_, process)| process.parent() == Some(parent))
-                    .map(|(pid, _)| *pid),
-            );
-            index += 1;
-        }
-        for pid in descendants.into_iter().rev() {
-            if let Some(process) = system.process(pid) {
-                process.kill();
-            }
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 pub(super) fn run(
@@ -187,14 +142,19 @@ pub(super) fn run_capture(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
-        command.creation_flags(0x0800_0000);
+        command.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = command.spawn().map_err(|err| {
-        MediaError::new(
-            ErrorKind::Unavailable,
-            format!("Could not start media tool: {err}"),
-        )
+        // Only a missing tool means FFmpeg is unavailable (and may be
+        // downloaded); other failures, like an antivirus block, don't.
+        let kind = if err.kind() == std::io::ErrorKind::NotFound {
+            ErrorKind::Unavailable
+        } else {
+            ErrorKind::Unsupported
+        };
+        MediaError::new(kind, format!("Could not start media tool: {err}"))
     })?;
+    let tree = ProcessTree::adopt(&child);
     PROCESS_COUNT.fetch_add(1, Ordering::Relaxed);
     let stdout = child.stdout.take().expect("piped media stdout");
     let stderr = child.stderr.take().expect("piped media stderr");
@@ -213,31 +173,40 @@ pub(super) fn run_capture(
             if count == 0 {
                 break;
             }
-            let room = STDERR_LIMIT.saturating_sub(retained.len());
-            let _ = retained.write_all(&buffer[..count.min(room)]);
+            let _ = retained.write_all(&buffer[..count]);
+            // Keep the most recent output.
+            if retained.len() > 2 * STDERR_LIMIT {
+                retained.drain(..retained.len() - STDERR_LIMIT);
+            }
+        }
+        if retained.len() > STDERR_LIMIT {
+            retained.drain(..retained.len() - STDERR_LIMIT);
         }
         String::from_utf8_lossy(&retained).into_owned()
     });
     let status = loop {
         if let Err(error) = check(cancel, deadline) {
-            kill_and_reap(&mut child);
+            tree.kill(&mut child);
             break Err(error);
         }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(error) => {
-                kill_and_reap(&mut child);
+                tree.kill(&mut child);
                 break Err(MediaError::new(ErrorKind::InvalidMedia, error.to_string()));
             }
         }
     };
-    let bytes = output_reader
-        .join()
-        .map_err(|_| MediaError::new(ErrorKind::InvalidMedia, "Media output reader panicked"))?
+    // The child is done; anything it started is not needed any more.
+    #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
+    drop(tree);
+    let grace_until = Instant::now() + READER_GRACE;
+    let bytes = join_reader(output_reader, grace_until)
+        .ok_or_else(|| MediaError::new(ErrorKind::Timeout, "Media output did not finish"))?
         .map_err(|err| MediaError::new(ErrorKind::InvalidMedia, err.to_string()))?;
     OUTPUT_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-    let stderr = error_reader.join().unwrap_or_default();
+    let stderr = join_reader(error_reader, grace_until).unwrap_or_default();
     if bytes.len() > output_limit {
         return Err(MediaError::new(
             ErrorKind::Limit,
@@ -282,7 +251,7 @@ mod tests {
                 #[cfg(windows)]
                 {
                     use std::os::windows::process::CommandExt as _;
-                    command.creation_flags(0x0800_0000);
+                    command.creation_flags(CREATE_NO_WINDOW);
                 }
                 let mut child = command.spawn().expect("asset fixture operation");
                 child.wait().expect("asset fixture operation");

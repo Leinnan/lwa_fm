@@ -11,7 +11,7 @@ impl App {
             self.settings.sidebar_visible,
             self.settings.inspector_visible,
         );
-        let owns_preview = (layout.inspector || self.inspector_overlay)
+        let owns_preview = (layout.inspector || self.tabs.window().inspector_overlay)
             && self
                 .inspector_view(ctx)
                 .is_some_and(|view| view.paths.len() == 1);
@@ -41,19 +41,14 @@ impl App {
         } else {
             None
         };
-        let response = egui::CentralPanel::default()
+        egui::CentralPanel::default()
             .frame(
                 egui::Frame::central_panel(&ctx.global_style())
                     .shadow(Shadow::NONE)
                     .inner_margin(egui::Margin::ZERO)
                     .outer_margin(egui::Margin::ZERO),
             )
-            .show(root, |ui| self.tabs.ui(ui, &mut self.assets))
-            .response;
-        self.tabs.focused = self.display_modal.is_none()
-            && !self.sidebar_overlay
-            && !self.inspector_overlay
-            && (response.has_focus() || response.hovered());
+            .show(root, |ui| self.tabs.ui(ui, &mut self.assets));
         if let Some(rect) = inspector_rect {
             egui::Area::new("inspector_content".into())
                 .fixed_pos(rect.min)

@@ -5,16 +5,41 @@ use consts::APP_NAME;
 use eframe::egui;
 
 mod app;
+mod child_process;
+mod clipboard;
 mod consts;
 pub mod data;
+mod drives;
+mod fileops;
+mod fs_enum;
 mod helper;
 mod locations;
+#[cfg(target_os = "macos")]
+mod macos_tools;
+mod native_drag;
+mod plugins;
 #[cfg(feature = "profiling")]
 mod profiler;
 mod watcher;
 mod widgets;
 #[cfg(windows)]
 mod windows_tools;
+
+/// The system file manager integration: Explorer on Windows, Finder on macOS.
+#[cfg(target_os = "macos")]
+use macos_tools as shell;
+#[cfg(windows)]
+use windows_tools as shell;
+
+// Gives the bare binary (`cargo run`) the bundle's identity and privacy
+// strings; the built `.app` reads the same file from `Contents/Info.plist`.
+#[cfg(target_os = "macos")]
+embed_plist::embed_info_plist!("../static/Info.plist");
+
+// The listing, asset and layout paths are allocation heavy; mimalloc is
+// markedly faster than the platform allocators for that workload.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn parse_present_mode() -> wgpu::PresentMode {
     let mut args = std::env::args();
@@ -91,10 +116,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         APP_NAME,
         native_options,
-        Box::new(|cc| {
-            egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(app::App::new(cc)))
-        }),
+        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))
     .context("Failed to run native")

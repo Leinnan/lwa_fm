@@ -1,9 +1,7 @@
 //! Disk storage with bounded reads, atomic publication, and recurring eviction.
-use super::IconSize;
 #[cfg(not(test))]
 use directories::ProjectDirs;
 use lru::LruCache;
-use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
@@ -21,11 +19,37 @@ static WRITTEN_BYTES: AtomicU64 = AtomicU64::new(0);
 static MAINTENANCE_RUNNING: AtomicBool = AtomicBool::new(false);
 static LAST_MAINTENANCE: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
 
+/// How often a read refreshes the file's timestamp on disk.
+const PERSIST_RECENCY_EVERY: Duration = Duration::from_hours(1);
+/// How often the cache folder is swept when little was written.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_mins(10);
+/// Written bytes that trigger a sweep before the interval is up.
+const MAINTENANCE_AFTER_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Records that a cache entry was used. Recency lives in memory, and is
+/// also written to the file's modified time at most once an hour, so the
+/// eviction order survives a restart.
 pub(super) fn touch(path: &Path) {
-    RECENCY
+    let now = SystemTime::now();
+    let previous = RECENCY
         .lock()
         .expect("cache recency mutex")
-        .put(path.to_path_buf(), SystemTime::now());
+        .put(path.to_path_buf(), now);
+    let stale = previous.is_none_or(|seen| {
+        now.duration_since(seen)
+            .is_ok_and(|age| age >= PERSIST_RECENCY_EVERY)
+    });
+    if stale
+        && fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| {
+                now.duration_since(modified)
+                    .is_ok_and(|age| age >= PERSIST_RECENCY_EVERY)
+            })
+        && let Ok(file) = fs::File::options().write(true).open(path)
+    {
+        let _ = file.set_modified(now);
+    }
 }
 
 pub(super) fn read_bounded(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
@@ -81,8 +105,8 @@ pub(super) fn atomic_save_bytes(bytes: &[u8], path: &Path) -> bool {
 
 pub(super) fn maybe_maintain() {
     let mut last = LAST_MAINTENANCE.lock().expect("cache maintenance mutex");
-    if last.is_some_and(|time| time.elapsed() < Duration::from_secs(60))
-        && WRITTEN_BYTES.load(Ordering::Relaxed) < 16 * 1024 * 1024
+    if last.is_some_and(|time| time.elapsed() < MAINTENANCE_INTERVAL)
+        && WRITTEN_BYTES.load(Ordering::Relaxed) < MAINTENANCE_AFTER_BYTES
     {
         return;
     }
@@ -128,10 +152,13 @@ pub(super) fn maintain(root: &Path, max_bytes: u64, target_bytes: u64) {
             }
             continue;
         }
-        if name.contains("_v2.")
+        if name.ends_with("_owner.json")
+            || name.contains("_v2.")
             || name.contains("_v3.")
-            || name.contains("_anim_v3.")
-            || name.contains("_anim_v4.")
+            || name.contains("_v4.")
+            || name.contains("_v5.")
+            || name.contains("_v6.")
+            || name.contains("_overview_v7.")
         {
             let _ = fs::remove_file(path);
             continue;
@@ -176,100 +203,64 @@ pub(super) fn maintain(root: &Path, max_bytes: u64, target_bytes: u64) {
     }
 }
 
-pub(super) fn thumbnail_cache_ext(source_path: &Path) -> &'static str {
-    let ext = source_path
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .map(str::to_ascii_lowercase);
-    match ext.as_deref() {
-        Some("png" | "gif" | "ico" | "webp" | "tiff" | "tif") => "png",
-        // jpg, jpeg, bmp, avif, tga and all video extensions default to JPEG.
-        _ => "jpg",
+/// Create a cache shard directory at most once per process instead of a
+/// `create_dir_all` per thumbnail request.
+pub(super) fn ensure_shard(prefix: &str) -> PathBuf {
+    static CREATED: LazyLock<Mutex<std::collections::HashSet<String>>> =
+        LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+    let shard_name = &prefix[..2];
+    let shard = thumbnail_cache_dir().join(shard_name);
+    let mut created = CREATED.lock().expect("cache shard mutex");
+    // Only success is remembered, so a cache folder deleted while the app
+    // runs is created again on the next write.
+    if !created.contains(shard_name) && fs::create_dir_all(&shard).is_ok() {
+        created.insert(shard_name.to_owned());
     }
-}
-
-pub(super) fn register_source(path: &Path, prefix: &str) {
-    let shard = thumbnail_cache_dir().join(&prefix[..2]);
-    let _ = fs::create_dir_all(&shard);
-    let owner = shard.join(format!("{prefix}_owner.json"));
-    if !owner.exists()
-        && let Ok(bytes) = serde_json::to_vec(path)
-    {
-        atomic_save_bytes(&bytes, &owner);
-    }
-}
-
-pub(super) fn purge_sources(paths: &[PathBuf], directories: bool) {
-    let mut prefixes: std::collections::HashSet<String> =
-        paths.iter().map(|path| source_prefix(path)).collect();
-    if directories {
-        prefixes.clear();
-        for entry in walkdir::WalkDir::new(thumbnail_cache_dir())
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.file_type().is_file()
-                    && entry.file_name().to_string_lossy().ends_with("_owner.json")
-            })
-        {
-            if let Ok(bytes) = read_bounded(entry.path(), 64 * 1024)
-                && let Ok(source) = serde_json::from_slice::<PathBuf>(&bytes)
-                && paths.iter().any(|directory| source.starts_with(directory))
-                && let Some(prefix) = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|name| name.strip_suffix("_owner.json"))
-            {
-                prefixes.insert(prefix.to_owned());
-            }
-        }
-    }
-    for prefix in prefixes {
-        if let Ok(entries) = fs::read_dir(thumbnail_cache_dir().join(&prefix[..2])) {
-            for entry in entries.filter_map(Result::ok) {
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(&format!("{prefix}_"))
-                {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
+    shard
 }
 
 pub(super) fn source_prefix(path: &Path) -> String {
-    let mut hash = DefaultHasher::new();
-    crate::helper::normalize_path_string(path).hash(&mut hash);
+    let mut hash = stable_hasher();
+    crate::helper::canonical_string(path).hash(&mut hash);
     format!("{:016x}", hash.finish())
 }
 
+/// A hasher whose output doesn't change with the Rust toolchain, so cache
+/// file names and checksums stay valid across upgrades (`DefaultHasher`
+/// makes no such promise).
+pub(super) fn stable_hasher() -> impl Hasher {
+    use std::hash::BuildHasher;
+    foldhash::fast::FixedState::default().build_hasher()
+}
+
+/// Where the thumbnail of `path` at `target_edge` is cached. The `.jpg` name
+/// is the default; images with transparency are stored next to it as `.png`
+/// (see [`cached_variant`] and [`atomic_save_image`]).
 pub(super) fn thumbnail_cache_path(
     path: &Path,
-    _size: IconSize,
     target_edge: u32,
     source_revision: u128,
     source_size: u64,
 ) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    crate::helper::normalize_path_string(path).hash(&mut hasher);
-    if super::thumbnail_kind(path) == Some(super::ThumbnailKind::Video) {
+    let mut hasher = stable_hasher();
+    crate::helper::canonical_string(path).hash(&mut hasher);
+    if super::kinds::media_kind(path) == Some(super::kinds::MediaKind::Video) {
         super::media::backend_revision().hash(&mut hasher);
     }
     source_revision.hash(&mut hasher);
     source_size.hash(&mut hasher);
     target_edge.hash(&mut hasher);
-    let ext = thumbnail_cache_ext(path);
     let hash = format!("{:016x}", hasher.finish());
     let prefix = source_prefix(path);
-    register_source(
-        Path::new(&crate::helper::normalize_path_string(path)),
-        &prefix,
-    );
-    let shard = thumbnail_cache_dir().join(&prefix[..2]);
-    let _ = fs::create_dir_all(&shard);
-    shard.join(format!("{prefix}_{hash}_v6.{ext}"))
+    ensure_shard(&prefix).join(format!("{prefix}_{hash}_v7.jpg"))
+}
+
+/// The cached thumbnail file for a path from [`thumbnail_cache_path`], in
+/// whichever format it was saved.
+pub(super) fn cached_variant(path: &Path) -> Option<PathBuf> {
+    [path.to_path_buf(), path.with_extension("png")]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
 }
 
 pub(super) fn thumbnail_cache_dir() -> PathBuf {
@@ -287,31 +278,52 @@ pub(super) fn thumbnail_cache_dir() -> PathBuf {
 #[cfg(not(test))]
 pub(super) fn thumbnail_cache_base_dir() -> PathBuf {
     ProjectDirs::from("io", "github.leinnan", "dirfleet").map_or_else(
-        || PathBuf::from(".cache"),
+        || std::env::temp_dir().join("dirfleet"),
         |dirs| dirs.cache_dir().to_path_buf(),
     )
 }
 
-pub(super) fn atomic_save_image(image: &image::DynamicImage, cache_path: &Path) {
-    let extension = cache_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("png");
-    let format = if extension.eq_ignore_ascii_case("jpg") {
-        image::ImageFormat::Jpeg
+/// Whether any pixel is not fully opaque.
+pub(super) fn has_transparency(image: &image::DynamicImage) -> bool {
+    image.color().has_alpha() && image.to_rgba8().pixels().any(|pixel| pixel.0[3] < u8::MAX)
+}
+
+/// Encodes a thumbnail for the cache: JPEG when fully opaque (small, fast),
+/// PNG when it has transparency. Returns the bytes and the extension.
+pub(super) fn encode_thumbnail(image: &image::DynamicImage) -> Option<(Vec<u8>, &'static str)> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    let ext = if has_transparency(image) {
+        image.write_to(&mut bytes, image::ImageFormat::Png).ok()?;
+        "png"
     } else {
-        image::ImageFormat::Png
+        image::DynamicImage::ImageRgb8(image.to_rgb8())
+            .write_to(&mut bytes, image::ImageFormat::Jpeg)
+            .ok()?;
+        "jpg"
     };
-    let tmp = atomic_temp_path(cache_path, extension);
-    let saved = if format == image::ImageFormat::Jpeg {
-        image::DynamicImage::ImageRgb8(image.to_rgb8()).save_with_format(&tmp, format)
+    Some((bytes.into_inner(), ext))
+}
+
+/// Writes bytes from [`encode_thumbnail`] next to `cache_path` (which names
+/// the `.jpg` variant), replacing the other variant if there was one.
+pub(super) fn atomic_write_thumbnail(cache_path: &Path, bytes: &[u8], ext: &str) {
+    let target = cache_path.with_extension(ext);
+    let tmp = atomic_temp_path(&target, ext);
+    if fs::write(&tmp, bytes).is_ok() && fs::rename(&tmp, &target).is_ok() {
+        note_write(&target);
+        let other = if ext == "png" { "jpg" } else { "png" };
+        let _ = fs::remove_file(cache_path.with_extension(other));
     } else {
-        image.save_with_format(&tmp, format)
-    };
-    if saved.is_ok() && fs::rename(&tmp, cache_path).is_ok() {
-        note_write(cache_path);
-    } else {
+        log::debug!("could not write thumbnail cache {}", target.display());
         let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// Encodes and writes a thumbnail; see [`encode_thumbnail`].
+#[cfg(test)]
+pub(super) fn atomic_save_image(image: &image::DynamicImage, cache_path: &Path) {
+    if let Some((bytes, ext)) = encode_thumbnail(image) {
+        atomic_write_thumbnail(cache_path, &bytes, ext);
     }
 }
 
@@ -329,23 +341,19 @@ pub(super) fn atomic_temp_path(cache_path: &Path, extension: &str) -> PathBuf {
 mod tests {
     use super::*;
     #[test]
-    fn directory_purge_preserves_other_sources_and_sizes_share_entries() {
+    fn sizes_share_entries_and_sources_stay_distinct() {
         let directory =
             std::env::temp_dir().join(format!("lwa_cache_ownership_{}", std::process::id()));
         let inside = directory.join("nested/movie.mp4");
         let outside = directory.with_extension("other").join("movie.mp4");
-        let first = thumbnail_cache_path(&inside, IconSize::Small, 160, 1, 10);
-        assert_eq!(
-            first,
-            thumbnail_cache_path(&inside, IconSize::ExtraLarge, 160, 1, 10)
-        );
-        let second = thumbnail_cache_path(&outside, IconSize::Small, 160, 1, 10);
+        let first = thumbnail_cache_path(&inside, 160, 1, 10);
+        assert_eq!(first, thumbnail_cache_path(&inside, 160, 1, 10));
+        let second = thumbnail_cache_path(&outside, 160, 1, 10);
+        assert_ne!(first, second);
         assert!(atomic_save_bytes(b"inside", &first));
         assert!(atomic_save_bytes(b"outside", &second));
-        purge_sources(std::slice::from_ref(&directory), true);
-        assert!(!first.exists());
-        assert!(second.exists());
-        purge_sources(&[outside], false);
+        let _ = fs::remove_file(first);
+        let _ = fs::remove_file(second);
     }
 
     #[test]
@@ -405,4 +413,28 @@ mod tests {
         assert!(read_bounded(&path, 1).is_err());
         fs::remove_dir_all(root).expect("clean fixture");
     }
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::stable_hasher;
+    use std::hash::{Hash, Hasher};
+
+    /// Cache file names and checksums are built from this hasher. If this
+    /// value changes, every cached thumbnail is orphaned: bump the cache
+    /// version in the file names instead of updating the expected value.
+    #[test]
+    fn stable_hasher_output_is_fixed() {
+        let mut hasher = stable_hasher();
+        "C:/photos/holiday.jpg".hash(&mut hasher);
+        480_u32.hash(&mut hasher);
+        let first = hasher.finish();
+        let mut again = stable_hasher();
+        "C:/photos/holiday.jpg".hash(&mut again);
+        480_u32.hash(&mut again);
+        assert_eq!(first, again.finish());
+        assert_eq!(first, GOLDEN, "stable hasher output changed: {first:#x}");
+    }
+
+    const GOLDEN: u64 = 0x48e7_546a_8dc9_8b12;
 }

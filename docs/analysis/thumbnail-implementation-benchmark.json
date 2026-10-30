@@ -1,0 +1,147 @@
+{
+  "date": "2026-09-30",
+  "platform": "macOS ARM64",
+  "ffmpeg": "8.1.1",
+  "fixture": {
+    "codec": "H.264",
+    "resolution": [
+      640,
+      360
+    ],
+    "fps": 30,
+    "gop_seconds": 2,
+    "encoder_preset": "veryfast",
+    "repeated_segment_seconds": 20
+  },
+  "preview": {
+    "mode": "whole-video overview",
+    "frames": 12,
+    "edge": 240,
+    "delay_ms": 250
+  },
+  "method": "Three sequential trials of the original and new Rust sampling and decoding paths, on identical fixtures. New persistence includes background JPEG encoding and atomic writing. Ready times exclude UI dwell, queue wait and GPU upload. Old ready times include GIF generation and Rust decoding but exclude cache write.",
+  "results": [
+    {
+      "duration_seconds": 60,
+      "original_trials": [
+        {
+          "ready_ms": 484.10999999999996,
+          "frames": 12,
+          "cache_bytes": 56056,
+          "decoded_bytes": 1566720
+        },
+        {
+          "ready_ms": 470.75070800000003,
+          "frames": 12,
+          "cache_bytes": 56056,
+          "decoded_bytes": 1566720
+        },
+        {
+          "ready_ms": 464.252875,
+          "frames": 12,
+          "cache_bytes": 56056,
+          "decoded_bytes": 1566720
+        }
+      ],
+      "new_trials": [
+        {
+          "cache_bytes": 128382,
+          "coarse_ms": 150.149167,
+          "decoded_bytes": 1555200,
+          "disk_ms": 5.868375,
+          "persisted_ms": 441.993709,
+          "processes": 13,
+          "ready_ms": 411.55350000000004
+        },
+        {
+          "cache_bytes": 128382,
+          "coarse_ms": 153.94566600000002,
+          "decoded_bytes": 1555200,
+          "disk_ms": 5.505333,
+          "persisted_ms": 451.98895799999997,
+          "processes": 13,
+          "ready_ms": 420.56458299999997
+        },
+        {
+          "cache_bytes": 128382,
+          "coarse_ms": 152.726416,
+          "decoded_bytes": 1555200,
+          "disk_ms": 5.8865,
+          "persisted_ms": 449.73791600000004,
+          "processes": 13,
+          "ready_ms": 417.84958300000005
+        }
+      ],
+      "medians": {
+        "coarse_ms": 152.726416,
+        "ready_ms": 417.84958300000005,
+        "persisted_ms": 449.73791600000004,
+        "disk_ms": 5.868375,
+        "original_ready_ms": 470.75070800000003,
+        "ready_speedup": 1.126603273408077,
+        "persisted_speedup": 1.0467223048189693
+      }
+    },
+    {
+      "duration_seconds": 600,
+      "original_trials": [
+        {
+          "ready_ms": 4103.622375,
+          "frames": 12,
+          "cache_bytes": 56681,
+          "decoded_bytes": 1566720
+        },
+        {
+          "ready_ms": 4063.4383749999997,
+          "frames": 12,
+          "cache_bytes": 56681,
+          "decoded_bytes": 1566720
+        },
+        {
+          "ready_ms": 4058.1499169999997,
+          "frames": 12,
+          "cache_bytes": 56681,
+          "decoded_bytes": 1566720
+        }
+      ],
+      "new_trials": [
+        {
+          "cache_bytes": 128566,
+          "coarse_ms": 155.209,
+          "decoded_bytes": 1555200,
+          "disk_ms": 5.779458,
+          "persisted_ms": 459.017708,
+          "processes": 13,
+          "ready_ms": 427.652208
+        },
+        {
+          "cache_bytes": 128566,
+          "coarse_ms": 150.5895,
+          "decoded_bytes": 1555200,
+          "disk_ms": 6.328208,
+          "persisted_ms": 471.452083,
+          "processes": 13,
+          "ready_ms": 434.285125
+        },
+        {
+          "cache_bytes": 128566,
+          "coarse_ms": 152.916541,
+          "decoded_bytes": 1555200,
+          "disk_ms": 5.634542000000001,
+          "persisted_ms": 447.341625,
+          "processes": 13,
+          "ready_ms": 416.140333
+        }
+      ],
+      "medians": {
+        "coarse_ms": 152.916541,
+        "ready_ms": 427.652208,
+        "persisted_ms": 459.017708,
+        "disk_ms": 5.779458,
+        "original_ready_ms": 4063.4383749999997,
+        "ready_speedup": 9.501735987763215,
+        "persisted_speedup": 8.852465393339465
+      }
+    }
+  ]
+}

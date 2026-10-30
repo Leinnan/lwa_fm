@@ -6,9 +6,16 @@ version = "0.0.1"
 homepage = "https://github.com/Leinnan/lwa_fm"
 
 [profile.release]
-opt-level = 'z'
+opt-level = 3
+codegen-units = 1
 panic = 'abort'
-lto = true
+lto = "fat"
+strip = true
+
+# Size-optimised build for distribution comparisons: `cargo build --profile release-small`.
+[profile.release-small]
+inherits = "release"
+opt-level = 'z'
 
 # Optimize all dependencies even in debug builds:
 [profile.dev.package."*"]
@@ -22,41 +29,50 @@ profiling = ["dep:puffin", "dep:puffin_http", "dep:puffin_egui", "profiling/prof
 lucide-icons = "=1.34.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 sled = "0.34"
-mlua = { version = "0.11", features = ["lua54", "vendored"] }
+mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"] }
+toml = "1"
 log = { version = "0.4.28", features = ["std"] }
 profiling = { version = "1.0.18", default-features = false }
 # Keep the profiler UI on the same egui version as the app.
 puffin = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 puffin_http = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 puffin_egui = { optional = true, path = "vendor/puffin_egui" }
-icu = {git = "https://github.com/unicode-org/icu4x", rev = "4d2b015"}
+# Only collation is used; the `icu` umbrella crate pulls in every component and its data.
+icu_collator = { git = "https://github.com/unicode-org/icu4x", rev = "4d2b015" }
+icu_locale_core = { git = "https://github.com/unicode-org/icu4x", rev = "4d2b015" }
 notify = "6.1"
 smallvec = "1.15"
 bevy_device_lang = "0.6"
 fuzzy-matcher = "0.3"
+# NFC folding, so names stored decomposed (HFS+, SMB) match typed text.
+unicode-normalization = "0.1"
 itertools = "0.14.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 eframe = { version = "=0.36.2", default-features = false, features = [
-    #"accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
+    "accesskit",     # Screen-reader support (VoiceOver, Narrator, Orca).
     "default_fonts", # Embed the default egui fonts.
-    "wgpu",          # Use the WGPU rendering backend.
+    "wgpu_no_default_features", # WGPU renderer; backends are picked per OS below.
     "persistence",   # Enable restoring app state when restarting the app.
     "wayland",       # To support Linux (and CI)
 ] }
 egui = "=0.36.2"
-egui_extras = { version = "=0.36.2", features = ["all_loaders", "gif"] }
 open = "5.3"
 walkdir = "2"
 sysinfo = "0.33"
 directories = "6"
-image = { version = "0.25", features = ["jpeg", "png"] }
-ffmpeg-sidecar = "2.4.0"
+# Only the formats previewed (`src/app/assets/kinds.rs`); the defaults add AVIF, EXR, HDR, ...
+image = { version = "0.25", default-features = false, features = ["rayon", "png", "jpeg", "bmp", "webp", "tiff", "ico", "tga", "gif"] }
+# Only its paths/URLs: downloading goes through the system `curl` and `tar`
+# (`src/app/assets/ffmpeg_install.rs`) instead of an in-process HTTP + TLS + zip stack.
+ffmpeg-sidecar = { version = "2.4.0", default-features = false }
+# SHA-256 check of the downloaded FFmpeg archive.
+sha2 = "0.10"
 rand = "0.8"
 anyhow = "1"
 egui-notify = { path = "vendor/egui-notify" }
 crossbeam = "0.8"
-egui_dock = "=0.21.1"
+egui_dock = { version = "=0.21.1", features = ["serde"] }
 trash = "5.2"
 arboard = "3.4.1"
 embed_plist = "1.2"
@@ -66,22 +82,60 @@ egui_taffy = "=0.14.0"
 systemicons = { git = "https://github.com/Leinnan/systemicons.git" }
 lru = "0.16.3"
 glob = "0.3"
-regex = "1"
-wgpu = { version = "30", default-features = false }
+# Unicode classes beyond case folding and \w/\d/\s (scripts, ages, ...) are rarely used in file names.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+# Backends (and their shader translators) are the bulk of the renderer's
+# size, so each OS only gets the one it uses; see the target sections below.
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "wgsl"] }
+mimalloc = { version = "0.1", default-features = false }
+foldhash = "0.2"
+memchr = "2.7"
+fixedbitset = "0.5"
+jpeg-decoder = { version = "0.3", default-features = false }
+raw-window-handle = "0.6"
 
 [patch.crates-io]
 puffin = { git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 
 [target.'cfg(windows)'.dependencies]
-raw-window-handle = "0.6"
+wgpu = { version = "30", default-features = false, features = ["dx12"] }
 windows = { version = "0.59", features = [
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_System_Ole",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_NetworkManagement_WNet",
+    "Wdk_Storage_FileSystem",
 ] }
+
+# Drag files out to other apps (Windows uses the shell directly); objc2 for
+# the pasteboard and open panel (`src/macos_tools.rs`).
+[target.'cfg(target_os = "macos")'.dependencies]
+drag = "=2.1.1"
+wgpu = { version = "30", default-features = false, features = ["metal"] }
+egui-wgpu = { version = "=0.36.2", default-features = false, features = ["macos-window-resize-jitter-fix"] }
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+libc = "0.2"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
 
 [dev-dependencies]
 egui_kittest = { version = "=0.36.2", features = ["snapshot", "wgpu"] }
@@ -115,3 +169,6 @@ identifier = "io.github.leinnan.dirfleet"
 osx_url_schemes = ["io.github.leinnan.dirfleet"]
 short_description = "File Manager"
 long_description = "File Manager built with egui in Rust"
+# The privacy strings and the rest of the hand-written plist (`just build_mac_app` uses it as is).
+osx_info_plist_exts = ["static/Info.plist"]
+osx_minimum_system_version = "11.0"

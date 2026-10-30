@@ -2,9 +2,9 @@ use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
+        mpsc::{self, Receiver, RecvTimeoutError},
     },
     thread,
     time::{Duration, Instant},
@@ -12,18 +12,48 @@ use std::{
 
 use anyhow::{Context, Result};
 use notify::{
-    Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    Event, EventKind, RecursiveMode, Watcher,
     event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
 };
 
-use crate::helper::normalize_path;
+use crate::data::files::{DirEntryMetaData, EntryType, ListingChange};
+use crate::helper::{canonical_form, normalize_path};
 use crate::toast;
 
-#[derive(Debug, Default)]
+/// Context used by watcher threads to wake the UI when events arrive, so the
+/// app does not need to poll on a timer while directories are watched.
+static REPAINT_CTX: LazyLock<Mutex<Option<egui::Context>>> = LazyLock::new(|| Mutex::new(None));
+
+pub fn set_repaint_context(ctx: &egui::Context) {
+    if let Ok(mut repaint) = REPAINT_CTX.lock() {
+        *repaint = Some(ctx.clone());
+    }
+}
+
+pub fn request_repaint() {
+    if let Ok(repaint) = REPAINT_CTX.lock()
+        && let Some(ctx) = repaint.as_ref()
+    {
+        ctx.request_repaint();
+    }
+}
+
+/// Live updates for every watched root through one shared OS watcher, one
+/// event-processing thread and one control thread. Previously each root had
+/// its own watcher plus two threads, so a favourites search with N roots cost
+/// 3N threads.
+#[derive(Default)]
 pub struct DirectoryWatchers {
-    watchers: HashMap<PathBuf, WatchedDirectory>,
-    pending_paths: HashMap<PathBuf, usize>,
-    receivers: Vec<PendingWatcherReceiver>,
+    roots: HashMap<PathBuf, usize>,
+    shared: Option<SharedWatcher>,
+}
+
+impl std::fmt::Debug for DirectoryWatchers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectoryWatchers")
+            .field("roots", &self.roots)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A surgical change to a single file. `structural_dirs` (the coarse
@@ -47,249 +77,159 @@ pub struct FileSystemChanges {
 
 impl FileSystemChanges {
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.file_changes.is_empty() && self.structural_dirs.is_empty()
-    }
-
-    #[inline]
     fn extend(&mut self, other: Self) {
         self.file_changes.extend(other.file_changes);
         self.structural_dirs.extend(other.structural_dirs);
     }
 }
 
-#[derive(Debug)]
-struct PendingWatcherReceiver {
-    path: PathBuf,
-    mode: RecursiveMode,
-    receiver: Receiver<Result<DirectoryWatcher, String>>,
+/// What a change does to the row for its path, decided from the path's state
+/// when the batch was resolved (on the watcher thread).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// The path was created (or replaced): insert or overwrite its row.
+    Upsert(DirEntryMetaData),
+    /// Only metadata changed: update the row if it is listed.
+    Update(DirEntryMetaData),
+    /// The path no longer exists.
+    Remove,
 }
 
-#[derive(Debug)]
-struct WatchedDirectory {
-    watcher: DirectoryWatcher,
-    ref_count: usize,
+/// A watcher change with its metadata already read, so consumers on the UI
+/// thread never touch the filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedChange {
+    pub path: PathBuf,
+    pub kind: ChangeKind,
 }
 
-impl DirectoryWatchers {
-    #[inline]
-    pub fn is_active(&self) -> bool {
-        !self.watchers.is_empty() || !self.pending_paths.is_empty() || !self.receivers.is_empty()
-    }
-
-    #[inline]
-    pub fn stop(&mut self, path: &Path) {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::DirectoryWatchers::stop");
-        let should_remove = if let Some(watched) = self.watchers.get_mut(path) {
-            if watched.ref_count > 1 {
-                watched.ref_count -= 1;
-                false
-            } else {
-                true
-            }
-        } else {
-            false
+impl ResolvedChange {
+    /// Read the current state of `path`. `created` marks a create or rename
+    /// target (the row may be new); otherwise only metadata changed.
+    pub fn from_disk(path: PathBuf, created: bool) -> Self {
+        let kind = match entry_metadata(&path) {
+            Some(meta) if created => ChangeKind::Upsert(meta),
+            Some(meta) => ChangeKind::Update(meta),
+            None => ChangeKind::Remove,
         };
-
-        if !should_remove {
-            return;
-        }
-
-        let Some(mut watched) = self.watchers.remove(path) else {
-            return;
-        };
-        std::thread::spawn(move || {
-            watched.watcher.stop_watching();
-        });
+        Self { path, kind }
     }
 
-    #[inline]
-    fn stop_pending(&mut self, path: &Path) -> bool {
-        if let Some(ref_count) = self.pending_paths.get_mut(path) {
-            if *ref_count > 1 {
-                *ref_count -= 1;
-            } else {
-                self.pending_paths.remove(path);
-            }
-            return true;
-        }
-        false
-    }
-
-    #[inline]
-    fn increment_pending(&mut self, path: &Path) {
-        let entry = self.pending_paths.entry(path.to_path_buf()).or_insert(0);
-        *entry += 1;
-    }
-
-    #[inline]
-    fn take_pending_ref_count(&mut self, path: &Path) -> usize {
-        self.pending_paths.remove(path).unwrap_or(1)
-    }
-
-    #[inline]
-    fn has_pending(&self, path: &Path) -> bool {
-        self.pending_paths.contains_key(path)
-    }
-
-    #[inline]
-    fn drop_pending_receiver(&mut self, path: &Path) {
-        self.receivers.retain(|pending| pending.path != path);
-    }
-
-    #[inline]
-    fn insert_started_watcher(&mut self, watcher: DirectoryWatcher, _mode: RecursiveMode) {
-        let Some(path) = watcher.current_path.clone() else {
-            return;
-        };
-        let ref_count = self.take_pending_ref_count(&path);
-        if let Some(existing) = self.watchers.get_mut(&path) {
-            existing.ref_count += ref_count;
-            return;
-        }
-        _ = self
-            .watchers
-            .insert(path, WatchedDirectory { watcher, ref_count });
-    }
-
-    pub fn stop_many(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        for path in paths {
-            if self.stop_pending(&path) {
-                self.drop_pending_receiver(&path);
-                continue;
-            }
-            self.stop(&path);
-        }
-    }
-
-    pub fn start(&mut self, path: &Path, mode: RecursiveMode) {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::DirectoryWatchers::start");
-        let path = normalize_path(path);
-        if let Some(watched) = self.watchers.get_mut(&path) {
-            watched.ref_count += 1;
-            return;
-        }
-        if self.has_pending(&path) {
-            self.increment_pending(&path);
-            return;
-        }
-
-        let (tx, rx) = mpsc::channel();
-        let path_for_thread = path.clone();
-        self.increment_pending(&path);
-
-        std::thread::spawn(move || {
-            // Report both failure modes (watcher creation and watch setup) back to
-            // the UI thread instead of dying silently. A silent failure would leave
-            // this directory unwatched with no indication that live updates (file
-            // change auto-refresh) are no longer working for it.
-            match DirectoryWatcher::new() {
-                Ok(mut watcher) => match watcher.watch_directory(&path_for_thread, mode) {
-                    Ok(()) => {
-                        _ = tx.send(Ok(watcher));
-                    }
-                    Err(err) => {
-                        _ = tx.send(Err(format!("watch setup failed: {err:#}")));
-                    }
-                },
-                Err(err) => {
-                    _ = tx.send(Err(format!("watcher creation failed: {err:#}")));
-                }
-            }
-        });
-        self.receivers.push(PendingWatcherReceiver {
-            path,
-            mode,
-            receiver: rx,
-        });
-    }
-
-    pub fn start_many(&mut self, paths: impl IntoIterator<Item = (PathBuf, RecursiveMode)>) {
-        for (path, mode) in paths {
-            self.start(&path, mode);
-        }
-    }
-
-    pub fn check_for_new_watchers(&mut self) {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_new_watchers");
-        let mut ready_watchers = Vec::new();
-        let mut failed_paths = Vec::new();
-        self.receivers
-            .retain(|pending| match pending.receiver.try_recv() {
-                Ok(Ok(watcher)) => {
-                    ready_watchers.push((watcher, pending.mode));
-                    false
-                }
-                Ok(Err(error)) => {
-                    failed_paths.push((pending.path.clone(), error));
-                    false
-                }
-                Err(TryRecvError::Empty) => true,
-                Err(TryRecvError::Disconnected) => {
-                    // The worker thread ended without reporting back — treat it as
-                    // a failure so the user is told live updates are unavailable.
-                    failed_paths.push((
-                        pending.path.clone(),
-                        "watcher thread exited unexpectedly".to_string(),
-                    ));
-                    false
-                }
-            });
-        for (path, error) in &failed_paths {
-            self.pending_paths.remove(path);
-            log::warn!("File system watcher failed for {}: {error}", path.display());
-            toast!(Warning, "Live updates unavailable for {}", path.display());
-        }
-        for (watcher, mode) in ready_watchers {
-            self.insert_started_watcher(watcher, mode);
-        }
-    }
-
-    pub fn check_for_file_system_events(&mut self) -> FileSystemChanges {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_file_system_events");
-        let mut changes = FileSystemChanges::default();
-        let mut event_budget = 256usize;
-        for watched in self.watchers.values_mut() {
-            if watched.watcher.check_rescan() {
-                // Rescan detected: we don't know which specific paths changed,
-                // so return the watched root as structural to trigger a full refresh.
-                if let Some(ref path) = watched.watcher.current_path {
-                    log::info!("Rescan triggered full refresh for {}", path.display());
-                    changes.structural_dirs.insert(path.clone());
-                }
-            }
-            while event_budget > 0
-                && let Some(event_changes) = watched.watcher.try_recv_event()
-            {
-                changes.extend(event_changes);
-                event_budget -= 1;
-            }
-            if event_budget == 0 {
-                break;
-            }
-        }
-        changes
+    #[must_use]
+    pub fn listing_change(&self) -> Option<ListingChange<'_>> {
+        let name = self.path.file_name()?.to_str()?;
+        Some(match self.kind {
+            ChangeKind::Upsert(meta) => ListingChange::Upsert(name, meta),
+            ChangeKind::Update(meta) => ListingChange::Update(name, meta),
+            ChangeKind::Remove => ListingChange::Remove(name),
+        })
     }
 }
 
-#[derive(Debug)]
-pub struct DirectoryWatcher {
-    watcher: RecommendedWatcher,
-    receiver: Receiver<FileSystemChanges>,
-    current_path: Option<PathBuf>,
+/// Metadata for a listing row, matching what a directory read reports: the
+/// link itself on Windows (where the bulk reader sees reparse points), the
+/// target elsewhere.
+fn entry_metadata(path: &Path) -> Option<DirEntryMetaData> {
+    #[cfg(windows)]
+    let meta = std::fs::symlink_metadata(path);
+    #[cfg(not(windows))]
+    let meta = std::fs::metadata(path).or_else(|_| std::fs::symlink_metadata(path));
+    let mut meta: DirEntryMetaData = meta.ok()?.into();
+    if meta.entry_type == EntryType::Directory {
+        meta.entry_type = EntryType::of_dir(path);
+    }
+    Some(meta)
+}
+
+/// A delivered watcher batch.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ChangeBatch {
+    /// Surgical changes in the order they must be applied.
+    pub changes: Vec<ResolvedChange>,
+    /// Directories that need a full re-read.
+    pub structural_dirs: BTreeSet<PathBuf>,
+}
+
+impl ChangeBatch {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty() && self.structural_dirs.is_empty()
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.changes.extend(other.changes);
+        self.structural_dirs.extend(other.structural_dirs);
+    }
+}
+
+/// Resolve a coalesced batch: one decision per path, made from the path's
+/// current state (event order within a batch is not preserved by the set,
+/// and the filesystem is the ground truth anyway).
+fn resolve(changes: FileSystemChanges) -> ChangeBatch {
+    let mut created = std::collections::BTreeMap::<PathBuf, bool>::new();
+    for change in changes.file_changes {
+        let (is_created, path) = match change {
+            FileChange::Metadata(path) => (false, path),
+            FileChange::Created(path) | FileChange::Removed(path) => (true, path),
+        };
+        *created.entry(path).or_default() |= is_created;
+    }
+    ChangeBatch {
+        changes: created
+            .into_iter()
+            .map(|(path, created)| ResolvedChange::from_disk(path, created))
+            .collect(),
+        structural_dirs: changes.structural_dirs,
+    }
+}
+
+/// Pairs the two halves of a rename. Backends with a tracker (inotify) pair
+/// by it; the Windows backend sets none but delivers `OLD_NAME` immediately
+/// followed by `NEW_NAME`, so an untracked "from" pairs with the next event
+/// if that is an untracked "to".
+#[derive(Debug, Default)]
+struct RenamePairing {
+    by_tracker: HashMap<usize, BTreeSet<PathBuf>>,
+    last_untracked_from: Option<BTreeSet<PathBuf>>,
+}
+
+impl RenamePairing {
+    fn remember(&mut self, tracker: Option<usize>, parents: BTreeSet<PathBuf>) {
+        match tracker {
+            Some(tracker) => {
+                self.by_tracker.entry(tracker).or_default().extend(parents);
+                if self.by_tracker.len() > 256 {
+                    self.by_tracker.clear();
+                }
+            }
+            None => self.last_untracked_from = Some(parents),
+        }
+    }
+
+    fn take(&mut self, tracker: Option<usize>) -> Option<BTreeSet<PathBuf>> {
+        match tracker {
+            Some(tracker) => self.by_tracker.remove(&tracker),
+            None => self.last_untracked_from.take(),
+        }
+    }
+}
+
+enum WatchCommand {
+    Watch(PathBuf, RecursiveMode),
+    Unwatch(PathBuf),
+}
+
+struct SharedWatcher {
+    control: mpsc::Sender<WatchCommand>,
+    events: Receiver<ChangeBatch>,
+    failures: Receiver<(PathBuf, String)>,
     rescan_detected: Arc<AtomicBool>,
 }
 
-impl DirectoryWatcher {
-    pub fn new() -> Result<Self> {
-        let (tx, rx) = mpsc::channel();
+impl SharedWatcher {
+    fn new() -> Result<Self> {
+        let (event_tx, events) = mpsc::channel();
         let (internal_tx, internal_rx) = mpsc::channel::<notify::Result<Event>>();
-
-        // Create the notify watcher
         let watcher = notify::recommended_watcher(move |res| {
             if let Err(e) = internal_tx.send(res) {
                 eprintln!("Failed to send file system event: {e}");
@@ -299,115 +239,234 @@ impl DirectoryWatcher {
 
         let rescan_detected = Arc::new(AtomicBool::new(false));
         let rescan_flag = Arc::clone(&rescan_detected);
+        thread::spawn(move || process_events(&internal_rx, &event_tx, &rescan_flag));
 
-        // Spawn a thread to process raw notify events and convert them to our custom events
-        let event_tx = tx;
+        // `watch` opens a directory handle, which can block (network drives),
+        // so it never runs on the UI thread. One thread keeps watch/unwatch
+        // in request order.
+        let (control, control_rx) = mpsc::channel::<WatchCommand>();
+        let (failure_tx, failures) = mpsc::channel();
         thread::spawn(move || {
-            let mut pending_renames: HashMap<usize, BTreeSet<PathBuf>> = HashMap::new();
-            while let Ok(first) = internal_rx.recv() {
-                let deadline = Instant::now() + Duration::from_millis(50);
-                let mut changes = FileSystemChanges::default();
-                let mut disconnected = false;
-                let mut next = Some(first);
-
-                loop {
-                    if let Some(result) = next.take() {
-                        match result {
-                            Ok(event) if event.kind == EventKind::Other => {
-                                log::warn!(
-                                    "File system watcher overflow detected for {:?}, scheduling full refresh",
-                                    event.paths
-                                );
-                                rescan_flag.store(true, Ordering::SeqCst);
-                            }
-                            Ok(event) => {
-                                changes.extend(Self::process_event(event, &mut pending_renames));
-                            }
-                            Err(error) => {
-                                toast!(Error, "File system error: {error}");
-                            }
+            let mut watcher = watcher;
+            for command in control_rx {
+                match command {
+                    WatchCommand::Watch(path, mode) => {
+                        #[cfg(feature = "profiling")]
+                        puffin::profile_scope!("lwa_fm::dir_handling::watch_directory");
+                        if let Err(err) = watcher.watch(&path, mode) {
+                            _ = failure_tx.send((path, format!("watch setup failed: {err:#}")));
+                            request_repaint();
                         }
                     }
-
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        break;
+                    WatchCommand::Unwatch(path) => {
+                        let _ = watcher.unwatch(&path);
                     }
-                    match internal_rx.recv_timeout(remaining) {
-                        Ok(result) => next = Some(result),
-                        Err(RecvTimeoutError::Timeout) => break,
-                        Err(RecvTimeoutError::Disconnected) => {
-                            disconnected = true;
-                            break;
-                        }
-                    }
-                }
-
-                collapse_large_parent_bursts(&mut changes, 128);
-                if !changes.is_empty()
-                    && let Err(err) = event_tx.send(changes)
-                {
-                    eprintln!("Failed to send processed file system event: {err}");
-                    break;
-                }
-                if disconnected {
-                    break;
                 }
             }
         });
 
         Ok(Self {
-            watcher,
-            receiver: rx,
-            current_path: None,
+            control,
+            events,
+            failures,
             rescan_detected,
         })
     }
+}
 
-    pub fn watch_directory<P: AsRef<Path>>(&mut self, path: P, mode: RecursiveMode) -> Result<()> {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::dir_handling::watch_directory");
-        let path = normalize_path(path.as_ref());
+/// Coalesce raw notify events into ~50 ms batches, then resolve each path's
+/// metadata here, off the UI thread.
+fn process_events(
+    internal_rx: &Receiver<notify::Result<Event>>,
+    event_tx: &mpsc::Sender<ChangeBatch>,
+    rescan_flag: &AtomicBool,
+) {
+    let mut pending_renames = RenamePairing::default();
+    while let Ok(first) = internal_rx.recv() {
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut changes = FileSystemChanges::default();
+        let mut disconnected = false;
+        let mut next = Some(first);
 
-        self.watcher
-            .watch(&path, mode)
-            .with_context(|| format!("Failed to watch directory: {}", path.display()))?;
+        loop {
+            if let Some(result) = next.take() {
+                match result {
+                    Ok(event) if event.kind == EventKind::Other => {
+                        log::warn!(
+                            "File system watcher overflow detected for {:?}, scheduling full refresh",
+                            event.paths
+                        );
+                        rescan_flag.store(true, Ordering::SeqCst);
+                    }
+                    Ok(event) => {
+                        changes
+                            .extend(DirectoryWatcher::process_event(event, &mut pending_renames));
+                    }
+                    Err(error) => {
+                        toast!(Error, "File system error: {error}");
+                    }
+                }
+            }
 
-        self.current_path = Some(path);
-        Ok(())
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match internal_rx.recv_timeout(remaining) {
+                Ok(result) => next = Some(result),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        collapse_large_parent_bursts(&mut changes, 128);
+        let batch = resolve(changes);
+        let delivered = !batch.is_empty();
+        if delivered && let Err(err) = event_tx.send(batch) {
+            eprintln!("Failed to send processed file system event: {err}");
+            break;
+        }
+        if delivered || rescan_flag.load(Ordering::SeqCst) {
+            request_repaint();
+        }
+        if disconnected {
+            break;
+        }
+    }
+}
+
+impl DirectoryWatchers {
+    fn shared(&mut self) -> Option<&SharedWatcher> {
+        if self.shared.is_none() {
+            match SharedWatcher::new() {
+                Ok(shared) => self.shared = Some(shared),
+                Err(err) => {
+                    log::warn!("File system watcher unavailable: {err:#}");
+                    toast!(Warning, "Live updates unavailable");
+                    return None;
+                }
+            }
+        }
+        self.shared.as_ref()
     }
 
-    pub fn stop_watching(&mut self) {
+    pub fn stop(&mut self, path: &Path) {
         #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::dir_handling::watch_directory::unwatch");
-        if let Some(path) = &self.current_path {
-            let _ = self.watcher.unwatch(path);
-            self.current_path = None;
+        puffin::profile_scope!("lwa_fm::DirectoryWatchers::stop");
+        // `start` keys roots by their normalized path.
+        let path = if self.roots.contains_key(path) {
+            path.to_path_buf()
+        } else {
+            normalize_path(path)
+        };
+        let Some(ref_count) = self.roots.get_mut(&path) else {
+            return;
+        };
+        if *ref_count > 1 {
+            *ref_count -= 1;
+            return;
+        }
+        self.roots.remove(&path);
+        if let Some(shared) = &self.shared {
+            _ = shared.control.send(WatchCommand::Unwatch(path));
         }
     }
 
-    #[inline]
-    pub fn try_recv_event(&self) -> Option<FileSystemChanges> {
-        self.receiver.try_recv().ok()
+    /// How many folders are watched, for tests.
+    #[cfg(test)]
+    pub fn watched_roots(&self) -> usize {
+        self.roots.len()
     }
 
-    /// Returns true if a Rescan (buffer overflow) event was detected since last check.
-    /// Atomically clears the flag on read.
-    pub fn check_rescan(&self) -> bool {
-        self.rescan_detected
-            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+    /// Stop every watch on or below `mount` whatever its reference count,
+    /// so no watch handle keeps a drive that is being ejected busy.
+    pub fn stop_under(&mut self, mount: &Path) {
+        let roots: Vec<PathBuf> = self
+            .roots
+            .keys()
+            .filter(|root| crate::drives::is_under(root, mount))
+            .cloned()
+            .collect();
+        for root in roots {
+            self.roots.remove(&root);
+            if let Some(shared) = &self.shared {
+                _ = shared.control.send(WatchCommand::Unwatch(root));
+            }
+        }
     }
 
-    #[allow(dead_code)]
-    pub fn recv_event_timeout(&self, timeout: Duration) -> Option<FileSystemChanges> {
-        self.receiver.recv_timeout(timeout).ok()
+    pub fn stop_many(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        for path in paths {
+            self.stop(&path);
+        }
     }
 
-    fn process_event(
-        event: Event,
-        pending_renames: &mut HashMap<usize, BTreeSet<PathBuf>>,
-    ) -> FileSystemChanges {
+    pub fn start(&mut self, path: &Path, mode: RecursiveMode) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::DirectoryWatchers::start");
+        let path = normalize_path(path);
+        if let Some(ref_count) = self.roots.get_mut(&path) {
+            *ref_count += 1;
+            return;
+        }
+        let Some(shared) = self.shared() else {
+            return;
+        };
+        _ = shared.control.send(WatchCommand::Watch(path.clone(), mode));
+        self.roots.insert(path, 1);
+    }
+
+    pub fn start_many(&mut self, paths: impl IntoIterator<Item = (PathBuf, RecursiveMode)>) {
+        for (path, mode) in paths {
+            self.start(&path, mode);
+        }
+    }
+
+    /// Report roots whose watch could not be set up.
+    pub fn check_for_new_watchers(&mut self) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_new_watchers");
+        let Some(shared) = &self.shared else {
+            return;
+        };
+        let failed: Vec<(PathBuf, String)> = shared.failures.try_iter().collect();
+        for (path, error) in failed {
+            self.roots.remove(&path);
+            log::warn!("File system watcher failed for {}: {error}", path.display());
+            // A folder that is gone (its drive was pulled) needs no message.
+            if path.exists() {
+                toast!(Warning, "Live updates unavailable for {}", path.display());
+            }
+        }
+    }
+
+    pub fn check_for_file_system_events(&self) -> ChangeBatch {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("lwa_fm::DirectoryWatchers::check_for_file_system_events");
+        let mut changes = ChangeBatch::default();
+        let Some(shared) = &self.shared else {
+            return changes;
+        };
+        if shared.rescan_detected.swap(false, Ordering::SeqCst) {
+            // Overflow: the specific paths are unknown, so refresh every root.
+            log::info!("Rescan triggered full refresh of watched roots");
+            changes.structural_dirs.extend(self.roots.keys().cloned());
+        }
+        for event_changes in shared.events.try_iter().take(256) {
+            changes.extend(event_changes);
+        }
+        changes
+    }
+}
+
+/// Namespace for event classification.
+pub struct DirectoryWatcher;
+
+impl DirectoryWatcher {
+    fn process_event(event: Event, renames: &mut RenamePairing) -> FileSystemChanges {
         let tracker = event.attrs.tracker();
         let Event {
             kind,
@@ -415,32 +474,33 @@ impl DirectoryWatcher {
             attrs: _,
         } = event;
 
+        // An untracked rename "from" only pairs with the event right after it.
+        if !matches!(kind, EventKind::Modify(ModifyKind::Name(RenameMode::To))) {
+            renames.last_untracked_from = None;
+        }
+
         match kind {
-            // A new file: can be inserted surgically once the handler is wired.
-            EventKind::Create(CreateKind::File) => FileSystemChanges {
-                file_changes: file_changes_from(paths, FileChange::Created),
-                ..Default::default()
-            },
-            // A deleted file: can be removed surgically once the handler is wired.
-            EventKind::Remove(RemoveKind::File) => FileSystemChanges {
-                file_changes: file_changes_from(paths, FileChange::Removed),
-                ..Default::default()
-            },
+            // Windows reports creates and deletes as `Any`; folders are rows
+            // too, so all of them are surgical for a flat listing (a deep
+            // listing falls back to a refresh when the change is applied).
+            EventKind::Create(CreateKind::Any | CreateKind::File | CreateKind::Folder) => {
+                FileSystemChanges {
+                    file_changes: file_changes_from(paths, FileChange::Created),
+                    ..Default::default()
+                }
+            }
+            EventKind::Remove(RemoveKind::Any | RemoveKind::File | RemoveKind::Folder) => {
+                FileSystemChanges {
+                    file_changes: file_changes_from(paths, FileChange::Removed),
+                    ..Default::default()
+                }
+            }
             // Rename "From" half. The source path is gone regardless of whether
             // a matching "To" arrives, so emit a surgical `Removed` now and
-            // remember the source parent dirs (keyed by tracker) so the "To"
-            // half can decide between a same-dir coalesce and a cross-dir refresh.
+            // remember the source parent dirs so the "To" half can decide
+            // between a same-dir coalesce and a cross-dir refresh.
             EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-                let directories = parent_dirs_for_paths(paths.clone());
-                if let Some(tracker) = tracker {
-                    pending_renames
-                        .entry(tracker)
-                        .or_default()
-                        .extend(directories.iter().cloned());
-                    if pending_renames.len() > 256 {
-                        pending_renames.clear();
-                    }
-                }
+                renames.remember(tracker, parent_dirs_for_paths(paths.clone()));
                 FileSystemChanges {
                     file_changes: file_changes_from(paths, FileChange::Removed),
                     ..Default::default()
@@ -453,7 +513,7 @@ impl DirectoryWatcher {
             // both directories.
             EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
                 let to_parents = parent_dirs_for_paths(paths.clone());
-                let remembered = tracker.and_then(|t| pending_renames.remove(&t));
+                let remembered = renames.take(tracker);
                 let same_dir = remembered
                     .as_ref()
                     .is_some_and(|from_parents| from_parents == &to_parents);
@@ -473,19 +533,40 @@ impl DirectoryWatcher {
                     }
                 }
             }
-            EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_)) => FileSystemChanges {
-                file_changes: file_changes_from(paths, FileChange::Metadata),
-                ..Default::default()
-            },
-            // Folder changes and ambiguous events require a structural refresh.
-            EventKind::Create(CreateKind::Folder)
-            | EventKind::Remove(RemoveKind::Folder)
-            | EventKind::Modify(ModifyKind::Name(_) | ModifyKind::Any | ModifyKind::Other)
+            // Both halves in one event (`[from, to]`, inotify).
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+                if paths.len() == 2
+                    && parent_dir_for_event_path(&paths[0])
+                        == parent_dir_for_event_path(&paths[1]) =>
+            {
+                let mut paths = paths;
+                let to = paths
+                    .pop()
+                    .map(|path| FileChange::Created(canonical_form(&path)));
+                let from = paths
+                    .pop()
+                    .map(|path| FileChange::Removed(canonical_form(&path)));
+                FileSystemChanges {
+                    file_changes: from.into_iter().chain(to).collect(),
+                    ..Default::default()
+                }
+            }
+            // Windows reports every content or attribute change as `Any`.
+            EventKind::Modify(ModifyKind::Any | ModifyKind::Data(_) | ModifyKind::Metadata(_)) => {
+                FileSystemChanges {
+                    file_changes: file_changes_from(paths, FileChange::Metadata),
+                    ..Default::default()
+                }
+            }
+            // Ambiguous events require a structural refresh.
+            EventKind::Create(CreateKind::Other)
+            | EventKind::Remove(RemoveKind::Other)
+            | EventKind::Modify(ModifyKind::Name(_) | ModifyKind::Other)
             | EventKind::Any => FileSystemChanges {
                 structural_dirs: parent_dirs_for_paths(paths),
                 ..Default::default()
             },
-            _ => FileSystemChanges::default(),
+            EventKind::Access(_) | EventKind::Other => FileSystemChanges::default(),
         }
     }
 }
@@ -499,7 +580,7 @@ fn collapse_large_parent_bursts(changes: &mut FileSystemChanges, surgical_limit:
             }
         };
         if let Some(parent) = path.parent() {
-            *counts.entry(normalize_path(parent)).or_default() += 1;
+            *counts.entry(canonical_form(parent)).or_default() += 1;
         }
     }
     let structural = counts
@@ -516,14 +597,14 @@ fn collapse_large_parent_bursts(changes: &mut FileSystemChanges, surgical_limit:
             }
         };
         path.parent()
-            .map(normalize_path)
+            .map(canonical_form)
             .is_none_or(|parent| !structural.contains(&parent))
     });
     changes.structural_dirs.extend(structural);
 }
 
 fn parent_dir_for_event_path(path: &Path) -> Option<PathBuf> {
-    path.parent().map(normalize_path)
+    path.parent().map(canonical_form)
 }
 
 fn parent_dirs_for_paths(paths: Vec<PathBuf>) -> BTreeSet<PathBuf> {
@@ -538,29 +619,63 @@ fn parent_dirs_for_paths(paths: Vec<PathBuf>) -> BTreeSet<PathBuf> {
 fn file_changes_from(paths: Vec<PathBuf>, kind: fn(PathBuf) -> FileChange) -> BTreeSet<FileChange> {
     paths
         .into_iter()
-        .map(|path| kind(normalize_path(&path)))
+        .map(|path| kind(canonical_form(&path)))
         .collect()
-}
-
-impl Default for DirectoryWatcher {
-    fn default() -> Self {
-        Self::new().expect("Failed to create directory watcher")
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DirectoryWatcher, FileChange, FileSystemChanges, collapse_large_parent_bursts,
-        parent_dir_for_event_path,
+        ChangeKind, DirectoryWatcher, FileChange, FileSystemChanges, RenamePairing, ResolvedChange,
+        collapse_large_parent_bursts, parent_dir_for_event_path, resolve,
     };
     use crate::helper::normalize_path;
     use notify::{
         Event, EventKind,
         event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode},
     };
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
     use std::path::Path;
+
+    #[test]
+    fn shared_watcher_reports_changes_for_every_root() {
+        let base = normalize_path(&std::env::temp_dir())
+            .join(format!("lwa_fm_shared_watch_{}", std::process::id()));
+        let (first, second) = (base.join("first"), base.join("second"));
+        std::fs::create_dir_all(&first).expect("create first root");
+        std::fs::create_dir_all(&second).expect("create second root");
+        let mut watchers = super::DirectoryWatchers::default();
+        watchers.start(&first, notify::RecursiveMode::NonRecursive);
+        watchers.start(&second, notify::RecursiveMode::NonRecursive);
+        // Watch setup runs on the control thread; give it a moment.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::write(first.join("a.txt"), b"a").expect("write first");
+        std::fs::write(second.join("b.txt"), b"b").expect("write second");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut seen = BTreeSet::new();
+        while seen.len() < 2 && std::time::Instant::now() < deadline {
+            watchers.check_for_new_watchers();
+            let changes = watchers.check_for_file_system_events();
+            for change in changes.changes {
+                seen.insert(change.path.parent().map(Path::to_path_buf));
+            }
+            seen.extend(changes.structural_dirs.into_iter().map(Some));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            seen,
+            BTreeSet::from([Some(first.clone()), Some(second.clone())])
+        );
+
+        // Ref-counted: one stop keeps a doubly started root watched.
+        watchers.start(&first, notify::RecursiveMode::NonRecursive);
+        watchers.stop(&first);
+        assert_eq!(watchers.roots.get(&first), Some(&1));
+        watchers.stop_many([first, second]);
+        assert!(watchers.roots.is_empty());
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     #[test]
     fn rename_mode_any_invalidates_both_parents() {
@@ -573,12 +688,12 @@ mod tests {
             attrs: notify::event::EventAttributes::default(),
         };
 
-        let mut pending = HashMap::new();
+        let mut pending = RenamePairing::default();
         let changes = DirectoryWatcher::process_event(event, &mut pending);
 
         assert_eq!(
             changes.structural_dirs,
-            BTreeSet::from([normalize_path(Path::new("/tmp"))])
+            BTreeSet::from([crate::helper::canonical_form(Path::new("/tmp"))])
         );
         assert!(changes.file_changes.is_empty());
     }
@@ -591,19 +706,19 @@ mod tests {
             attrs: notify::event::EventAttributes::default(),
         };
 
-        let mut pending = HashMap::new();
+        let mut pending = RenamePairing::default();
         let changes = DirectoryWatcher::process_event(event, &mut pending);
 
         assert_eq!(
             changes.structural_dirs,
-            BTreeSet::from([normalize_path(Path::new("/tmp"))])
+            BTreeSet::from([crate::helper::canonical_form(Path::new("/tmp"))])
         );
         assert!(changes.file_changes.is_empty());
     }
 
     #[test]
     fn tracker_pairs_from_and_to_directories() {
-        let mut pending = HashMap::new();
+        let mut pending = RenamePairing::default();
         let from = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
             .add_path(Path::new("/tmp/source/file.txt").to_path_buf())
             .set_tracker(7);
@@ -637,7 +752,7 @@ mod tests {
     fn same_directory_rename_coalesces_to_removed_plus_created() {
         // Atomic-save pattern: write `file.tmp`, rename over `file` in the same
         // directory. From -> Removed(tmp), To -> Created(file), no structural.
-        let mut pending = HashMap::new();
+        let mut pending = RenamePairing::default();
         let from = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
             .add_path(Path::new("/tmp/file.tmp").to_path_buf())
             .set_tracker(42);
@@ -669,7 +784,7 @@ mod tests {
         let event = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
             .add_path(Path::new("/tmp/hot.log").to_path_buf());
 
-        let mut pending = HashMap::new();
+        let mut pending = RenamePairing::default();
         let changes = DirectoryWatcher::process_event(event, &mut pending);
 
         assert_eq!(
@@ -696,7 +811,7 @@ mod tests {
         let event = Event::new(EventKind::Create(CreateKind::File))
             .add_path(Path::new("/tmp/new_file.txt").to_path_buf());
 
-        let mut pending = HashMap::new();
+        let mut pending = RenamePairing::default();
         let changes = DirectoryWatcher::process_event(event, &mut pending);
 
         assert_eq!(
@@ -713,7 +828,7 @@ mod tests {
         let event = Event::new(EventKind::Remove(RemoveKind::File))
             .add_path(Path::new("/tmp/gone_file.txt").to_path_buf());
 
-        let mut pending = HashMap::new();
+        let mut pending = RenamePairing::default();
         let changes = DirectoryWatcher::process_event(event, &mut pending);
 
         assert_eq!(
@@ -732,7 +847,7 @@ mod tests {
         )))
         .add_path(Path::new("/tmp/hot.log").to_path_buf());
 
-        let mut pending = HashMap::new();
+        let mut pending = RenamePairing::default();
         let changes = DirectoryWatcher::process_event(event, &mut pending);
 
         assert_eq!(
@@ -742,6 +857,203 @@ mod tests {
             )))])
         );
         assert!(changes.structural_dirs.is_empty());
+    }
+
+    fn route(kind: EventKind, path: &str) -> FileSystemChanges {
+        let mut pending = RenamePairing::default();
+        DirectoryWatcher::process_event(
+            Event::new(kind).add_path(Path::new(path).to_path_buf()),
+            &mut pending,
+        )
+    }
+
+    #[test]
+    fn windows_any_kinds_are_surgical() {
+        let path = || normalize_path(Path::new("/tmp/w.txt"));
+        assert_eq!(
+            route(EventKind::Create(CreateKind::Any), "/tmp/w.txt").file_changes,
+            BTreeSet::from([FileChange::Created(path())])
+        );
+        assert_eq!(
+            route(EventKind::Remove(RemoveKind::Any), "/tmp/w.txt").file_changes,
+            BTreeSet::from([FileChange::Removed(path())])
+        );
+        let modified = route(EventKind::Modify(ModifyKind::Any), "/tmp/w.txt");
+        assert_eq!(
+            modified.file_changes,
+            BTreeSet::from([FileChange::Metadata(path())])
+        );
+        assert!(modified.structural_dirs.is_empty());
+        let folder = route(EventKind::Remove(RemoveKind::Folder), "/tmp/sub");
+        assert_eq!(
+            folder.file_changes,
+            BTreeSet::from([FileChange::Removed(normalize_path(Path::new("/tmp/sub")))])
+        );
+        assert!(folder.structural_dirs.is_empty());
+        assert!(
+            !route(EventKind::Create(CreateKind::Other), "/tmp/w.txt")
+                .structural_dirs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn untracked_from_then_to_same_dir_coalesces() {
+        let mut pending = RenamePairing::default();
+        let from = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path(Path::new("/tmp/old.txt").to_path_buf());
+        let to = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path(Path::new("/tmp/new.txt").to_path_buf());
+        let from_changes = DirectoryWatcher::process_event(from, &mut pending);
+        let to_changes = DirectoryWatcher::process_event(to, &mut pending);
+        assert_eq!(
+            from_changes.file_changes,
+            BTreeSet::from([FileChange::Removed(normalize_path(Path::new(
+                "/tmp/old.txt"
+            )))])
+        );
+        assert_eq!(
+            to_changes.file_changes,
+            BTreeSet::from([FileChange::Created(normalize_path(Path::new(
+                "/tmp/new.txt"
+            )))])
+        );
+        assert!(to_changes.structural_dirs.is_empty());
+    }
+
+    #[test]
+    fn untracked_from_only_pairs_with_the_next_event() {
+        let mut pending = RenamePairing::default();
+        let from = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path(Path::new("/tmp/old.txt").to_path_buf());
+        let other = Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(Path::new("/tmp/other.txt").to_path_buf());
+        let to = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path(Path::new("/tmp/new.txt").to_path_buf());
+        _ = DirectoryWatcher::process_event(from, &mut pending);
+        _ = DirectoryWatcher::process_event(other, &mut pending);
+        let to_changes = DirectoryWatcher::process_event(to, &mut pending);
+        assert!(to_changes.file_changes.is_empty());
+        assert_eq!(
+            to_changes.structural_dirs,
+            BTreeSet::from([crate::helper::canonical_form(Path::new("/tmp"))])
+        );
+    }
+
+    #[test]
+    fn rename_both_in_one_event_is_surgical_within_a_directory() {
+        let mut pending = RenamePairing::default();
+        let event = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(Path::new("/tmp/a.txt").to_path_buf())
+            .add_path(Path::new("/tmp/b.txt").to_path_buf());
+        let changes = DirectoryWatcher::process_event(event, &mut pending);
+        assert_eq!(
+            changes.file_changes,
+            BTreeSet::from([
+                FileChange::Removed(normalize_path(Path::new("/tmp/a.txt"))),
+                FileChange::Created(normalize_path(Path::new("/tmp/b.txt"))),
+            ])
+        );
+        assert!(changes.structural_dirs.is_empty());
+    }
+
+    #[test]
+    fn resolve_reads_current_state_once_per_path() {
+        let dir = normalize_path(&std::env::temp_dir())
+            .join(format!("lwa_fm_resolve_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let kept = dir.join("kept.txt");
+        let touched = dir.join("touched.txt");
+        let gone = dir.join("gone.txt");
+        std::fs::write(&kept, b"12345").expect("write kept");
+        std::fs::write(&touched, b"1").expect("write touched");
+        let batch = resolve(FileSystemChanges {
+            file_changes: BTreeSet::from([
+                // Removed then re-created within one batch: it exists now.
+                FileChange::Removed(kept.clone()),
+                FileChange::Created(kept.clone()),
+                FileChange::Metadata(touched.clone()),
+                FileChange::Metadata(gone.clone()),
+            ]),
+            structural_dirs: BTreeSet::new(),
+        });
+        let kind_of = |path: &std::path::PathBuf| {
+            batch
+                .changes
+                .iter()
+                .find(|change| &change.path == path)
+                .map(|change| change.kind.clone())
+        };
+        assert_eq!(batch.changes.len(), 3);
+        assert!(matches!(kind_of(&kept), Some(ChangeKind::Upsert(meta)) if meta.size == 5));
+        assert!(matches!(kind_of(&touched), Some(ChangeKind::Update(_))));
+        assert_eq!(kind_of(&gone), Some(ChangeKind::Remove));
+        assert_eq!(
+            ResolvedChange::from_disk(gone, true).kind,
+            ChangeKind::Remove
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Changes made by another process reach the app as surgical edits. The
+    /// empty-file create (`copy nul`) only produces `FILE_ACTION_ADDED`, which
+    /// used to be dropped on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn external_create_delete_and_rename_are_surgical() {
+        let dir = normalize_path(&std::env::temp_dir())
+            .join(format!("lwa_fm_external_watch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create watched dir");
+        let mut watchers = super::DirectoryWatchers::default();
+        watchers.start(&dir, notify::RecursiveMode::NonRecursive);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut structural = BTreeSet::new();
+        let mut wait_for = |label: &str, want: &dyn Fn(&ResolvedChange) -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                let batch = watchers.check_for_file_system_events();
+                structural.extend(batch.structural_dirs);
+                if batch.changes.iter().any(want) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("no change matching {label}");
+        };
+        let cmd = |args: &[&str]| {
+            let status = std::process::Command::new("cmd")
+                .arg("/C")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .expect("run cmd");
+            assert!(status.success(), "{args:?}");
+        };
+        let created = dir.join("created.txt");
+        cmd(&["copy", "nul", "created.txt"]);
+        wait_for("empty create", &|change| {
+            change.path == created
+                && matches!(change.kind, ChangeKind::Upsert(meta) if meta.size == 0)
+        });
+        cmd(&["del", "created.txt"]);
+        wait_for("delete", &|change| {
+            change.path == created && change.kind == ChangeKind::Remove
+        });
+        let old = dir.join("old.txt");
+        let new = dir.join("new.txt");
+        cmd(&["copy", "nul", "old.txt"]);
+        wait_for("rename source", &|change| change.path == old);
+        cmd(&["ren", "old.txt", "new.txt"]);
+        wait_for("rename target", &|change| {
+            change.path == new && matches!(change.kind, ChangeKind::Upsert(_))
+        });
+        assert!(
+            structural.is_empty(),
+            "unexpected refreshes: {structural:?}"
+        );
+        watchers.stop(&dir);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

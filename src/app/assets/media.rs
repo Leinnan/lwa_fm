@@ -1,5 +1,5 @@
 //! Full-color timeline overviews. Each sparse sample yields back to the asset scheduler.
-use std::collections::{VecDeque, hash_map::DefaultHasher};
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -24,7 +24,7 @@ pub(super) const MAX_EDGE: u32 = 480;
 const MAX_ENTRY: usize = 16 * 1024 * 1024;
 const MAX_DECODED: usize = 12 * 1024 * 1024;
 const MAX_FRAME_DELAY_MS: u64 = 655_350; // GIF's 16-bit centisecond delay.
-const MAGIC: &[u8; 8] = b"DFOV0007";
+const MAGIC: &[u8; 8] = b"DFOV0008";
 #[derive(Clone)]
 struct BackendIdentity {
     ffmpeg: PathBuf,
@@ -47,10 +47,17 @@ fn resolve_tool(mut path: PathBuf) -> PathBuf {
     }
     path
 }
+/// A tool next to the executable wins, then one we downloaded, then `PATH`.
+fn find_tool(name: &str, sidecar: PathBuf) -> PathBuf {
+    if sidecar.is_absolute() && sidecar.is_file() {
+        return sidecar;
+    }
+    super::ffmpeg_install::managed_tool(name).unwrap_or_else(|| resolve_tool(sidecar))
+}
 fn resolve_backend() -> BackendIdentity {
-    let ffmpeg = resolve_tool(ffmpeg_sidecar::paths::ffmpeg_path());
-    let ffprobe = resolve_tool(ffmpeg_sidecar::ffprobe::ffprobe_path());
-    let mut hash = DefaultHasher::new();
+    let ffmpeg = find_tool("ffmpeg", ffmpeg_sidecar::paths::ffmpeg_path());
+    let ffprobe = find_tool("ffprobe", ffmpeg_sidecar::ffprobe::ffprobe_path());
+    let mut hash = cache::stable_hasher();
     for path in [&ffmpeg, &ffprobe] {
         path.hash(&mut hash);
         if let Ok(metadata) = fs::metadata(path) {
@@ -126,6 +133,21 @@ fn backend_command(probe: bool) -> Command {
         &backend.ffmpeg
     })
 }
+/// The `FFmpeg` and `FFprobe` the previews use, for plugins. When they are
+/// missing, looks again (a download may have finished) and otherwise starts
+/// the one-per-session download.
+pub fn tool_paths() -> (PathBuf, PathBuf) {
+    let missing = !BACKEND.lock().expect("backend identity").ffmpeg.is_file();
+    if missing {
+        refresh_backend();
+        #[cfg(not(test))]
+        if !BACKEND.lock().expect("backend identity").ffmpeg.is_file() {
+            prepare_backend_async();
+        }
+    }
+    let backend = BACKEND.lock().expect("backend identity");
+    (backend.ffmpeg.clone(), backend.ffprobe.clone())
+}
 fn refresh_backend() {
     apply_backend(resolve_backend());
 }
@@ -184,7 +206,9 @@ pub(super) fn invalidate_sources(paths: &[PathBuf], directories: bool) {
         posters.pop(&key);
     }
     drop(posters);
-    cache::purge_sources(paths, directories);
+    // Disk entries are keyed by source revision and size, so they can never
+    // be served stale; space is reclaimed by `cache::maintain`'s LRU sweep
+    // rather than by scanning the cache on the UI thread here.
 }
 pub(super) static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 pub(super) static SAMPLES: AtomicU64 = AtomicU64::new(0);
@@ -218,16 +242,10 @@ fn remember_poster(source: &SourceKey, edge: u32, sample: &Sample) {
 }
 
 fn disk_poster(source: &SourceKey, edge: u32) -> Option<Sample> {
-    let path = cache::thumbnail_cache_path(
-        &source.path,
-        super::IconSize::Medium,
-        edge,
-        source.revision,
-        source.size,
-    );
+    let path = cache::thumbnail_cache_path(&source.path, edge, source.revision, source.size);
     let metadata = cache::read_bounded(&path.with_extension("poster"), 52).ok()?;
     let mut reader = Cursor::new(metadata.as_slice());
-    if &read_array::<8>(&mut reader).ok()? != b"DFPS0001"
+    if &read_array::<8>(&mut reader).ok()? != b"DFPS0002"
         || u128::from_le_bytes(read_array(&mut reader).ok()?) != source.revision
         || u64::from_le_bytes(read_array(&mut reader).ok()?) != source.size
         || u32::from_le_bytes(read_array(&mut reader).ok()?) != edge
@@ -287,11 +305,13 @@ fn cached_poster(source: &SourceKey, edge: u32, cancel: &AtomicBool) -> Option<S
         });
         if let Some(mut sample) = sample {
             if tier != edge {
-                let image = image::RgbaImage::from_raw(
+                let Some(image) = image::RgbaImage::from_raw(
                     sample.frame.width as u32,
                     sample.frame.height as u32,
                     sample.frame.rgba.to_vec(),
-                )?;
+                ) else {
+                    continue;
+                };
                 sample.frame = decoded_from_dynamic(
                     &image::DynamicImage::ImageRgba8(image).thumbnail(edge, edge),
                     "overview-poster".into(),
@@ -322,7 +342,7 @@ pub(super) struct SourceKey {
 impl SourceKey {
     pub fn new(path: &Path, revision: u128, size: u64) -> Self {
         Self::from_normalized(
-            Path::new(&crate::helper::normalize_path_string(path)),
+            Path::new(&crate::helper::canonical_string(path)),
             revision,
             size,
         )
@@ -336,11 +356,15 @@ impl SourceKey {
             backend: backend_revision(),
         }
     }
-    pub fn hash_cache_identity(&self, hash: &mut impl Hasher) {
+    /// What identifies a cached result for this source. Only results made
+    /// by `FFmpeg` depend on its build, so `with_backend` is off for GIFs.
+    pub fn hash_cache_identity(&self, hash: &mut impl Hasher, with_backend: bool) {
         self.path.hash(hash);
         self.revision.hash(hash);
         self.size.hash(hash);
-        self.backend.hash(hash);
+        if with_backend {
+            self.backend.hash(hash);
+        }
     }
     pub fn unchanged(&self) -> bool {
         self.generation == source_generation(&self.path)
@@ -412,20 +436,19 @@ static PROBES: LazyLock<Mutex<LruCache<SourceKey, ProbeResult>>> = LazyLock::new
 });
 
 #[cfg(not(test))]
+/// Downloads `FFmpeg` in the background when it is missing. One attempt per
+/// session: a failed download (offline, checksum mismatch) is not retried
+/// until the app restarts.
 pub(super) fn prepare_backend_async() {
-    static PREPARATION: Mutex<(Option<Instant>, bool)> = Mutex::new((None, false));
-    let mut state = PREPARATION.lock().expect("backend preparation mutex");
-    if state.1
-        || state
-            .0
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+    static ATTEMPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if BACKEND.lock().expect("media backend").ffmpeg.is_file()
+        || ATTEMPTED.swap(true, Ordering::AcqRel)
     {
         return;
     }
-    *state = (Some(Instant::now()), true);
-    drop(state);
     std::thread::spawn(|| {
-        match ffmpeg_sidecar::download::auto_download() {
+        crate::toast!(Info, "Downloading FFmpeg for video previews…");
+        match super::ffmpeg_install::install() {
             Ok(()) => {
                 refresh_backend();
                 let mut probes = PROBES.lock().expect("probe cache mutex");
@@ -442,10 +465,13 @@ pub(super) fn prepare_backend_async() {
                     probes.pop(&key);
                 }
                 drop(probes);
+                crate::toast!(Success, "Video previews are ready");
             }
-            Err(error) => log::warn!("Media backend preparation failed: {error}"),
+            Err(error) => {
+                log::warn!("FFmpeg download failed: {error}");
+                crate::toast!(Warning, "Could not download FFmpeg; video previews are off");
+            }
         }
-        PREPARATION.lock().expect("backend preparation mutex").1 = false;
     });
 }
 
@@ -1029,15 +1055,25 @@ fn sample_at(
     .next())
 }
 
+#[cfg(test)]
 pub(super) fn poster(
     source: &SourceKey,
     edge: u32,
     cancel: &AtomicBool,
 ) -> Result<DecodedImage, MediaError> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    poster_cached_to(source, edge, cancel, None)
+}
+
+/// Like [`poster`]; a newly sampled poster is also written to `cache_path`.
+pub(super) fn poster_cached_to(
+    source: &SourceKey,
+    edge: u32,
+    cancel: &AtomicBool,
+    cache_path: Option<PathBuf>,
+) -> Result<DecodedImage, MediaError> {
+    let deadline = Instant::now() + super::THUMBNAIL_DEADLINE;
     process::check(cancel, deadline)?;
     if let Some(sample) = cached_poster(source, edge, cancel) {
-        remember_poster(source, edge, &sample);
         return Ok(sample.frame);
     }
     let info = probe(source, cancel, deadline)?;
@@ -1050,6 +1086,13 @@ pub(super) fn poster(
             .ok_or_else(|| MediaError::new(ErrorKind::InvalidMedia, "No video frames"))?,
     };
     remember_poster(source, edge, &sample);
+    if let Some(path) = cache_path {
+        WRITER.enqueue(CacheWrite {
+            source: source.clone(),
+            path,
+            payload: CachePayload::Poster(edge, sample.clone()),
+        });
+    }
     Ok(sample.frame)
 }
 
@@ -1323,6 +1366,7 @@ fn split_pngs(bytes: &[u8]) -> Result<Vec<&[u8]>, MediaError> {
     Ok(frames)
 }
 
+#[cfg(test)]
 pub(super) fn load_or_generate_animated_preview(
     path: &Path,
     revision: u128,
@@ -1351,21 +1395,18 @@ pub(super) fn preview_cache_path(
     spec: PreviewSpec,
     kind: AnimatedSourceKind,
 ) -> PathBuf {
-    let mut hash = DefaultHasher::new();
-    source.hash_cache_identity(&mut hash);
+    let mut hash = cache::stable_hasher();
+    source.hash_cache_identity(&mut hash, kind == AnimatedSourceKind::Video);
     spec.hash(&mut hash);
     kind.hash(&mut hash);
-    (7_u8, VIDEO_PREVIEW_FRAMES, VIDEO_PREVIEW_FRAME_DELAY, 90_u8).hash(&mut hash);
+    (8_u8, VIDEO_PREVIEW_FRAMES, VIDEO_PREVIEW_FRAME_DELAY, 90_u8).hash(&mut hash);
     let hash = format!("{:016x}", hash.finish());
     let prefix = cache::source_prefix(&source.path);
-    cache::register_source(&source.path, &prefix);
-    let shard = cache::thumbnail_cache_dir().join(&prefix[..2]);
-    let _ = fs::create_dir_all(&shard);
-    shard.join(format!("{prefix}_{hash}_overview_v7.bin"))
+    cache::ensure_shard(&prefix).join(format!("{prefix}_{hash}_overview_v8.bin"))
 }
 
 fn checksum(bytes: &[u8]) -> u64 {
-    let mut hash = DefaultHasher::new();
+    let mut hash = cache::stable_hasher();
     bytes.hash(&mut hash);
     hash.finish()
 }
@@ -1720,7 +1761,7 @@ fn write_cache(write: CacheWrite) -> Result<(), MediaError> {
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
                 .encode_image(&image::DynamicImage::ImageRgba8(image).to_rgb8())
                 .map_err(|error| MediaError::new(ErrorKind::InvalidMedia, error.to_string()))?;
-            let mut metadata = b"DFPS0001".to_vec();
+            let mut metadata = b"DFPS0002".to_vec();
             metadata.extend_from_slice(&write.source.revision.to_le_bytes());
             metadata.extend_from_slice(&write.source.size.to_le_bytes());
             metadata.extend_from_slice(&edge.to_le_bytes());
@@ -1778,6 +1819,7 @@ pub(super) fn schedule_poster_cache(
         payload: CachePayload::Poster(edge, Sample { timestamp, frame }),
     });
 }
+#[cfg(test)]
 pub(super) fn flush_cache() {
     let state = WRITER.state.lock().expect("cache writer queue");
     let _ = WRITER
@@ -1863,7 +1905,7 @@ mod tests {
                 .len(),
             1
         );
-        cache::purge_sources(&[source.path], false);
+        let _ = fs::remove_file(path);
     }
     #[test]
     fn write_queue_coalesces_and_preserves_posters_under_pressure() {
@@ -2024,7 +2066,7 @@ mod tests {
         refresh_backend();
     }
     #[test]
-    fn invalidation_retires_memory_disk_and_pending_publication() {
+    fn invalidation_retires_memory_and_pending_publication() {
         let path =
             std::env::temp_dir().join(format!("lwa_invalidation_{}.mp4", std::process::id()));
         fs::write(&path, b"source").expect("asset fixture operation");
@@ -2050,7 +2092,10 @@ mod tests {
         assert!(source.unchanged());
         invalidate_sources(std::slice::from_ref(&source.path), false);
         assert!(!source.unchanged());
-        assert!(!cache_path.exists());
+        // Disk entries are revision-keyed and reclaimed by maintenance, not by
+        // invalidation; remove it here to check the stale write is dropped.
+        assert!(cache_path.exists());
+        fs::remove_file(&cache_path).expect("asset fixture operation");
         let fresh = SourceKey::new(&path, revision, metadata.len());
         assert!(fresh.unchanged());
         assert!(cached_poster(&fresh, 160, &AtomicBool::new(false)).is_none());

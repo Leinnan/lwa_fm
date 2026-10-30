@@ -18,6 +18,8 @@ pub struct CommandPalette {
 pub struct ValidAction {
     pub action: ActionToPerform,
     pub name: Cow<'static, str>,
+    /// Keyboard shortcut shown next to the name.
+    pub shortcut: Option<String>,
 }
 
 pub fn build_for_path(
@@ -38,6 +40,7 @@ pub fn build_for_path(
                         crate::app::commands::TabAction::ChangePaths(parent.to_path_buf().into()),
                     ),
                     name: "Go Up".into(),
+                    shortcut: None,
                 });
             }
         } else {
@@ -47,10 +50,17 @@ pub fn build_for_path(
                     crate::app::commands::TabAction::ChangePaths(path.to_path_buf().into()),
                 ),
                 name: "Open".into(),
+                shortcut: None,
             });
             commands.push(ValidAction {
                 action: ActionToPerform::NewTab(path.to_path_buf()),
                 name: "Open in new tab".into(),
+                shortcut: None,
+            });
+            commands.push(ValidAction {
+                action: ActionToPerform::NewWindow(path.to_path_buf()),
+                name: "Open in new window".into(),
+                shortcut: None,
             });
         }
         let open_name = if cfg!(windows) {
@@ -64,6 +74,7 @@ pub fn build_for_path(
         commands.push(ValidAction {
             action: ActionToPerform::SystemOpen(path.to_string_lossy().to_string().into()),
             name: Cow::Borrowed(open_name),
+            shortcut: None,
         });
         commands.push(ActionToPerform::OpenInTerminal(path.to_path_buf()).into());
         let exist_in_favorites = favorites
@@ -76,11 +87,13 @@ pub fn build_for_path(
                     path.to_string_lossy().to_string().into(),
                 ),
                 name: "Remove from favorites".into(),
+                shortcut: None,
             });
         } else {
             commands.push(ValidAction {
                 action: ActionToPerform::AddToFavorites(path.to_string_lossy().to_string().into()),
                 name: "Add to favorites".into(),
+                shortcut: None,
             });
         }
     }
@@ -90,8 +103,31 @@ pub fn build_for_path(
 impl From<ActionToPerform> for ValidAction {
     fn from(val: ActionToPerform) -> Self {
         let name = (&val).into();
-        Self { action: val, name }
+        Self {
+            action: val,
+            name,
+            shortcut: None,
+        }
     }
+}
+
+/// Every app command from the keymap, with its shortcut, for the palette.
+pub fn app_commands(ctx: &egui::Context) -> Vec<ValidAction> {
+    let mut commands: Vec<ValidAction> = Vec::new();
+    for binding in crate::app::keymap::BINDINGS {
+        if commands
+            .iter()
+            .any(|c| matches!(c.action, ActionToPerform::RunCommand(cmd) if cmd == binding.command))
+        {
+            continue;
+        }
+        commands.push(ValidAction {
+            action: ActionToPerform::RunCommand(binding.command),
+            name: Cow::Borrowed(binding.command.label()),
+            shortcut: crate::app::keymap::shortcut_text(ctx, binding.command),
+        });
+    }
+    commands
 }
 
 impl CommandPalette {
@@ -154,10 +190,14 @@ impl CommandPalette {
                     .max_height(ctx.content_rect().height() - 180.0)
                     .show(ui, |ui| {
                         for (index, command) in commands.iter().enumerate() {
+                            let mut button = egui::Button::new(command.name.as_str())
+                                .selected(index == self.selected);
+                            if let Some(shortcut) = &command.shortcut {
+                                button = button.shortcut_text(shortcut.as_str());
+                            }
                             let response = ui.add_sized(
                                 [ui.available_width(), crate::app::ui::control_height(ui)],
-                                egui::Button::new(command.name.as_str())
-                                    .selected(index == self.selected),
+                                button,
                             );
                             if response.clicked() {
                                 action = Some(command.action.clone());

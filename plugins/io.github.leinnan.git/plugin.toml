@@ -1,0 +1,54 @@
+api_version = 1
+id = "io.github.leinnan.git"
+name = "Git"
+version = "1.0.0"
+author = "DirFleet"
+description = "Branch and changes of git repositories, with fetch, pull, push and commit."
+permissions = ["fs.read", "process:git"]
+
+# The bar, the folder actions and the inspector section appear inside git
+# repositories only.
+[activation]
+ancestor_contains = [".git"]
+
+[bar]
+handler = "bar"
+refresh_secs = 30
+
+[inspector]
+title = "Git"
+targets = { kind = "any", max = 1 }
+
+[[action]]
+id = "fetch"
+title = "Git: Fetch"
+icon = "refresh-cw"
+targets = { kind = "current_dir" }
+context_menu = "background"
+mode = "job"
+
+[[action]]
+id = "pull"
+title = "Git: Pull"
+icon = "arrow-down-to-line"
+targets = { kind = "current_dir" }
+context_menu = "background"
+mode = "job"
+
+[[action]]
+id = "push"
+title = "Git: Push"
+icon = "arrow-up-from-line"
+targets = { kind = "current_dir" }
+context_menu = "background"
+mode = "job"
+
+[[action]]
+id = "commit"
+title = "Git: Commit…"
+icon = "git-commit-horizontal"
+shortcut = "Ctrl+Alt+G"
+targets = { kind = "current_dir" }
+context_menu = "background"
+form = "dynamic"
+mode = "job"

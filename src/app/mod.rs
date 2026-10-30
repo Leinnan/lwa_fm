@@ -1,23 +1,19 @@
 use crate::app::assets::AssetManager;
 use crate::app::commands::{COMMANDS_QUEUE, TabAction, TabTarget};
 use crate::app::directory_path_info::DirectoryPathInfo;
-use crate::app::directory_view_settings::DirectoryViewSettings;
-use crate::app::dock::CurrentPath;
-use crate::data::files::DirEntry;
-use crate::helper::{DataHolder, KeyWithCommandPressed};
+use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
+use crate::app::dock::{CurrentPath, WindowId};
+use crate::helper::DataHolder;
 use crate::locations::Locations;
 use crate::watcher::DirectoryWatchers;
 use crate::{app::settings::ApplicationSettings, locations::Location};
 use command_palette::CommandPalette;
 use commands::{ActionToPerform, ModalWindow};
 use egui::TextBuffer;
-use mlua::Lua;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -25,6 +21,7 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 pub mod assets;
+mod breadcrumbs;
 mod central_panel;
 pub mod command_palette;
 pub mod commands;
@@ -32,32 +29,45 @@ pub mod database;
 pub mod dir_handling;
 pub mod directory_path_info;
 mod directory_view_settings;
+#[cfg(target_os = "macos")]
+mod disk_access;
 pub mod dock;
+mod drives_ui;
+pub mod file_ops;
+pub mod history;
 mod inspector;
+pub mod keymap;
+pub mod saved_searches;
+pub mod search;
+pub mod search_state;
+pub mod undo;
+pub use search::{MatchMode, SavedSearch, SavedSearches, Search, SearchTermType};
+pub mod menus;
+#[cfg(test)]
+mod perf_tests;
+mod plugins_ui;
+pub mod selection;
 mod settings;
 mod side_panel;
 #[cfg(any(windows, test))]
 mod theme;
 mod top_bottom;
+mod trash_view;
 pub mod ui;
 #[cfg(test)]
 mod ui_tests;
 
-/// Dedicated thread pool for filesystem reads. Limited to 2 threads to bound
-/// concurrent disk I/O while keeping the UI responsive.
+/// Dedicated thread pool for filesystem reads. Deep walks run their
+/// per-directory tasks here, so it scales with the machine (bounded, to keep
+/// disk concurrency sane). It stays separate from the global rayon pool, which
+/// the UI thread uses for sorting and filtering.
 static BG_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     ThreadPoolBuilder::new()
-        .num_threads(2)
+        .num_threads(std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 8)))
         .thread_name(|i| format!("lwa_fm_bg_{i}"))
         .build()
         .expect("Failed to create background thread pool")
 });
-
-thread_local! {
-    pub static LUA_INSTANCE: RefCell<Lua> = RefCell::new({
-        Lua::new()
-    });
-}
 
 pub static TOASTS: std::sync::LazyLock<egui::mutex::RwLock<egui_notify::Toasts>> =
     std::sync::LazyLock::new(|| {
@@ -91,13 +101,35 @@ pub struct App {
     #[serde(skip)]
     chrome: theme::win32::WindowChrome,
     user_locations: Locations,
-    #[cfg(not(target_os = "macos"))]
-    drives_locations: Locations,
+    /// Mounted drives, kept current by a background monitor.
     #[serde(skip)]
-    tabs: crate::app::dock::MyTabs,
+    drives: drives_ui::DrivesState,
+    /// The Full Disk Access banner's state.
+    #[cfg(target_os = "macos")]
+    #[serde(skip)]
+    disk_access: disk_access::DiskAccessPrompt,
+    #[serde(skip)]
+    tabs: crate::app::dock::Workspace,
+    /// Folders of the open tabs, saved so they come back after a restart.
+    #[serde(default)]
+    open_tabs: Vec<PathBuf>,
+    /// Every window's panes and tab folders, saved so they come back after
+    /// a restart. Newer than `open_tabs`, which only older builds read.
+    #[serde(default)]
+    windows: Vec<crate::app::dock::SavedWindow>,
+    /// Recently opened folders, newest first.
+    #[serde(default)]
+    recent_folders: Vec<PathBuf>,
     pub settings: ApplicationSettings,
     #[serde(skip)]
     display_modal: Option<ModalWindow>,
+    /// The window showing the open dialog; the others wait behind it.
+    #[serde(skip)]
+    modal_window: Option<WindowId>,
+    /// The window that last had keyboard focus. Toasts show there, and
+    /// background work that names no window acts on it.
+    #[serde(skip, default = "main_window")]
+    focused_window: WindowId,
     #[serde(skip)]
     command_palette: CommandPalette,
     #[serde(skip, default)]
@@ -109,9 +141,25 @@ pub struct App {
     #[serde(skip, default)]
     pending_structural_dirs: BTreeMap<PathBuf, Instant>,
     #[serde(skip)]
-    sidebar_overlay: bool,
+    file_ops: file_ops::FileOps,
     #[serde(skip)]
-    inspector_overlay: bool,
+    rename: Option<file_ops::RenameState>,
+    #[serde(skip)]
+    pending_delete: file_ops::PendingDelete,
+    #[serde(skip)]
+    pending_transfer: Option<file_ops::PendingTransfer>,
+    #[serde(skip)]
+    choose_folder: Option<file_ops::ChooseFolder>,
+    #[serde(skip)]
+    saved_editor: Option<saved_searches::SavedSearchEditor>,
+    #[serde(skip)]
+    batch_rename: Option<file_ops::BatchRename>,
+    /// Lua plugins: their workers, jobs, form and bar contents.
+    #[serde(skip)]
+    plugins: crate::plugins::PluginHost,
+    /// Clipboard sequence number when items were cut, to notice replacement.
+    #[serde(skip)]
+    cut_sequence: u64,
     #[cfg(feature = "profiling")]
     #[serde(skip)]
     profiler_visible: bool,
@@ -125,78 +173,25 @@ impl App {
         if let Some(modal) = &self.display_modal {
             match modal {
                 ModalWindow::Settings => {
-                    self.settings.display(ctx);
+                    self.settings.display(ctx, &mut self.plugins);
                 }
                 ModalWindow::Commands => {
                     self.command_palette.ui(ctx);
-                } // ModalWindow::NewDirectory => todo!(),
-                ModalWindow::Rename => {
-                    let modal_response =
-                        egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(ctx, |ui| {
-                            ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 420.0));
-                            ui.heading("Rename");
-                            ui::section(ui, "File name");
-                            ui.label("Old name");
-                            let (old, mut name) = ui.data_mut(|d| {
-                                let old =
-                                    d.get_temp::<DirEntry>(egui::Id::new(ModalWindow::Rename));
-                                let new = d
-                                    .get_temp::<String>(
-                                        egui::Id::new(ModalWindow::Rename).with("new"),
-                                    )
-                                    .unwrap_or_else(|| {
-                                        old.as_ref()
-                                            .map(|d| d.get_splitted_path().1.to_string())
-                                            .unwrap_or_default()
-                                    });
-                                (old, new)
-                            });
-                            let Some(old) = old else {
-                                return;
-                            };
-                            let mut old_file_name = old.get_splitted_path().1.to_string();
-                            ui.add_enabled(
-                                false,
-                                egui::TextEdit::singleline(&mut old_file_name)
-                                    .min_size(crate::app::ui::text_edit_min_size(ui))
-                                    .vertical_align(crate::app::ui::text_edit_align(ui)),
-                            );
-                            ui.label("New name");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut name)
-                                    .min_size(ui::text_edit_min_size(ui))
-                                    .vertical_align(ui::text_edit_align(ui)),
-                            );
-                            let valid = !Path::new(&name).try_exists().is_ok_and(|f| f);
-                            if ui.add_enabled(valid, egui::Button::new("Rename")).clicked() {
-                                if fs::rename(
-                                    old.get_path(),
-                                    Path::new(old.get_splitted_path().0).join(&name),
-                                )
-                                .is_ok()
-                                {
-                                    crate::app::database::invalidate_dir(Path::new(
-                                        old.get_splitted_path().0,
-                                    ));
-                                    TabAction::RequestFilesRefresh.schedule_active_tab();
-                                }
-                                ui.data_mut(|w| {
-                                    w.remove_temp::<String>(
-                                        egui::Id::new(ModalWindow::Rename).with("new"),
-                                    )
-                                });
-                                ui.close();
-                            } else {
-                                ui.data_mut(|w| {
-                                    w.insert_temp(
-                                        egui::Id::new(ModalWindow::Rename).with("new"),
-                                        name.clone(),
-                                    );
-                                });
-                            }
-                        });
-
-                    if modal_response.should_close() {
+                }
+                ModalWindow::Shortcuts => {
+                    if keymap::help_ui(ctx) {
+                        ActionToPerform::CloseActiveModalWindow.schedule();
+                    }
+                }
+                ModalWindow::Rename => self.rename_ui(ctx),
+                ModalWindow::ConfirmDelete => self.confirm_delete_ui(ctx),
+                ModalWindow::Conflict => self.conflict_ui(ctx),
+                ModalWindow::ChooseFolder => self.choose_folder_ui(ctx),
+                ModalWindow::EditSavedSearch => self.saved_search_editor_ui(ctx),
+                ModalWindow::BatchRename => self.batch_rename_ui(ctx),
+                ModalWindow::ConfirmEject => self.confirm_eject_ui(ctx),
+                ModalWindow::PluginForm => {
+                    if self.plugins.form_ui(ctx) {
                         ActionToPerform::CloseActiveModalWindow.schedule();
                     }
                 }
@@ -204,7 +199,7 @@ impl App {
         }
     }
 
-    fn reconcile_tab_watchers(&mut self, tab_id: u32) {
+    fn reconcile_tab_watchers(&mut self, tab_id: crate::app::dock::TabId) {
         let (old_watcher_specs, new_watcher_specs) = {
             let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                 return;
@@ -261,7 +256,7 @@ impl App {
         let changes = self.watchers.check_for_file_system_events();
         let now = Instant::now();
         let mut degraded_structural: BTreeSet<PathBuf> = BTreeSet::new();
-        self.route_file_changes(changes.file_changes, ctx, &mut degraded_structural);
+        self.route_file_changes(changes.changes, ctx, &mut degraded_structural);
 
         // Debounce structural changes (watcher-reported + surgical fallbacks)
         // so a burst (git checkout, npm install) collapses into one refresh per
@@ -296,6 +291,19 @@ impl App {
         self.assets
             .invalidate_directories(ready_structural.iter().cloned());
         crate::app::database::invalidate_dirs(ready_structural.iter().cloned());
+        let refreshed: Vec<PathBuf> = ready_structural.iter().cloned().collect();
+        self.plugins.folders_changed(&refreshed);
+        if self.plugins.wants("fs_changed") {
+            let dirs: Vec<String> = refreshed
+                .iter()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .collect();
+            self.plugins.emit(
+                "fs_changed",
+                &crate::plugins::CallContext::default(),
+                &serde_json::json!({ "dirs": dirs }),
+            );
+        }
 
         let tab_ids = self.tabs.get_tab_ids();
         let affected_tabs = tab_ids
@@ -324,18 +332,13 @@ impl App {
     /// and one asynchronous cache write.
     fn route_file_changes(
         &mut self,
-        file_changes: BTreeSet<crate::watcher::FileChange>,
+        file_changes: Vec<crate::watcher::ResolvedChange>,
         ctx: &egui::Context,
         degraded_structural: &mut BTreeSet<PathBuf>,
     ) {
-        let mut by_parent = BTreeMap::<PathBuf, Vec<crate::watcher::FileChange>>::new();
+        let mut by_parent = BTreeMap::<PathBuf, Vec<crate::watcher::ResolvedChange>>::new();
         for change in file_changes {
-            let path = match &change {
-                crate::watcher::FileChange::Metadata(path)
-                | crate::watcher::FileChange::Created(path)
-                | crate::watcher::FileChange::Removed(path) => path,
-            };
-            let Some(parent) = path.parent().map(crate::helper::normalize_path) else {
+            let Some(parent) = change.path.parent().map(crate::helper::canonical_form) else {
                 continue;
             };
             by_parent.entry(parent).or_default().push(change);
@@ -343,12 +346,9 @@ impl App {
 
         for (parent, changes) in by_parent {
             self.assets
-                .invalidate_files(changes.iter().map(|change| match change {
-                    crate::watcher::FileChange::Metadata(path)
-                    | crate::watcher::FileChange::Created(path)
-                    | crate::watcher::FileChange::Removed(path) => path.clone(),
-                }));
+                .invalidate_files(changes.iter().map(|change| change.path.clone()));
             crate::app::database::apply_file_changes(parent.clone(), changes.clone());
+            self.plugins.folders_changed(std::slice::from_ref(&parent));
             self.apply_file_changes_to_tabs(&parent, &changes, ctx, degraded_structural);
         }
     }
@@ -356,7 +356,7 @@ impl App {
     fn apply_file_changes_to_tabs(
         &mut self,
         parent: &Path,
-        changes: &[crate::watcher::FileChange],
+        changes: &[crate::watcher::ResolvedChange],
         ctx: &egui::Context,
         degraded: &mut BTreeSet<PathBuf>,
     ) {
@@ -377,10 +377,35 @@ impl App {
         }
     }
 
+    /// Runs queued actions, each in the window it came from.
     fn drain_command_queue(&mut self, ctx: &egui::Context) {
-        while let Some(action) = COMMANDS_QUEUE.pop() {
-            self.handle_action(ctx, action);
+        let current = self.tabs.current_window();
+        while let Some(queued) = COMMANDS_QUEUE.pop_queued() {
+            self.tabs
+                .set_current_window(queued.window.unwrap_or(self.focused_window));
+            let window = self.tabs.current_window();
+            commands::in_window(window, || self.handle_action(ctx, queued.action));
+            self.claim_modal();
         }
+        self.tabs.set_current_window(current);
+    }
+
+    /// A dialog that just opened belongs to the current window.
+    const fn claim_modal(&mut self) {
+        match (&self.display_modal, self.modal_window) {
+            (Some(_), None) => self.modal_window = Some(self.tabs.current_window()),
+            (None, Some(_)) => self.modal_window = None,
+            _ => {}
+        }
+    }
+
+    /// Width of the current window's content, as of its last frame.
+    fn window_width(&self, ctx: &egui::Context) -> f32 {
+        self.tabs
+            .window()
+            .content_rect
+            .unwrap_or_else(|| ctx.content_rect())
+            .width()
     }
 }
 
@@ -391,7 +416,30 @@ pub enum Sort {
     Modified,
     Created,
     Size,
+    Kind,
     Random,
+}
+
+impl Sort {
+    pub const ALL: [Self; 6] = [
+        Self::Name,
+        Self::Modified,
+        Self::Created,
+        Self::Size,
+        Self::Kind,
+        Self::Random,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Modified => "Date modified",
+            Self::Created => "Date created",
+            Self::Size => "Size",
+            Self::Kind => "Kind",
+            Self::Random => "Random",
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
@@ -399,57 +447,6 @@ pub enum DisplayType {
     #[default]
     List,
     Icons,
-}
-
-#[derive(Deserialize, Serialize, Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchTermType {
-    #[default]
-    Plain,
-    Glob,
-    Regex,
-}
-
-#[derive(Deserialize, Serialize, Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MatchMode {
-    #[default]
-    All,
-    Any,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct SearchTerm {
-    pub pattern: String,
-    pub term_type: SearchTermType,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct SavedSearch {
-    pub name: String,
-    pub search: Search,
-}
-
-#[derive(Deserialize, Serialize, Default, Debug, Clone)]
-pub struct SavedSearches {
-    pub searches: Vec<SavedSearch>,
-}
-
-#[derive(Deserialize, Serialize, Default, Debug, Clone)]
-pub struct Search {
-    pub value: String,
-    pub depth: usize,
-    pub case_sensitive: bool,
-    #[serde(default)]
-    pub term_type: SearchTermType,
-    #[serde(default)]
-    pub extra_dirs: Vec<PathBuf>,
-    #[serde(default)]
-    pub terms: Vec<SearchTerm>,
-    #[serde(default)]
-    pub match_mode: MatchMode,
-    #[serde(skip)]
-    pub new_dir_input: String,
-    #[serde(skip)]
-    pub save_name_input: String,
 }
 
 #[derive(Deserialize, Serialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -514,25 +511,35 @@ impl<T> DerefMut for Data<T> {
 
 impl Default for App {
     fn default() -> Self {
-        #[cfg(not(target_os = "macos"))]
-        let drives_locations = Locations::get_drives();
-
         let command_palette = CommandPalette::default();
         Self {
-            #[cfg(not(target_os = "macos"))]
-            drives_locations,
+            drives: drives_ui::DrivesState::default(),
+            #[cfg(target_os = "macos")]
+            disk_access: disk_access::DiskAccessPrompt::default(),
             #[cfg(windows)]
             chrome: theme::win32::WindowChrome::default(),
             user_locations: Locations::get_user_dirs(),
-            tabs: crate::app::dock::MyTabs::new(&get_starting_path()),
+            tabs: crate::app::dock::Workspace::new(&get_starting_path()),
+            open_tabs: Vec::new(),
+            windows: Vec::new(),
+            recent_folders: Vec::new(),
             settings: ApplicationSettings::default(),
             display_modal: None,
+            modal_window: None,
+            focused_window: WindowId::MAIN,
             command_palette,
             watchers: DirectoryWatchers::default(),
             assets: AssetManager::default(),
             pending_structural_dirs: BTreeMap::new(),
-            sidebar_overlay: false,
-            inspector_overlay: false,
+            file_ops: file_ops::FileOps::default(),
+            rename: None,
+            pending_delete: file_ops::PendingDelete::default(),
+            pending_transfer: None,
+            cut_sequence: 0,
+            choose_folder: None,
+            saved_editor: None,
+            batch_rename: None,
+            plugins: crate::plugins::PluginHost::default(),
             #[cfg(feature = "profiling")]
             profiler_visible: true,
             #[cfg(feature = "profiling")]
@@ -543,15 +550,14 @@ impl Default for App {
 
 impl App {
     fn load_locations(&mut self) {
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.drives_locations = Locations::get_drives();
-        }
+        self.drives = drives_ui::DrivesState::start();
+        self.sync_drive_targets();
         self.user_locations = Locations::get_user_dirs();
     }
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
+        crate::watcher::set_repaint_context(&cc.egui_ctx);
 
         #[cfg(debug_assertions)]
         cc.egui_ctx.global_style_mut(|style| {
@@ -564,9 +570,16 @@ impl App {
             let mut value: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
 
             value.load_locations();
-            value.tabs = crate::app::dock::MyTabs::new(&get_starting_path());
+            value.tabs = restore_tabs(std::mem::take(&mut value.windows), &value.open_tabs);
+            value.sync_drive_targets();
             value.assets = AssetManager::default();
             value.assets.set_icon_size(value.settings.icon_size);
+            value.plugins = crate::plugins::PluginHost::start();
+            #[cfg(target_os = "macos")]
+            {
+                value.disk_access =
+                    disk_access::DiskAccessPrompt::at_launch(value.settings.ask_full_disk_access);
+            }
             #[cfg(feature = "profiling")]
             {
                 value.profiler_visible = true;
@@ -574,7 +587,14 @@ impl App {
             return value;
         }
 
-        Self::default()
+        let mut app = Self::default();
+        app.load_locations();
+        app.plugins = crate::plugins::PluginHost::start();
+        #[cfg(target_os = "macos")]
+        {
+            app.disk_access = disk_access::DiskAccessPrompt::at_launch(true);
+        }
+        app
     }
 
     #[allow(clippy::too_many_lines)]
@@ -584,15 +604,17 @@ impl App {
 
         match action {
             ActionToPerform::ToggleSidebar => {
-                if ctx.content_rect().width() < 800.0 {
-                    self.sidebar_overlay = !self.sidebar_overlay;
+                if self.window_width(ctx) < 800.0 {
+                    let window = self.tabs.window_mut();
+                    window.sidebar_overlay = !window.sidebar_overlay;
                 } else {
                     self.settings.sidebar_visible = !self.settings.sidebar_visible;
                 }
             }
             ActionToPerform::ToggleInspector => {
-                if ctx.content_rect().width() < 1000.0 {
-                    self.inspector_overlay = !self.inspector_overlay;
+                if self.window_width(ctx) < 1000.0 {
+                    let window = self.tabs.window_mut();
+                    window.inspector_overlay = !window.inspector_overlay;
                 } else {
                     self.settings.inspector_visible = !self.settings.inspector_visible;
                 }
@@ -621,28 +643,45 @@ impl App {
                             "lwa_fm::handle_action::ChangePaths: {}",
                             path.get_name_from_path()
                         );
+                        if let CurrentPath::One(folder) = &path
+                            && self.plugins.wants("folder_opened")
+                        {
+                            self.plugins.emit(
+                                "folder_opened",
+                                &crate::plugins::CallContext {
+                                    dir: Some(folder.clone()),
+                                    tab: Some(tab_id.number()),
+                                    ..Default::default()
+                                },
+                                &serde_json::Value::Null,
+                            );
+                        }
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
                         };
-                        path.print_from_lua();
+                        if let CurrentPath::One(folder) = &path {
+                            self.recent_folders.retain(|recent| recent != folder);
+                            self.recent_folders.insert(0, folder.clone());
+                            self.recent_folders.truncate(12);
+                        }
+                        // Opening a folder ends the search (the history keeps
+                        // it), unless a history entry is being restored.
+                        if std::mem::take(&mut tab.keep_search_once) {
+                        } else if matches!(path, CurrentPath::One(_)) && tab.search.is_some() {
+                            tab.end_search();
+                            tab.search_committed = None;
+                        }
                         tab.set_path(path);
                         tab.refresh_generation
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        if let Some(data) = ctx.data_get_tab::<DirectoryPathInfo>(tab.id) {
-                            let new_data = match tab.current_path.single_path() {
-                                Some(p) => {
-                                    if Path::new(&data.text_input).eq(p.as_path()) {
-                                        Some(DirectoryPathInfo::build(p.as_path(), false))
-                                    } else {
-                                        None
-                                    }
-                                }
-                                None => None,
-                            };
-                            match new_data {
-                                Some(s) => ctx.data_set_tab(tab.id, s),
-                                None => ctx.data_remove_tab::<DirectoryPathInfo>(tab.id),
-                            }
+                        if let Some(edit) = &tab.path_edit {
+                            // An address being typed survives only when it
+                            // is where the tab went.
+                            tab.path_edit = tab
+                                .current_path
+                                .single_path()
+                                .filter(|p| Path::new(&edit.text_input) == p.as_path())
+                                .map(|p| DirectoryPathInfo::build(&p, false));
                         }
                         self.handle_action(
                             ctx,
@@ -651,6 +690,27 @@ impl App {
                                 TabAction::RequestFilesRefresh,
                             ),
                         );
+                    }
+                    commands::TabAction::Restore(entry) => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        tab.search_dirty_since = None;
+                        tab.search.clone_from(&entry.search);
+                        tab.search_committed = entry.search;
+                        if tab.current_path == entry.path {
+                            tab.update_visible_entries();
+                            TabAction::RequestFilesRefresh.schedule_tab(tab_id);
+                        } else {
+                            tab.keep_search_once = true;
+                            self.handle_action(
+                                ctx,
+                                ActionToPerform::TabAction(
+                                    TabTarget::TabWithId(tab_id),
+                                    TabAction::ChangePaths(entry.path),
+                                ),
+                            );
+                        }
                     }
                     commands::TabAction::FilterChanged => {
                         #[cfg(feature = "profiling")]
@@ -673,13 +733,9 @@ impl App {
                             let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                                 return;
                             };
-                            let mut dirs: Vec<PathBuf> = match &tab.current_path {
-                                CurrentPath::None => vec![],
-                                CurrentPath::One(p) => vec![p.clone()],
-                                CurrentPath::Multiple(ps) => ps.clone(),
-                            };
+                            let mut dirs: Vec<PathBuf> = tab.current_path.get_paths();
                             if let Some(search) = &tab.search {
-                                dirs.extend(search.extra_dirs.iter().cloned());
+                                dirs.extend(search.extra_dirs().cloned());
                                 dirs.sort();
                                 dirs.dedup();
                             }
@@ -698,6 +754,14 @@ impl App {
                     commands::TabAction::RequestFilesRefresh => {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!("lwa_fm::handle_action::RefreshFiles");
+                        // A tab not shown yet reads its folder when it is.
+                        if self
+                            .tabs
+                            .get_tab_by_id(tab_id)
+                            .is_some_and(|tab| tab.unloaded)
+                        {
+                            return;
+                        }
                         self.reconcile_tab_watchers(tab_id);
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
                             return;
@@ -706,19 +770,18 @@ impl App {
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         tab.cancel_token
                             .store(true, std::sync::atomic::Ordering::SeqCst);
-                        if tab.loading {
-                            tab.pending_refresh = true;
+                        if tab.load.defer_refresh() {
                             return;
                         }
                         tab.update_settings(ctx);
 
-                        let mut directories: Vec<PathBuf> = match &tab.current_path {
-                            CurrentPath::None => vec![],
-                            CurrentPath::One(path_buf) => vec![path_buf.clone()],
-                            CurrentPath::Multiple(path_bufs) => path_bufs.clone(),
-                        };
+                        if tab.current_path.is_trash() {
+                            Self::load_trash(tab, ctx);
+                            return;
+                        }
+                        let mut directories: Vec<PathBuf> = tab.current_path.get_paths();
                         if let Some(search) = &tab.search {
-                            directories.extend(search.extra_dirs.iter().cloned());
+                            directories.extend(search.extra_dirs().cloned());
                             directories.sort();
                             directories.dedup();
                         }
@@ -730,8 +793,7 @@ impl App {
                         let settings =
                             ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&current_path);
 
-                        tab.loading = true;
-                        tab.loading_progress = None;
+                        tab.load = crate::app::dock::LoadState::loading(None);
                         tab.cancel_token
                             .store(false, std::sync::atomic::Ordering::SeqCst);
                         let refresh_gen = std::sync::Arc::clone(&tab.refresh_generation);
@@ -745,10 +807,10 @@ impl App {
                             );
                             // A superseded or cancelled task MUST still post a terminal
                             // `FilesLoaded`. That handler is the only thing that clears
-                            // `loading`, and it is where `pending_refresh` (set when a
+                            // the loading state, and it is where a deferred rerun (set when a
                             // refresh is requested while one is already running) gets
                             // re-spawned. Bailing silently leaves the tab parked in
-                            // `loading = true`, so a depth/path change made during a
+                            // loading forever, so a depth/path change made during a
                             // slow (e.g. deep favorites) search would never take effect.
                             //
                             // The generation carried here is always stale at abort time
@@ -759,10 +821,11 @@ impl App {
                                 COMMANDS_QUEUE.push(ActionToPerform::TabAction(
                                     TabTarget::TabWithId(tab_id),
                                     TabAction::FilesLoaded {
-                                        list: Vec::new(),
-                                        generation,
+                                        listing: std::sync::Arc::default(),
+                                        order: Vec::new(),
                                         visible: Vec::new(),
-                                        dir_list: None,
+                                        generation,
+                                        linked_dirs: Vec::new(),
                                     },
                                 ));
                             };
@@ -791,48 +854,75 @@ impl App {
                                 if directories.len() == 1 { "y" } else { "ies" }
                             ));
 
-                            let mut list = crate::app::dir_handling::read_directory(
+                            // Deep walks publish partial (sorted, filtered) results
+                            // so the first matches appear while scanning continues.
+                            let partial_search = search.clone();
+                            let partial_settings = settings.data.clone();
+                            let partial_refresh_gen = std::sync::Arc::clone(&refresh_gen);
+                            let on_partial =
+                                move |listing: std::sync::Arc<crate::data::files::Listing>| {
+                                    if partial_refresh_gen.load(std::sync::atomic::Ordering::SeqCst)
+                                        != generation
+                                    {
+                                        return;
+                                    }
+                                    let order = crate::app::dir_handling::sort_order(
+                                        &listing,
+                                        &partial_settings,
+                                    );
+                                    let visible = crate::app::dir_handling::filter_visible(
+                                        &listing,
+                                        &order,
+                                        show_hidden,
+                                        partial_search.as_ref(),
+                                    );
+                                    COMMANDS_QUEUE.push(ActionToPerform::TabAction(
+                                        TabTarget::TabWithId(tab_id),
+                                        TabAction::FilesPartial {
+                                            listing,
+                                            order,
+                                            visible,
+                                            generation,
+                                        },
+                                    ));
+                                };
+                            let crate::app::dir_handling::WalkResult {
+                                listing,
+                                linked_dirs,
+                            } = crate::app::dir_handling::read_directory_streaming(
                                 &directories,
                                 depth,
                                 show_hidden,
                                 &cancel,
+                                &on_partial,
                             );
                             if cancel.load(std::sync::atomic::Ordering::SeqCst) {
                                 abort();
                                 return;
                             }
 
-                            progress(&format!("Sorting {} entries…", list.len()));
+                            progress(&format!("Sorting {} entries…", listing.len()));
 
-                            crate::app::dir_handling::sort_entries_vec(&mut list, &settings.data);
+                            let order =
+                                crate::app::dir_handling::sort_order(&listing, &settings.data);
                             #[cfg(feature = "profiling")]
                             puffin::profile_scope!(
                                 "lwa_fm::handle_action::RefreshFiles::filter_visible"
                             );
-                            let visible = crate::app::dir_handling::filter_visible_entries(
-                                &list,
+                            let visible = crate::app::dir_handling::filter_visible(
+                                &listing,
+                                &order,
                                 show_hidden,
                                 search.as_ref(),
                             );
-                            // For single-directory reads, move `list` into a lazily-materialised
-                            // DirList so the tab's `list` can stay empty (full DirEntry values
-                            // are then built only for visible rows, roughly halving memory for
-                            // large folders). Multi-dir / search reads keep `list` populated.
-                            let (list, dir_list) = if depth <= 1 && directories.len() == 1 {
-                                (
-                                    Vec::new(),
-                                    crate::data::files::DirList::from_owned_list(list),
-                                )
-                            } else {
-                                (list, None)
-                            };
                             COMMANDS_QUEUE.push(ActionToPerform::TabAction(
                                 TabTarget::TabWithId(tab_id),
                                 TabAction::FilesLoaded {
-                                    list,
-                                    generation,
+                                    listing,
+                                    order,
                                     visible,
-                                    dir_list,
+                                    generation,
+                                    linked_dirs,
                                 },
                             ));
                         });
@@ -850,10 +940,11 @@ impl App {
                         tab.update_visible_entries();
                     }
                     commands::TabAction::FilesLoaded {
-                        list,
-                        generation,
+                        listing,
+                        order,
                         visible,
-                        dir_list,
+                        generation,
+                        linked_dirs,
                     } => {
                         #[cfg(feature = "profiling")]
                         puffin::profile_scope!("lwa_fm::handle_action::FilesLoaded");
@@ -869,27 +960,39 @@ impl App {
                             // visual fallback so the user sees something while the
                             // "true" refresh is still in flight.
                             if tab.visible_entries.is_empty() {
-                                tab.list = list;
-                                tab.visible_entries = visible;
-                                tab.dir_list = dir_list;
+                                tab.set_listing(listing, order, visible);
                             }
-                            tab.loading = false;
-                            tab.loading_progress = None;
-                            if tab.pending_refresh {
-                                tab.pending_refresh = false;
+                            if tab.load.finish() {
                                 TabAction::RequestFilesRefresh.schedule_tab(tab_id);
                             }
                             return;
                         }
                         tab.update_settings(ctx);
-                        tab.list = list;
-                        tab.visible_entries = visible;
-                        tab.dir_list = dir_list;
-                        tab.loading = false;
-                        tab.loading_progress = None;
-                        if tab.pending_refresh {
-                            tab.pending_refresh = false;
+                        tab.set_listing(listing, order, visible);
+                        let linked_changed = tab.set_linked_watch_roots(linked_dirs);
+                        if tab.load.finish() {
                             TabAction::RequestFilesRefresh.schedule_tab(tab_id);
+                        }
+                        if linked_changed {
+                            self.reconcile_tab_watchers(tab_id);
+                        }
+                    }
+                    commands::TabAction::FilesPartial {
+                        listing,
+                        order,
+                        visible,
+                        generation,
+                    } => {
+                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                            return;
+                        };
+                        if tab.load.is_loading()
+                            && tab
+                                .refresh_generation
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                                == generation
+                        {
+                            tab.set_listing(listing, order, visible);
                         }
                     }
                     commands::TabAction::FilesProgress {
@@ -906,7 +1009,7 @@ impl App {
                         {
                             return;
                         }
-                        tab.loading_progress = Some(progress);
+                        tab.load.set_progress(progress);
                     }
                     commands::TabAction::SearchInFavorites(start) => {
                         let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
@@ -927,110 +1030,29 @@ impl App {
                                 ),
                             );
                         } else {
-                            if !tab.can_undo() {
-                                return;
-                            }
-
-                            let Some(previous_path_action) = tab.undo() else {
+                            let Some(previous_path_action) = tab.go_back() else {
                                 return;
                             };
                             self.handle_action(ctx, previous_path_action);
                         }
                     }
-                    commands::TabAction::AddSearchDir(path) => {
-                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
-                            return;
-                        };
-                        if let Some(search) = &mut tab.search
-                            && path.is_dir()
-                            && !search.extra_dirs.contains(&path)
-                        {
-                            search.extra_dirs.push(path);
-                        }
-                        tab.update_visible_entries();
-                        TabAction::RequestFilesRefresh.schedule_tab(tab_id);
-                    }
-                    commands::TabAction::RemoveSearchDir(index) => {
-                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
-                            return;
-                        };
-                        if let Some(search) = &mut tab.search
-                            && index < search.extra_dirs.len()
-                        {
-                            search.extra_dirs.remove(index);
-                        }
-                        tab.update_visible_entries();
-                        TabAction::RequestFilesRefresh.schedule_tab(tab_id);
-                    }
-                    commands::TabAction::AddSearchTerm(term) => {
-                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
-                            return;
-                        };
-                        if let Some(search) = &mut tab.search {
-                            search.terms.push(term);
-                        }
-                        TabAction::FilterChanged.schedule_tab(tab_id);
-                    }
-                    commands::TabAction::RemoveSearchTerm(index) => {
-                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
-                            return;
-                        };
-                        if let Some(search) = &mut tab.search
-                            && index < search.terms.len()
-                        {
-                            search.terms.remove(index);
-                        }
-                        TabAction::FilterChanged.schedule_tab(tab_id);
-                    }
-                    commands::TabAction::SetMatchMode(mode) => {
-                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
-                            return;
-                        };
-                        if let Some(search) = &mut tab.search {
-                            search.match_mode = mode;
-                        }
-                        TabAction::FilterChanged.schedule_tab(tab_id);
-                    }
-                    commands::TabAction::SaveSearch(name) => {
-                        let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
-                            return;
-                        };
-                        if let Some(search) = &tab.search {
-                            let mut saved = ctx
-                                .data_get_persisted::<SavedSearches>()
-                                .unwrap_or_default();
-                            saved.searches.retain(|s| s.name != name);
-                            saved.searches.push(SavedSearch {
-                                name: name.clone(),
-                                search: search.clone(),
-                            });
-                            ctx.data_set_persisted(saved);
-                            toast!(Success, "Saved search: {name}");
-                        }
-                    }
-                    commands::TabAction::LoadSavedSearch(name) => {
-                        let saved = ctx
-                            .data_get_persisted::<SavedSearches>()
-                            .unwrap_or_default();
-                        if let Some(ss) = saved.searches.iter().find(|s| s.name == name) {
-                            let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
-                                return;
-                            };
-                            tab.search = Some(ss.search.clone());
-                            tab.update_visible_entries();
-                            TabAction::RequestFilesRefresh.schedule_tab(tab_id);
-                        }
-                    }
-                    commands::TabAction::DeleteSavedSearch(name) => {
-                        let mut saved = ctx
-                            .data_get_persisted::<SavedSearches>()
-                            .unwrap_or_default();
-                        saved.searches.retain(|s| s.name != name);
-                        ctx.data_set_persisted(saved);
-                    }
                 }
             }
-            ActionToPerform::NewTab(path) => self.tabs.open_in_new_tab(&path),
+            ActionToPerform::NewTab(path) => {
+                self.tabs.open_in_new_tab(&path);
+            }
+            ActionToPerform::NewWindow(path) => {
+                self.tabs.open_window_at(&path);
+            }
+            ActionToPerform::OpenTrash { new_tab } => self.open_trash(ctx, new_tab),
+            ActionToPerform::ConfirmEmptyTrash => self.confirm_empty_trash(),
+            ActionToPerform::EjectDrive { mount, force } => self.eject_drive(ctx, &mount, force),
+            ActionToPerform::DriveEjected {
+                mount,
+                name,
+                result,
+            } => self.drive_ejected(mount, &name, result),
+            ActionToPerform::RestoreTrashSelection => self.restore_trash_selection(ctx),
             ActionToPerform::OpenInTerminal(path_buf) => {
                 match self.settings.open_in_terminal(&path_buf) {
                     Ok(_) => {
@@ -1077,22 +1099,16 @@ impl App {
                 }
             }
             ActionToPerform::ToggleTopEdit => {
-                let current_path = self.tabs.get_current_path();
-                let index = self.tabs.get_current_index().unwrap_or_default();
-
-                match ctx.data_get_tab::<DirectoryPathInfo>(index) {
-                    Some(_) => ctx.data_remove_tab::<DirectoryPathInfo>(index),
-                    None => {
-                        if let Some(path) = current_path {
-                            ctx.data_set_tab(
-                                index,
-                                DirectoryPathInfo::build(path.as_path(), false),
-                            );
-                            ctx.memory_mut(|memory| {
-                                memory.request_focus(egui::Id::new(("path_editor", index)));
-                            });
-                        }
-                    }
+                let Some(tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
+                if tab.path_edit.take().is_none()
+                    && let Some(path) = tab.current_path.single_path()
+                {
+                    tab.path_edit = Some(DirectoryPathInfo::build(&path, false));
+                    ctx.memory_mut(|memory| {
+                        memory.request_focus(egui::Id::new(("path_editor", tab.id)));
+                    });
                 }
             }
             ActionToPerform::AddToFavorites(path) => {
@@ -1121,43 +1137,365 @@ impl App {
                 ctx.data_set_persisted(favorites);
             }
             ActionToPerform::SystemOpen(cow) => {
-                let _ = open::that_detached(cow.as_str());
+                if open::that_detached(cow.as_str()).is_err() {
+                    toast!(Error, "Could not open {cow}");
+                }
             }
+            ActionToPerform::RunCommand(command) => self.run_command(ctx, command),
+            ActionToPerform::FileOp(op) => {
+                self.submit_file_op(ctx, op, file_ops::AfterOp::Select);
+            }
+            ActionToPerform::FileOpEvent(event) => self.handle_file_op_event(event),
+            ActionToPerform::Transfer { srcs, dst, moving } => {
+                self.transfer(ctx, srcs, dst, moving);
+            }
+            ActionToPerform::BeginRename(path) => self.begin_rename(path),
+            ActionToPerform::PasteInto(folder) => self.paste_into(ctx, folder),
+            ActionToPerform::RunSavedSearch { id, target } => {
+                self.run_saved_search(ctx, id, target);
+            }
+            ActionToPerform::EditSavedSearch(id) => self.open_edit_dialog(ctx, id),
+            ActionToPerform::DuplicateSavedSearch(id) => self.duplicate_saved_search(ctx, id),
+            ActionToPerform::DeleteSavedSearch(id) => self.delete_saved_search(ctx, id),
+            ActionToPerform::MoveSavedSearch { id, to } => self.move_saved_search(ctx, id, to),
+            ActionToPerform::ChooseTransferTarget { srcs, moving } => {
+                let start = self.current_folder().unwrap_or_default();
+                self.choose_folder = Some(file_ops::ChooseFolder::new(srcs, moving, &start));
+                self.display_modal = Some(ModalWindow::ChooseFolder);
+            }
+            ActionToPerform::RunPluginAction { action, context } => {
+                self.run_plugin_action(&action, context);
+            }
+            ActionToPerform::Plugin(message) => self.handle_plugin_message(ctx, *message),
         }
     }
 }
 
 impl App {
+    /// Runs an app-wide command from the keymap (shortcut or mouse button).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn run_command(&mut self, ctx: &egui::Context, command: keymap::Command) {
+        use keymap::Command;
+        // Recycle Bin rows are not files at their shown paths, so only
+        // delete-for-good applies to them.
+        if self.in_trash_view() {
+            match command {
+                Command::Delete | Command::DeletePermanently => {
+                    self.purge_trash_selection();
+                    return;
+                }
+                Command::Rename
+                | Command::NewFolder
+                | Command::Duplicate
+                | Command::Cut
+                | Command::Copy
+                | Command::Paste
+                | Command::CopyAsPath => return,
+                _ => {}
+            }
+        }
+        match command {
+            Command::Back | Command::Forward | Command::Up => {
+                let Some(tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
+                let action = match command {
+                    Command::Back => tab.go_back(),
+                    Command::Forward => tab.go_forward(),
+                    _ => tab.current_path.parent().map(|parent| {
+                        ActionToPerform::TabAction(
+                            TabTarget::TabWithId(tab.id),
+                            TabAction::ChangePaths(parent.into()),
+                        )
+                    }),
+                };
+                if let Some(action) = action {
+                    action.schedule();
+                }
+            }
+            Command::Refresh => TabAction::ForceRefresh.schedule_active_tab(),
+            Command::FocusSearch => {
+                let Some(tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
+                if tab.search.is_none() {
+                    tab.toggle_search();
+                    TabAction::FilterChanged.schedule_tab(tab.id);
+                } else {
+                    // The search panel re-requests focus when the flag is gone.
+                    let id = egui::Id::new(("search_focus", tab.id));
+                    ctx.data_mut(|data| data.remove::<bool>(id));
+                }
+            }
+            Command::FocusAddress => {
+                let Some(tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
+                if tab.path_edit.is_some() {
+                    ctx.memory_mut(|memory| {
+                        memory.request_focus(egui::Id::new(("path_editor", tab.id)));
+                    });
+                } else {
+                    ActionToPerform::ToggleTopEdit.schedule();
+                }
+            }
+            Command::Palette => {
+                if let Some(current_path) = self.tabs.get_current_path() {
+                    let favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
+                    self.command_palette.build_for_path(
+                        &CurrentPath::One(current_path.clone()),
+                        &current_path,
+                        &favorites,
+                    );
+                    self.command_palette
+                        .commands
+                        .extend(command_palette::app_commands(ctx));
+                    let drive_commands = self.drive_palette_commands();
+                    self.command_palette.commands.extend(drive_commands);
+                    let plugin_commands = self.plugin_palette_commands(ctx);
+                    self.command_palette.commands.extend(plugin_commands);
+                    self.command_palette
+                        .commands
+                        .extend(self.recent_folders.iter().skip(1).map(|folder| {
+                            command_palette::ValidAction {
+                                action: ActionToPerform::TabAction(
+                                    TabTarget::ActiveTab,
+                                    TabAction::ChangePaths(folder.clone().into()),
+                                ),
+                                name: Cow::Owned(format!(
+                                    "Go to recent folder: {}",
+                                    folder.display()
+                                )),
+                                shortcut: None,
+                            }
+                        }));
+                    self.command_palette.commands.extend(
+                        saved_searches::load_saved(ctx)
+                            .searches
+                            .into_iter()
+                            .map(|saved| command_palette::ValidAction {
+                                action: ActionToPerform::RunSavedSearch {
+                                    id: saved.id,
+                                    target: saved_searches::RunTarget::ActiveTab,
+                                },
+                                name: Cow::Owned(format!("Run saved search: {}", saved.name)),
+                                shortcut: None,
+                            }),
+                    );
+                    ActionToPerform::ToggleModalWindow(ModalWindow::Commands).schedule();
+                }
+            }
+            Command::Settings => {
+                ActionToPerform::ToggleModalWindow(ModalWindow::Settings).schedule();
+            }
+            Command::ShortcutHelp => {
+                ActionToPerform::ToggleModalWindow(ModalWindow::Shortcuts).schedule();
+            }
+            Command::ToggleSidebar => ActionToPerform::ToggleSidebar.schedule(),
+            Command::ToggleInspector => ActionToPerform::ToggleInspector.schedule(),
+            Command::ToggleHidden => {
+                let Some(tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
+                let mut show_hidden =
+                    ctx.data_get_path_or_persisted::<DirectoryShowHidden>(&tab.current_path);
+                show_hidden.0 = !show_hidden.0;
+                ctx.data_set_path(&tab.current_path, show_hidden.data);
+                ActionToPerform::ViewSettingsChanged(DataSource::Local).schedule();
+            }
+            Command::ViewList | Command::ViewGrid => {
+                let Some(tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
+                let mut view = ctx
+                    .data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path)
+                    .data;
+                view.display_type = if command == Command::ViewList {
+                    DisplayType::List
+                } else {
+                    DisplayType::Icons
+                };
+                ctx.data_set_path(&tab.current_path, view);
+                ActionToPerform::ViewSettingsChanged(DataSource::Local).schedule();
+            }
+            Command::NewTab => {
+                if let Some(path) = self.tabs.get_current_path() {
+                    self.tabs.open_in_new_tab(&path);
+                }
+            }
+            Command::NewWindow => {
+                if let Some(path) = self.tabs.get_current_path() {
+                    self.tabs.open_window_at(&path);
+                }
+            }
+            Command::Delete => self.trash_selection(ctx),
+            Command::DeletePermanently => self.confirm_delete_selection(),
+            Command::Rename => self.rename_selection(),
+            Command::NewFolder => self.new_item(ctx, true),
+            Command::Duplicate => self.duplicate_selection(ctx),
+            Command::Cut => self.copy_selection(crate::clipboard::Mode::Cut),
+            Command::Copy => self.copy_selection(crate::clipboard::Mode::Copy),
+            Command::Paste => {
+                if let Some(folder) = self.current_folder() {
+                    self.paste_into(ctx, folder);
+                } else {
+                    toast!(Info, "Open a single folder to paste into it.");
+                }
+            }
+            Command::CopyAsPath => {
+                let paths = self.selected_paths();
+                if !paths.is_empty() {
+                    ctx.copy_text(file_ops::paths_as_text(&paths));
+                }
+            }
+            Command::SaveSearch => {
+                let saved = self
+                    .tabs
+                    .get_current_tab()
+                    .and_then(|tab| tab.search.as_ref())
+                    .map(|search| search.saved_from);
+                match saved {
+                    Some(Some(_)) => self.update_saved_from_tab(ctx),
+                    Some(None) => self.open_save_dialog(ctx),
+                    None => {}
+                }
+            }
+            Command::MatchCase => {
+                let Some(tab) = self.tabs.get_current_tab() else {
+                    return;
+                };
+                let tab_id = tab.id;
+                if let Some(search) = tab.search.as_mut() {
+                    search.case_sensitive = !search.case_sensitive;
+                    TabAction::FilterChanged.schedule_tab(tab_id);
+                    self.commit_search(tab_id, "match case");
+                }
+            }
+            Command::Undo => self.undo(ctx, false),
+            Command::Redo => self.undo(ctx, true),
+            Command::CloseTab => self.tabs.close_active_tab(),
+            Command::NextTab => self.tabs.cycle_active_tab(true),
+            Command::SelectTab(n) => self.tabs.select_tab(n),
+            Command::ReopenClosedTab => self.tabs.reopen_closed_tab(),
+            Command::PreviousTab => self.tabs.cycle_active_tab(false),
+            #[cfg(feature = "profiling")]
+            Command::Profiler => self.profiler_visible = !self.profiler_visible,
+        }
+    }
+
     pub(crate) fn render_browser(&mut self, root: &mut egui::Ui) {
         let ctx = &root.ctx().clone();
         self.settings.appearance.apply(ctx);
         if self.display_modal.is_some() {
             root.disable();
         }
-        if self.display_modal.is_some() || self.sidebar_overlay || self.inspector_overlay {
-            self.tabs.focused = false;
-        }
-        self.tabs.reconcile_selection(ctx);
-        if self.display_modal.is_none()
-            && !self.sidebar_overlay
-            && !self.inspector_overlay
-            && ctx.key_with_command_pressed(egui::Key::F)
-            && let Some(tab) = self.tabs.get_current_tab()
-        {
-            tab.toggle_search(ctx);
-            TabAction::FilterChanged.schedule_tab(tab.id);
+        // The file view takes keyboard input unless a dialog or overlay is
+        // open; text fields are excluded where the keys are handled.
+        let window = self.tabs.window();
+        let takes_keys =
+            self.display_modal.is_none() && !window.sidebar_overlay && !window.inspector_overlay;
+        self.tabs.focused = takes_keys;
+        self.tabs.reconcile_selection();
+        if takes_keys {
+            for command in keymap::pressed(ctx) {
+                self.run_command(ctx, command);
+            }
+            for action in crate::plugins::PluginHost::pressed(ctx) {
+                self.run_plugin_action(&action, crate::plugins::CallContext::default());
+            }
         }
         self.top_panel(root);
+        #[cfg(target_os = "macos")]
+        if self.tabs.current_window() == WindowId::MAIN {
+            self.disk_access_banner(root);
+        }
         self.bottom_panel(root);
+        self.plugin_bar(root);
         self.left_side_panel(root);
         self.central_panel(root);
         self.panel_overlays(ctx);
     }
+
+    /// Draws the current window: its panels and tabs, plus the open dialog
+    /// and toasts when they belong to it.
+    fn render_window(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let id = self.tabs.current_window();
+        let (focused, outer, content) = ctx.input(|i| {
+            let viewport = i.viewport();
+            (viewport.focused, viewport.outer_rect, i.content_rect())
+        });
+        if focused == Some(true) {
+            self.focused_window = id;
+        }
+        let window = self.tabs.window_mut();
+        window.outer_rect = outer;
+        window.content_rect = Some(content);
+        commands::in_window(id, || {
+            if self.display_modal.is_none() {
+                self.handle_external_drop(&ctx);
+            }
+            self.render_browser(ui);
+            self.hand_off_external_drag(&ctx);
+            self.claim_modal();
+            if self.modal_window == Some(id) {
+                self.render_modal(&ctx);
+            }
+        });
+        if self.focused_window == id {
+            Self::drag_badge(&ctx);
+            TOASTS.write().show(&ctx);
+        }
+    }
+
+    /// Draws every window but the main one, each in its own OS window.
+    fn render_other_windows(&mut self, ctx: &egui::Context) {
+        for id in self.tabs.window_ids() {
+            if id == WindowId::MAIN {
+                continue;
+            }
+            let Some(window) = self.tabs.window_by_id_mut(id) else {
+                continue;
+            };
+            let mut builder = egui::ViewportBuilder::default()
+                .with_title(crate::consts::APP_NAME)
+                .with_icon(std::sync::Arc::clone(&WINDOW_ICON))
+                .with_min_inner_size([640.0, 420.0])
+                .with_inner_size([1100.0, 720.0]);
+            if let Some(rect) = window.open_at {
+                builder = builder
+                    .with_position(rect.min)
+                    .with_inner_size(rect.size().max(egui::vec2(640.0, 420.0)));
+            }
+            ctx.show_viewport_immediate(id.viewport(), builder, |ui, _class| {
+                self.tabs.set_current_window(id);
+                self.render_window(ui);
+                if ui.input(|i| i.viewport().close_requested()) {
+                    self.tabs.close_window(id);
+                }
+            });
+        }
+        self.tabs.set_current_window(WindowId::MAIN);
+    }
+}
+
+/// The app icon, for windows opened after the first.
+static WINDOW_ICON: LazyLock<std::sync::Arc<egui::IconData>> = LazyLock::new(|| {
+    std::sync::Arc::new(
+        eframe::icon_data::from_png_bytes(include_bytes!("../../static/base_icon.png"))
+            .unwrap_or_default(),
+    )
+});
+
+const fn main_window() -> WindowId {
+    WindowId::MAIN
 }
 
 impl eframe::App for App {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.open_tabs = self.tabs.open_paths();
+        self.windows = self.tabs.save();
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
@@ -1177,60 +1515,33 @@ impl eframe::App for App {
         self.assets.begin_frame();
         self.assets.poll_results(&ctx);
         self.drain_command_queue(&ctx);
+        self.poll_drives(&ctx);
+        self.poll_plugins();
         self.process_file_system_changes(&ctx);
+        self.forget_stale_cut();
+        self.commit_paused_typing(&ctx);
+        self.tabs.set_current_window(self.focused_window);
         let active_directory = self.tabs.get_current_path();
         self.assets
             .set_active_directory(active_directory.as_deref());
-        self.render_browser(ui);
 
-        if ctx.input(|i| i.modifiers.command && i.modifiers.alt && i.key_pressed(egui::Key::S)) {
-            ActionToPerform::ToggleSidebar.schedule();
+        self.tabs.set_current_window(WindowId::MAIN);
+        self.render_window(ui);
+        // Closing the main window while others are open keeps the app
+        // running: the main window takes over another window's tabs.
+        if ctx.input(|i| i.viewport().close_requested()) && self.tabs.adopt_into_main() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
-        if ctx.input(|i| i.modifiers.command && i.modifiers.alt && i.key_pressed(egui::Key::I)) {
-            ActionToPerform::ToggleInspector.schedule();
-        }
-        if ctx.key_with_command_pressed(egui::Key::P)
-            || ctx.key_with_command_pressed(egui::Key::Comma)
-        {
-            ActionToPerform::ToggleModalWindow(ModalWindow::Settings).schedule();
-        }
-
-        if ctx.key_with_command_pressed(egui::Key::L) {
-            ActionToPerform::ToggleTopEdit.schedule();
-        }
-        if let Some(current_path) = self.tabs.get_current_path() {
-            let favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
-            if ctx.key_with_command_pressed(egui::Key::R) {
-                ActionToPerform::ToggleModalWindow(ModalWindow::Commands).schedule();
-                self.command_palette.build_for_path(
-                    &CurrentPath::One(current_path.clone()),
-                    &current_path,
-                    &favorites,
-                );
-            }
-        }
-        // F5: Force refresh the active tab (bypass all caches)
-        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
-            toast!(Info, "Force refreshing...");
-            TabAction::ForceRefresh.schedule_active_tab();
-        }
-
-        self.render_modal(&ctx);
         #[cfg(windows)]
         self.chrome.sync(frame, ctx.theme());
 
         #[cfg(feature = "profiling")]
-        {
-            if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
-                self.profiler_visible = !self.profiler_visible;
-            }
-            crate::profiler::profiler_window(&ctx, &mut self.profiler_visible);
-        }
+        crate::profiler::profiler_window(&ctx, &mut self.profiler_visible);
 
-        TOASTS.write().show(&ctx);
+        self.render_other_windows(&ctx);
         self.drain_command_queue(&ctx);
-        if self.watchers.is_active() {
-            ctx.request_repaint_after(Duration::from_millis(200));
+        for tab in self.tabs.take_retired() {
+            tab.release(&mut self.watchers, &ctx);
         }
         // Defensive: keep the UI ticking while any tab is loading
         if self.tabs.has_loading() {
@@ -1292,11 +1603,35 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 fn get_fonts() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let font_path = std::path::Path::new("/System/Library/Fonts");
 
-    let regular = fs::read(font_path.join("SFNS.ttf"))
-        .or_else(|_| fs::read(font_path.join("SFNSRounded.ttf")))?;
-    let semibold = fs::read(font_path.join("SFCompact.ttf"))?;
+    let regular = std::fs::read(font_path.join("SFNS.ttf"))
+        .or_else(|_| std::fs::read(font_path.join("SFNSRounded.ttf")))?;
+    let semibold = std::fs::read(font_path.join("SFCompact.ttf"))?;
 
     Ok((regular, semibold))
+}
+
+/// Tabs to open at startup: a folder given on the command line, otherwise
+/// the windows and tabs that were open when the app last closed.
+fn restore_tabs(
+    windows: Vec<crate::app::dock::SavedWindow>,
+    saved: &[PathBuf],
+) -> crate::app::dock::Workspace {
+    let from_args = std::env::args().nth(1).is_some();
+    if !from_args && let Some(workspace) = crate::app::dock::Workspace::restore(windows) {
+        return workspace;
+    }
+    let saved: Vec<&PathBuf> = saved.iter().filter(|path| path.is_dir()).collect();
+    match saved.split_first() {
+        Some((first, rest)) if !from_args => {
+            let mut tabs = crate::app::dock::Workspace::new(first);
+            for path in rest {
+                tabs.open_in_new_tab(path);
+            }
+            tabs.select_tab(1);
+            tabs
+        }
+        _ => crate::app::dock::Workspace::new(&get_starting_path()),
+    }
 }
 
 fn get_starting_path() -> PathBuf {
@@ -1304,5 +1639,12 @@ fn get_starting_path() -> PathBuf {
     if args.len() > 1 {
         return PathBuf::from(args[1].clone());
     }
-    std::env::current_dir().expect("Could not get current_dir")
+    let cwd = std::env::current_dir().expect("Could not get current_dir");
+    // Apps started from Finder or the Dock run in `/`; start at home instead.
+    if cwd.parent().is_none()
+        && let Some(dirs) = directories::UserDirs::new()
+    {
+        return dirs.home_dir().to_path_buf();
+    }
+    cwd
 }

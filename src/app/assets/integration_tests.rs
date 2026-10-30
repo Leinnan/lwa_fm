@@ -292,7 +292,6 @@ fn real_short_video_and_geometry() {
     let cached_poster = super::super::load_or_generate_thumbnail(
         &portrait.path,
         super::super::ThumbnailKind::Video,
-        super::super::IconSize::Small,
         96,
         metadata.source_revision,
         metadata.size,
@@ -300,13 +299,8 @@ fn real_short_video_and_geometry() {
     )
     .expect("poster cache miss");
     flush_cache();
-    let path = cache::thumbnail_cache_path(
-        &portrait.path,
-        super::super::IconSize::Small,
-        96,
-        metadata.source_revision,
-        metadata.size,
-    );
+    let path =
+        cache::thumbnail_cache_path(&portrait.path, 96, metadata.source_revision, metadata.size);
     assert!(
         image::open(path).is_ok(),
         "background poster cache must contain a decodable JPEG"
@@ -435,7 +429,6 @@ fn real_disk_poster_reuse_preserves_timestamp_and_avoids_first_decode() {
     let image = super::super::load_or_generate_thumbnail(
         &source.path,
         super::super::ThumbnailKind::Video,
-        super::super::IconSize::Small,
         160,
         source.revision,
         source.size,
@@ -496,7 +489,6 @@ fn real_cost_based_batch_reuses_poster_without_duplicate_frames() {
     super::super::load_or_generate_thumbnail(
         &source.path,
         super::super::ThumbnailKind::Video,
-        super::super::IconSize::Small,
         160,
         source.revision,
         source.size,

@@ -5,9 +5,13 @@
 <dict>
     <key>CFBundleName</key>
     <string>DirFleet</string>
+    <key>CFBundleDisplayName</key>
+    <string>DirFleet</string>
     <key>CFBundleIdentifier</key>
     <string>io.github.leinnan.dirfleet</string>
     <key>CFBundleVersion</key>
+    <string>0.0.1</string>
+    <key>CFBundleShortVersionString</key>
     <string>0.0.1</string>
     <key>CFBundleExecutable</key>
     <string>lwa_fm</string>
@@ -15,5 +19,27 @@
     <string>APPL</string>
     <key>CFBundleIconFile</key>
     <string>icon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- Shown in the one-time access prompts. Granting Full Disk Access
+         (DirFleet offers it on launch) replaces all of them. -->
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>DirFleet shows and manages the files on your Desktop.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>DirFleet shows and manages the files in your Documents folder.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>DirFleet shows and manages the files in your Downloads folder.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>DirFleet shows and manages the files on removable drives.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>DirFleet shows and manages the files on network drives.</string>
+    <key>NSFileProviderDomainUsageDescription</key>
+    <string>DirFleet shows and manages the files in iCloud Drive and other cloud folders.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>DirFleet asks Finder to show the Get Info window for your files.</string>
 </dict>
 </plist>

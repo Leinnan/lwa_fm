@@ -1,0 +1,288 @@
+{
+  "fixture": "H.264 testsrc2; 640x360; 30 fps; ultrafast; keyframe interval 60; 20-second source repeated by stream copy",
+  "ffmpeg_version": "ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers",
+  "scope": "Subprocess extraction only; excludes Rust GIF decode, disk cache, UI, and GPU. Three sequential trials per variant. No application cache touched.",
+  "results": [
+    {
+      "duration_s": 60,
+      "variant": "current_gif",
+      "trials": [
+        {
+          "wall_s": 0.2657,
+          "cpu_s": 0.2908,
+          "peak_rss_mib": 23.7,
+          "output_bytes": 55666
+        },
+        {
+          "wall_s": 0.2664,
+          "cpu_s": 0.2923,
+          "peak_rss_mib": 23.67,
+          "output_bytes": 55666
+        },
+        {
+          "wall_s": 0.2674,
+          "cpu_s": 0.2932,
+          "peak_rss_mib": 23.59,
+          "output_bytes": 55666
+        }
+      ],
+      "median_wall_s": 0.2664,
+      "median_cpu_s": 0.2923,
+      "max_peak_rss_mib": 23.7
+    },
+    {
+      "duration_s": 60,
+      "variant": "current_gif_filter_threads_1",
+      "trials": [
+        {
+          "wall_s": 0.2647,
+          "cpu_s": 0.2843,
+          "peak_rss_mib": 20.52,
+          "output_bytes": 55666
+        },
+        {
+          "wall_s": 0.2649,
+          "cpu_s": 0.2847,
+          "peak_rss_mib": 20.5,
+          "output_bytes": 55666
+        },
+        {
+          "wall_s": 0.2639,
+          "cpu_s": 0.2837,
+          "peak_rss_mib": 20.42,
+          "output_bytes": 55666
+        }
+      ],
+      "median_wall_s": 0.2647,
+      "median_cpu_s": 0.2843,
+      "max_peak_rss_mib": 20.52
+    },
+    {
+      "duration_s": 60,
+      "variant": "bounded_clip_rgba_24_frames",
+      "trials": [
+        {
+          "wall_s": 0.0342,
+          "cpu_s": 0.0404,
+          "peak_rss_mib": 20.73,
+          "output_bytes": 3133440
+        },
+        {
+          "wall_s": 0.0337,
+          "cpu_s": 0.0402,
+          "peak_rss_mib": 20.42,
+          "output_bytes": 3133440
+        },
+        {
+          "wall_s": 0.033,
+          "cpu_s": 0.0391,
+          "peak_rss_mib": 20.44,
+          "output_bytes": 3133440
+        }
+      ],
+      "median_wall_s": 0.0337,
+      "median_cpu_s": 0.0402,
+      "max_peak_rss_mib": 20.73
+    },
+    {
+      "duration_s": 60,
+      "variant": "12_independent_seeks_rgba",
+      "trials": [
+        {
+          "wall_s": 0.2699,
+          "cpu_s": 0.269,
+          "peak_rss_mib": 19.97,
+          "output_bytes": 1566720
+        },
+        {
+          "wall_s": 0.2701,
+          "cpu_s": 0.2699,
+          "peak_rss_mib": 19.97,
+          "output_bytes": 1566720
+        },
+        {
+          "wall_s": 0.2706,
+          "cpu_s": 0.2702,
+          "peak_rss_mib": 19.95,
+          "output_bytes": 1566720
+        }
+      ],
+      "median_wall_s": 0.2701,
+      "median_cpu_s": 0.2699,
+      "max_peak_rss_mib": 19.97
+    },
+    {
+      "duration_s": 600,
+      "variant": "current_gif",
+      "trials": [
+        {
+          "wall_s": 2.4376,
+          "cpu_s": 2.5875,
+          "peak_rss_mib": 25.03,
+          "output_bytes": 56418
+        },
+        {
+          "wall_s": 2.4237,
+          "cpu_s": 2.574,
+          "peak_rss_mib": 24.28,
+          "output_bytes": 56418
+        },
+        {
+          "wall_s": 2.4304,
+          "cpu_s": 2.5812,
+          "peak_rss_mib": 24.92,
+          "output_bytes": 56418
+        }
+      ],
+      "median_wall_s": 2.4304,
+      "median_cpu_s": 2.5812,
+      "max_peak_rss_mib": 25.03
+    },
+    {
+      "duration_s": 600,
+      "variant": "current_gif_filter_threads_1",
+      "trials": [
+        {
+          "wall_s": 2.4281,
+          "cpu_s": 2.5752,
+          "peak_rss_mib": 21.45,
+          "output_bytes": 56418
+        },
+        {
+          "wall_s": 2.4112,
+          "cpu_s": 2.5574,
+          "peak_rss_mib": 21.22,
+          "output_bytes": 56418
+        },
+        {
+          "wall_s": 2.4271,
+          "cpu_s": 2.5738,
+          "peak_rss_mib": 21.2,
+          "output_bytes": 56418
+        }
+      ],
+      "median_wall_s": 2.4271,
+      "median_cpu_s": 2.5738,
+      "max_peak_rss_mib": 21.45
+    },
+    {
+      "duration_s": 600,
+      "variant": "bounded_clip_rgba_24_frames",
+      "trials": [
+        {
+          "wall_s": 0.0343,
+          "cpu_s": 0.04,
+          "peak_rss_mib": 21.23,
+          "output_bytes": 3133440
+        },
+        {
+          "wall_s": 0.0343,
+          "cpu_s": 0.0402,
+          "peak_rss_mib": 21.22,
+          "output_bytes": 3133440
+        },
+        {
+          "wall_s": 0.0339,
+          "cpu_s": 0.0398,
+          "peak_rss_mib": 21.08,
+          "output_bytes": 3133440
+        }
+      ],
+      "median_wall_s": 0.0343,
+      "median_cpu_s": 0.04,
+      "max_peak_rss_mib": 21.23
+    },
+    {
+      "duration_s": 600,
+      "variant": "12_independent_seeks_rgba",
+      "trials": [
+        {
+          "wall_s": 0.277,
+          "cpu_s": 0.2748,
+          "peak_rss_mib": 20.62,
+          "output_bytes": 1566720
+        },
+        {
+          "wall_s": 0.2765,
+          "cpu_s": 0.2737,
+          "peak_rss_mib": 20.64,
+          "output_bytes": 1566720
+        },
+        {
+          "wall_s": 0.2766,
+          "cpu_s": 0.2738,
+          "peak_rss_mib": 20.61,
+          "output_bytes": 1566720
+        }
+      ],
+      "median_wall_s": 0.2766,
+      "median_cpu_s": 0.2738,
+      "max_peak_rss_mib": 20.64
+    },
+    {
+      "duration_s": 60,
+      "variant": "whole_span_rgba_12_frames",
+      "trials": [
+        {
+          "wall_s": 0.265,
+          "cpu_s": 0.2812,
+          "peak_rss_mib": 20.45,
+          "output_bytes": 1566720
+        },
+        {
+          "wall_s": 0.2657,
+          "cpu_s": 0.2827,
+          "peak_rss_mib": 20.61,
+          "output_bytes": 1566720
+        },
+        {
+          "wall_s": 0.2691,
+          "cpu_s": 0.2863,
+          "peak_rss_mib": 20.53,
+          "output_bytes": 1566720
+        }
+      ],
+      "median_wall_s": 0.2657,
+      "median_cpu_s": 0.2827,
+      "max_peak_rss_mib": 20.61
+    },
+    {
+      "duration_s": 600,
+      "variant": "whole_span_rgba_12_frames",
+      "trials": [
+        {
+          "wall_s": 2.4336,
+          "cpu_s": 2.5785,
+          "peak_rss_mib": 21.44,
+          "output_bytes": 1566720
+        },
+        {
+          "wall_s": 2.4434,
+          "cpu_s": 2.5869,
+          "peak_rss_mib": 21.53,
+          "output_bytes": 1566720
+        },
+        {
+          "wall_s": 2.4452,
+          "cpu_s": 2.5881,
+          "peak_rss_mib": 21.94,
+          "output_bytes": 1566720
+        }
+      ],
+      "median_wall_s": 2.4434,
+      "median_cpu_s": 2.5869,
+      "max_peak_rss_mib": 21.94
+    }
+  ],
+  "short_video_poster_output_bytes": 0,
+  "portrait_static_dimensions": {
+    "width": 96,
+    "height": 171
+  },
+  "whole_span_decode_summary": [
+    "[Parsed_fps_0 @ 0xb66c44300] 0 frames in, 0 frames out; 0 frames dropped, 0 frames duplicated.",
+    "[Parsed_fps_0 @ 0xb66c44c00] 14683 frames in, 12 frames out; 14671 frames dropped, 0 frames duplicated.",
+    "[out#0/rawvideo @ 0xb66c44180]   Output stream #0:0 (video): 12 frames encoded; 12 packets muxed (1566720 bytes); ",
+    "[in#0/mov,mp4,m4a,3gp,3g2,mj2 @ 0xb66c14000]   Input stream #0:0 (video): 14693 packets read (120966139 bytes); 14684 frames decoded; 0 decode errors; "
+  ]
+}

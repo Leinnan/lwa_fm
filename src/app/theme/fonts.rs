@@ -81,7 +81,7 @@ mod tests {
             FontFamily::Monospace,
             FontFamily::Name("semibold".into()),
         ] {
-            assert!(!fonts.families[&family].is_empty());
+            assert_ne!(fonts.families[&family].len(), 0);
             assert!(!fonts.families[&family].iter().any(|name| name == "lucide"));
         }
         assert_eq!(

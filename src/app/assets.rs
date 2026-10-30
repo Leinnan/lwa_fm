@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 #[cfg(target_os = "macos")]
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::hash::{Hash, Hasher};
@@ -13,21 +13,30 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
+// Asset keys are hashed for every visible row on every frame; foldhash is
+// far cheaper than SipHash for these long path strings.
+use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 #[cfg(test)]
 use image::codecs::gif::{GifEncoder, Repeat};
 #[cfg(test)]
 use image::{Delay, Frame, RgbaImage};
 use lru::LruCache;
 
+#[cfg(test)]
 use crate::data::files::DirEntry;
-use crate::helper::PathHelper;
+use crate::data::files::EntryRef;
 
 mod cache;
+mod decode;
+mod failures;
+mod ffmpeg_install;
+pub mod kinds;
 mod media;
+pub use media::tool_paths as ffmpeg_tool_paths;
 mod process;
-use cache::{atomic_save_image, thumbnail_cache_path};
-#[cfg(test)]
-use media::load_or_generate_animated_preview;
+use cache::thumbnail_cache_path;
+use decode::decoded_from_dynamic;
+use failures::{FailureRecord, Retry};
 use media::{PreviewSpec, PreviewStep, SourceKey, VideoTask};
 use process::{ErrorKind, MediaError};
 
@@ -47,21 +56,19 @@ const VIDEO_PREVIEW_MAX_EDGE: u32 = 240;
 // Bound texture preparation per UI frame. The renderer performs the GPU upload
 // later; the elapsed budget here measures copying and enqueueing texture data.
 const MAX_TEXTURES_PER_FRAME: usize = 4;
-const MAX_STATIC_TEXTURES_PER_FRAME: usize = 3;
+/// Count cap per frame; the 2 ms upload time budget in `poll_results` is the
+/// real limit, so a burst of small thumbnails no longer trickles in 3 per frame.
+const MAX_STATIC_TEXTURES_PER_FRAME: usize = 24;
 const MAX_RESULTS_PER_FRAME: usize = 64;
 const MAX_ASSET_JOBS: usize = 512;
 const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
 static QUEUE_WAIT_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-// Failure backoff: first retry after `ICON_RETRY_BASE_SECS`, doubling on each
-// consecutive failure. Only invalid/unsupported media and fixed resource-limit failures
-// become permanent after three attempts. Missing tools and timeouts can recover.
-const ICON_RETRY_BASE_SECS: u64 = 30;
-const ICON_RETRY_MAX_TRIES: u32 = 3;
-const ICON_BACKOFF_SHIFT_CAP: u32 = 8;
-const VIDEO_EXTS: &[&str] = &[
-    "mp4", "mov", "mkv", "avi", "webm", "wmv", "flv", "m4v", "3gp", "ogv",
-];
+/// Thumbnail edge for list rows: their 24-point icons at up to 2× scale.
+const LIST_THUMBNAIL_EDGE: u32 = 64;
+/// The whole budget for one image thumbnail or video poster.
+const THUMBNAIL_DEADLINE: Duration = Duration::from_secs(5);
+pub use kinds::VIDEO_EXTS;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IconSize {
@@ -73,6 +80,17 @@ pub enum IconSize {
 }
 
 impl IconSize {
+    pub const ALL: [Self; 4] = [Self::Small, Self::Medium, Self::Large, Self::ExtraLarge];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Small => "Small",
+            Self::Medium => "Medium",
+            Self::Large => "Large",
+            Self::ExtraLarge => "Extra large",
+        }
+    }
+
     pub const fn system_icon_px(self) -> i32 {
         match self {
             Self::Small => 32,
@@ -91,15 +109,6 @@ impl IconSize {
         }
     }
 
-    pub const fn decode_px(self) -> u32 {
-        match self {
-            Self::Small => 64,
-            Self::Medium => 96,
-            Self::Large => 160,
-            Self::ExtraLarge => 360,
-        }
-    }
-
     pub const fn cache_suffix(self) -> &'static str {
         match self {
             Self::Small => "_s",
@@ -109,6 +118,7 @@ impl IconSize {
         }
     }
 
+    /// Narrowest a grid tile gets; tiles widen to fill the row.
     pub const fn tile_width(self) -> f32 {
         match self {
             Self::Small => 120.0,
@@ -118,12 +128,13 @@ impl IconSize {
         }
     }
 
-    pub const fn tile_height(self) -> f32 {
+    /// Height of the preview area of a grid tile, above the name.
+    pub const fn preview_height(self) -> f32 {
         match self {
-            Self::Small => 106.0,
-            Self::Medium => 148.0,
-            Self::Large => 196.0,
-            Self::ExtraLarge => 294.0,
+            Self::Small => 60.0,
+            Self::Medium => 102.0,
+            Self::Large => 150.0,
+            Self::ExtraLarge => 248.0,
         }
     }
 }
@@ -221,49 +232,22 @@ enum AnimatedSourceKind {
     Video,
 }
 
+/// Makes animated previews one step at a time, so the worker can yield to
+/// more urgent jobs between samples. Tests swap in simpler backends.
 trait MediaBackend: Send + Sync {
-    fn load_animated_preview(
-        &self,
-        path: &Path,
-        source_revision: u128,
-        source_size: u64,
-        source_kind: AnimatedSourceKind,
-        cancel: &AtomicBool,
-    ) -> Result<DecodedAnimation, String>;
     fn step_preview(
         &self,
         source: &SourceKey,
         spec: PreviewSpec,
         kind: AnimatedSourceKind,
         cancel: &AtomicBool,
-        _task: &mut Option<Box<VideoTask>>,
-    ) -> Result<PreviewStep, MediaError> {
-        let _ = spec;
-        self.load_animated_preview(&source.path, source.revision, source.size, kind, cancel)
-            .map(PreviewStep::Complete)
-            .map_err(|error| MediaError::new(ErrorKind::InvalidMedia, error))
-    }
+        task: &mut Option<Box<VideoTask>>,
+    ) -> Result<PreviewStep, MediaError>;
 }
 
 struct SystemMediaBackend;
 
 impl MediaBackend for SystemMediaBackend {
-    fn load_animated_preview(
-        &self,
-        path: &Path,
-        source_revision: u128,
-        source_size: u64,
-        source_kind: AnimatedSourceKind,
-        cancel: &AtomicBool,
-    ) -> Result<DecodedAnimation, String> {
-        media::load_or_generate_animated_preview(
-            path,
-            source_revision,
-            source_size,
-            source_kind,
-            cancel,
-        )
-    }
     fn step_preview(
         &self,
         source: &SourceKey,
@@ -332,8 +316,6 @@ impl AssetJob {
 enum AssetJobClass {
     VisibleThumbnail,
     PrefetchThumbnail,
-    #[cfg_attr(not(test), allow(dead_code))]
-    SidebarIcon,
     HoveredPreview,
     SelectedPreview,
 }
@@ -472,9 +454,8 @@ impl JobScheduler {
         result
     }
 
-    fn set_active_directory(&self, directory: Option<String>) -> Vec<String> {
+    fn set_active_directory(&self, directory: Option<String>) {
         let mut changed = false;
-        let evicted = Vec::new();
         {
             let mut state = self.state.lock().expect("job scheduler mutex poisoned");
             if state.active_directory != directory {
@@ -493,7 +474,6 @@ impl JobScheduler {
         if changed {
             self.has_jobs.notify_all();
         }
-        evicted
     }
 
     fn reprioritize(&self, request_key: &str, class: AssetJobClass) {
@@ -568,8 +548,6 @@ impl JobScheduler {
             entry.enqueued_at.elapsed().as_micros() as u64,
             AtomicOrdering::Relaxed,
         );
-        #[cfg(not(feature = "profiling"))]
-        let _queue_delay = entry.enqueued_at.elapsed();
         #[cfg(feature = "profiling")]
         puffin::profile_scope!(
             "lwa_fm::assets::scheduler::queue_delay",
@@ -626,7 +604,8 @@ impl JobScheduler {
         );
         if matches!(&entry.job, AssetJob::AnimatedPreview { task: Some(task), .. } if task.is_refinement())
         {
-            entry.priority.0 = 4; // Initial feedback stays urgent; refinement follows visible posters.
+            // Initial feedback stays urgent; refinement follows visible posters.
+            entry.priority.0 = RANK_CONTINUING_PREVIEW;
         }
         entry.priority.1 = state.next_order;
         state.next_order = state.next_order.wrapping_add(1);
@@ -656,6 +635,10 @@ struct EnqueueResult {
     evicted: Vec<String>,
 }
 
+/// Where a video overview resumes after each sample: behind visible posters
+/// (so a long video can't starve the grid), ahead of prefetching.
+const RANK_CONTINUING_PREVIEW: u8 = 4;
+
 fn job_rank(class: AssetJobClass, directory: Option<&str>, active_directory: Option<&str>) -> u8 {
     let is_active_directory = directory
         .zip(active_directory)
@@ -667,7 +650,6 @@ fn job_rank(class: AssetJobClass, directory: Option<&str>, active_directory: Opt
         (AssetJobClass::VisibleThumbnail, false) => 3,
         (AssetJobClass::PrefetchThumbnail, true) => 5,
         (AssetJobClass::PrefetchThumbnail, false) => 6,
-        (AssetJobClass::SidebarIcon, _) => 7,
     }
 }
 
@@ -706,19 +688,16 @@ enum ThumbnailKind {
     Video,
 }
 
-/// Recorded failure of a single asset request. `tries` drives exponential
-/// backoff and eventually permanent-failure semantics.
-#[derive(Debug, Clone)]
-struct FailureRecord {
-    last_attempt: Instant,
-    tries: u32,
-    reason: String,
-    kind: ErrorKind,
-}
-
+/// Why a preview is wanted; later variants win when several apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PreviewIntent {
+    /// A selected grid tile. Only animates when the "animate selected
+    /// previews" setting is on, and only one tile at a time.
     Selected,
+    /// The inspector or Quick Look, where the user is looking at one item.
+    /// Always animates.
+    Focused,
+    /// The pointer rests on the item.
     Hovered,
 }
 
@@ -726,7 +705,7 @@ impl PreviewIntent {
     const fn job_class(self) -> AssetJobClass {
         match self {
             Self::Selected => AssetJobClass::SelectedPreview,
-            Self::Hovered => AssetJobClass::HoveredPreview,
+            Self::Focused | Self::Hovered => AssetJobClass::HoveredPreview,
         }
     }
 }
@@ -752,7 +731,6 @@ pub struct AssetManager {
     pending: HashSet<String>,
     failed: HashMap<String, FailureRecord>,
     scheduler: Arc<JobScheduler>,
-    video_thumbnail_scheduler: Arc<JobScheduler>,
     preview_scheduler: Arc<JobScheduler>,
     preview_jobs: HashMap<String, PreviewJobControl>,
     desired_previews: HashMap<String, PreviewIntent>,
@@ -763,9 +741,8 @@ pub struct AssetManager {
     total_uploads: u64,
     backend_epoch: u64,
     icon_size: IconSize,
-    per_dir_icon_size: HashMap<String, IconSize>,
     repaint_ctx: Arc<Mutex<Option<Context>>>,
-    active_directory: Option<String>,
+    active_directory_source: Option<PathBuf>,
     request_id: u64,
     requests: HashMap<String, RequestControl>,
     desired_assets: HashSet<String>,
@@ -779,7 +756,19 @@ pub struct AssetManager {
     last_asset_activity: Instant,
 }
 
-pub enum HoverPreview {
+/// Memory a texture takes on the GPU (RGBA8).
+fn texture_bytes(texture: &TextureHandle) -> usize {
+    let [width, height] = texture.size();
+    width.saturating_mul(height).saturating_mul(4)
+}
+
+/// How a directory is named for job ranking: one syscall-free canonical
+/// form, so a job's folder and the active folder compare equal.
+fn directory_key(path: &Path) -> String {
+    crate::helper::canonical_string(path)
+}
+
+pub enum Preview {
     Ready(TextureHandle),
     Pending,
     Unavailable {
@@ -799,11 +788,9 @@ impl AssetManager {
         reason = "owned backend is shared with worker threads"
     )]
     fn with_media_backend(media_backend: Arc<dyn MediaBackend>) -> Self {
-        let (result_tx, result_rx) = mpsc::sync_channel::<AssetJobResult>(4);
+        let (result_tx, result_rx) = mpsc::sync_channel::<AssetJobResult>(32);
         let scheduler = Arc::new(JobScheduler::default());
         let preview_scheduler = Arc::new(JobScheduler::default());
-        // One priority queue makes the video budget global and yields between samples.
-        let video_thumbnail_scheduler = Arc::clone(&preview_scheduler);
         let repaint_ctx = Arc::new(Mutex::new(None::<Context>));
         let shutdown = Arc::new(AtomicBool::new(false));
         let result_bytes = Arc::new(AtomicUsize::new(0));
@@ -848,7 +835,6 @@ impl AssetManager {
             pending: HashSet::new(),
             failed: HashMap::new(),
             scheduler,
-            video_thumbnail_scheduler,
             preview_scheduler,
             preview_jobs: HashMap::new(),
             desired_previews: HashMap::new(),
@@ -859,9 +845,8 @@ impl AssetManager {
             total_uploads: 0,
             backend_epoch: media::BACKEND_EPOCH.load(AtomicOrdering::Acquire),
             icon_size: IconSize::default(),
-            per_dir_icon_size: HashMap::new(),
             repaint_ctx,
-            active_directory: None,
+            active_directory_source: None,
             request_id: 0,
             frame_uploads: 0,
             upload_time: Duration::ZERO,
@@ -976,17 +961,16 @@ impl AssetManager {
     }
 
     pub fn set_active_directory(&mut self, path: Option<&Path>) {
-        let directory = path.map(|path| path.to_full_path_string());
-        if self.active_directory != directory {
-            self.active_directory.clone_from(&directory);
+        // Called every frame: skip the `canonicalize` syscall and the scheduler
+        // locks unless the active tab's path actually changed.
+        if self.active_directory_source.as_deref() == path {
+            return;
         }
-        let mut evicted = self.scheduler.set_active_directory(directory.clone());
-        evicted.extend(
-            self.video_thumbnail_scheduler
-                .set_active_directory(directory.clone()),
-        );
-        evicted.extend(self.preview_scheduler.set_active_directory(directory));
-        self.clear_evicted_requests(evicted);
+        self.active_directory_source = path.map(Path::to_path_buf);
+        let directory = path.map(directory_key);
+        // The video queue is the preview queue, so two schedulers in all.
+        self.scheduler.set_active_directory(directory.clone());
+        self.preview_scheduler.set_active_directory(directory);
     }
 
     pub fn poll_results(&mut self, ctx: &Context) {
@@ -1008,7 +992,7 @@ impl AssetManager {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             };
             self.result_bytes
-                .fetch_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |bytes| {
+                .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |bytes| {
                     Some(bytes.saturating_sub(result.byte_len()))
                 })
                 .expect("release result bytes");
@@ -1022,7 +1006,7 @@ impl AssetManager {
                 continue;
             }
             if control.cancel.load(AtomicOrdering::Acquire) {
-                let keys = HashSet::from([key.to_owned()]);
+                let keys: HashSet<String> = std::iter::once(key.to_owned()).collect();
                 self.cancel_requests(&keys);
                 continue;
             }
@@ -1098,26 +1082,16 @@ impl AssetManager {
     }
 
     fn put_texture(&mut self, key: String, texture: TextureHandle) {
-        let bytes = texture.size()[0]
-            .saturating_mul(texture.size()[1])
-            .saturating_mul(4);
+        let bytes = texture_bytes(&texture);
         if let Some((_, previous)) = self.textures.push(key, texture) {
-            self.texture_bytes = self.texture_bytes.saturating_sub(
-                previous.size()[0]
-                    .saturating_mul(previous.size()[1])
-                    .saturating_mul(4),
-            );
+            self.texture_bytes = self.texture_bytes.saturating_sub(texture_bytes(&previous));
         }
         self.texture_bytes = self.texture_bytes.saturating_add(bytes);
         while self.texture_bytes > MAX_STATIC_TEXTURE_BYTES {
             let Some((_key, evicted)) = self.textures.pop_lru() else {
                 break;
             };
-            self.texture_bytes = self.texture_bytes.saturating_sub(
-                evicted.size()[0]
-                    .saturating_mul(evicted.size()[1])
-                    .saturating_mul(4),
-            );
+            self.texture_bytes = self.texture_bytes.saturating_sub(texture_bytes(&evicted));
         }
         #[cfg(feature = "profiling")]
         puffin::profile_scope!(
@@ -1174,32 +1148,27 @@ impl AssetManager {
         self.icon_size
     }
 
-    #[expect(dead_code, reason = "public API for future per-directory icon size UI")]
-    pub fn set_icon_size_for_dir(&mut self, dir_path: &str, size: IconSize) {
-        self.per_dir_icon_size.insert(dir_path.to_string(), size);
+    /// A small thumbnail or icon for list rows and placeholders. Rows draw
+    /// icons at most 24 points tall, so this never decodes big images.
+    pub fn request_entry_texture(&mut self, entry: &EntryRef<'_>) -> Option<TextureHandle> {
+        self.request_entry_texture_at_edge(
+            entry,
+            IconSize::Small,
+            LIST_THUMBNAIL_EDGE,
+            AssetJobClass::VisibleThumbnail,
+        )
     }
 
-    #[expect(dead_code, reason = "public API for future per-directory icon size UI")]
-    pub fn icon_size_for_dir(&self, dir_path: &str) -> IconSize {
-        self.per_dir_icon_size
-            .get(dir_path)
-            .copied()
-            .unwrap_or(self.icon_size)
-    }
-
-    pub fn request_entry_texture(&mut self, entry: &DirEntry) -> Option<TextureHandle> {
-        let size = self.effective_icon_size(entry);
-        self.request_entry_texture_at_size(entry, size, AssetJobClass::VisibleThumbnail)
-    }
-
+    /// The entry's thumbnail at `target` size, or its type icon until the
+    /// thumbnail is ready. The flag tells which: `true` for a thumbnail.
     pub fn request_entry_texture_for_size(
         &mut self,
-        entry: &DirEntry,
+        entry: &EntryRef<'_>,
         target: egui::Vec2,
         pixels_per_point: f32,
-    ) -> Option<TextureHandle> {
-        let size = self.effective_icon_size(entry);
-        self.request_entry_texture_at_edge(
+    ) -> Option<(TextureHandle, bool)> {
+        let size = self.icon_size;
+        self.entry_texture_at_edge(
             entry,
             size,
             PreviewSpec::for_display(target.max_elem() * pixels_per_point).max_edge,
@@ -1208,11 +1177,11 @@ impl AssetManager {
     }
     pub fn prefetch_entry_texture_for_size(
         &mut self,
-        entry: &DirEntry,
+        entry: &EntryRef<'_>,
         target: egui::Vec2,
         pixels_per_point: f32,
     ) {
-        let size = self.effective_icon_size(entry);
+        let size = self.icon_size;
         let _ = self.request_entry_texture_at_edge(
             entry,
             size,
@@ -1220,21 +1189,23 @@ impl AssetManager {
             AssetJobClass::PrefetchThumbnail,
         );
     }
-    fn request_entry_texture_at_size(
-        &mut self,
-        entry: &DirEntry,
-        size: IconSize,
-        class: AssetJobClass,
-    ) -> Option<TextureHandle> {
-        self.request_entry_texture_at_edge(entry, size, size.decode_px(), class)
-    }
     fn request_entry_texture_at_edge(
         &mut self,
-        entry: &DirEntry,
+        entry: &EntryRef<'_>,
         size: IconSize,
         edge: u32,
         class: AssetJobClass,
     ) -> Option<TextureHandle> {
+        self.entry_texture_at_edge(entry, size, edge, class)
+            .map(|(texture, _)| texture)
+    }
+    fn entry_texture_at_edge(
+        &mut self,
+        entry: &EntryRef<'_>,
+        size: IconSize,
+        edge: u32,
+        class: AssetJobClass,
+    ) -> Option<(TextureHandle, bool)> {
         let path = entry.get_path();
         if entry.is_file()
             && let Some(kind) = thumbnail_kind(&path)
@@ -1248,7 +1219,7 @@ impl AssetManager {
             );
             self.desired_assets.insert(key.clone());
             if let Some(texture) = self.textures.get(&key) {
-                return Some(texture.clone());
+                return Some((texture.clone(), true));
             }
             if self.pending.contains(&key) && class == AssetJobClass::VisibleThumbnail {
                 self.scheduler.reprioritize(&key, class);
@@ -1277,9 +1248,11 @@ impl AssetManager {
                     cache_checked: false,
                     cancel,
                 };
-                let enqueue = self
-                    .scheduler
-                    .enqueue(job, class, Some(entry.dir.to_string()));
+                let enqueue = self.scheduler.enqueue(
+                    job,
+                    class,
+                    Some(directory_key(Path::new(entry.dir.as_ref()))),
+                );
                 self.clear_evicted_requests(enqueue.evicted);
                 if enqueue.accepted {
                     self.pending.insert(key);
@@ -1287,154 +1260,127 @@ impl AssetManager {
                 }
             }
         }
-        self.request_file_icon_texture(&path, entry.is_file(), size, class)
+        // Packages are looked up by path, like folders: every app has its own icon.
+        let by_extension = entry.is_file() && !entry.is_package();
+        self.request_file_icon_texture(&path, by_extension, size, class)
+            .map(|texture| (texture, false))
     }
 
-    // Keep native location-icon requests available alongside the Lucide source list.
-    #[allow(dead_code)]
-    pub fn request_sidebar_texture(&mut self, path: &Path) -> Option<TextureHandle> {
-        let is_dir = path.is_dir();
-        let size = self.icon_size;
-        let cache_key = if is_dir {
-            format!(
-                "sidebar:{}{}",
-                directory_icon_key(path),
-                size.cache_suffix()
-            )
-        } else {
-            format!("sidebar:{}{}", icon_key(path, false), size.cache_suffix())
-        };
-
-        self.desired_assets.insert(cache_key.clone());
-        if let Some(texture) = self.textures.get(&cache_key) {
-            return Some(texture.clone());
-        }
-        if self.is_pending_or_failed(&cache_key) {
-            return None;
-        }
-
-        let lookup_arg = if is_dir {
-            directory_lookup_arg(path)
-        } else {
-            path.to_string_lossy().to_string()
-        };
-        let (request_id, cancel) = self.start_request(&cache_key, None);
-        let enqueue = self.scheduler.enqueue(
-            AssetJob::SystemIcon {
-                request_key: cache_key.clone(),
-                lookup_arg,
-                icon_size: size,
-                request_id,
-                cancel,
-            },
-            AssetJobClass::SidebarIcon,
-            path.parent()
-                .map(|path| path.to_string_lossy().replace("\\\\?\\", "")),
-        );
-        self.clear_evicted_requests(enqueue.evicted);
-        if enqueue.accepted {
-            self.pending.insert(cache_key);
-            self.last_asset_activity = Instant::now();
-        }
-        None
-    }
-
-    pub fn request_hover_preview(
+    pub fn request_preview(
         &mut self,
         ctx: &Context,
-        entry: &DirEntry,
+        entry: &EntryRef<'_>,
         intent: PreviewIntent,
-    ) -> HoverPreview {
-        self.request_hover_preview_at_size(ctx, entry, intent, egui::Vec2::splat(300.0))
+    ) -> Preview {
+        self.request_preview_at_size(ctx, entry, intent, egui::Vec2::splat(300.0))
     }
-    pub fn request_hover_preview_at_size(
+    pub fn request_preview_at_size(
         &mut self,
         ctx: &Context,
-        entry: &DirEntry,
+        entry: &EntryRef<'_>,
         intent: PreviewIntent,
         target: egui::Vec2,
-    ) -> HoverPreview {
+    ) -> Preview {
         if !entry.is_file() {
-            return HoverPreview::Fallback;
+            return Preview::Fallback;
         }
         let spec = PreviewSpec::for_display(target.max_elem() * ctx.pixels_per_point());
-        let Some(ext) = entry
-            .get_path()
-            .extension()
-            .and_then(std::ffi::OsStr::to_str)
-            .map(str::to_ascii_lowercase)
-        else {
-            return HoverPreview::Fallback;
-        };
-
-        match ext.as_str() {
-            "png" | "jpg" | "jpeg" | "bmp" | "webp" | "tiff" | "tif" | "ico" | "avif" | "tga" => {
-                self.request_entry_texture_at_edge(
+        match kinds::media_kind(Path::new(entry.file_name)) {
+            Some(kinds::MediaKind::Image) => self
+                .request_entry_texture_at_edge(
                     entry,
                     IconSize::ExtraLarge,
                     spec.max_edge,
                     AssetJobClass::VisibleThumbnail,
                 )
-                .map_or(HoverPreview::Pending, HoverPreview::Ready)
-            }
-            "gif" => {
+                .map_or(Preview::Pending, Preview::Ready),
+            Some(kinds::MediaKind::AnimatedImage) => {
                 self.request_animated_preview(ctx, entry, intent, AnimatedSourceKind::Gif, spec)
             }
-            ext_str if VIDEO_EXTS.contains(&ext_str) => {
+            Some(kinds::MediaKind::Video) => {
                 self.request_animated_preview(ctx, entry, intent, AnimatedSourceKind::Video, spec)
             }
-            _ => HoverPreview::Fallback,
+            None => Preview::Fallback,
         }
     }
 
     pub fn invalidate_files(&mut self, files: impl IntoIterator<Item = PathBuf>) {
         let files: Vec<PathBuf> = files
             .into_iter()
-            .map(|path| PathBuf::from(crate::helper::normalize_path_string(&path)))
+            .map(|path| crate::helper::canonical_form(&path))
             .collect();
         if files.is_empty() {
             return;
         }
-
         media::invalidate_sources(&files, false);
+        let file_strings: Vec<String> = files
+            .iter()
+            .map(|file| file.to_string_lossy().into_owned())
+            .collect();
+        self.forget(
+            |key| {
+                file_strings
+                    .iter()
+                    .any(|file| asset_key_matches_file(key, file))
+            },
+            |source| files.iter().any(|file| file == source),
+        );
+    }
 
-        let file_prefixes: Vec<String> =
-            files.iter().map(PathHelper::to_full_path_string).collect();
-        let matches_file = |key: &str| -> bool {
-            let entry_key = key.strip_prefix("sidebar:").unwrap_or(key);
-            file_prefixes
-                .iter()
-                .any(|file| asset_key_matches_file(entry_key, file))
-        };
+    pub fn invalidate_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
+        let directories: Vec<PathBuf> = directories
+            .into_iter()
+            .map(|path| crate::helper::canonical_form(&path))
+            .collect();
+        if directories.is_empty() {
+            return;
+        }
+        media::invalidate_sources(&directories, true);
+        // Keys embed already-normalised paths, so a lexical component prefix
+        // check suffices (no `canonicalize` per cached texture).
+        let inside = |path: &Path| directories.iter().any(|dir| path.starts_with(dir));
+        self.forget(
+            |key| inside(Path::new(source_path_from_asset_key(key).unwrap_or(key))),
+            |source| inside(source),
+        );
+    }
 
-        let keys_to_remove: Vec<String> = self
+    /// Drops textures, animations, failures and running requests for the
+    /// sources matched by `matches_key` (asset keys) or `matches_source`
+    /// (request sources).
+    fn forget(
+        &mut self,
+        matches_key: impl Fn(&str) -> bool,
+        matches_source: impl Fn(&Path) -> bool,
+    ) {
+        let stale: Vec<String> = self
             .textures
             .iter()
-            .filter(|(key, _)| matches_file(key))
+            .filter(|(key, _)| matches_key(key))
             .map(|(key, _)| key.clone())
             .collect();
-        for key in keys_to_remove {
+        for key in stale {
             self.textures.pop(&key);
         }
         self.texture_bytes = self
             .textures
             .iter()
-            .map(|(_, texture)| texture.size()[0] * texture.size()[1] * 4)
-            .sum();
-        let animation_keys_to_remove: Vec<String> = self
+            .map(|(_, texture)| texture_bytes(texture))
+            .fold(0, usize::saturating_add);
+        let stale: Vec<String> = self
             .animations
             .iter()
-            .filter(|(key, _)| matches_file(key))
+            .filter(|(key, _)| matches_key(key))
             .map(|(key, _)| key.clone())
             .collect();
-        for key in animation_keys_to_remove {
+        for key in stale {
             self.animations.pop(&key);
         }
         self.animation_bytes = self
             .animations
             .iter()
             .map(|(_, value)| value.byte_len)
-            .sum();
+            .fold(0, usize::saturating_add);
         let keys: HashSet<_> = self
             .requests
             .iter()
@@ -1442,95 +1388,23 @@ impl AssetManager {
                 control
                     .source
                     .as_ref()
-                    .map_or_else(|| matches_file(key), |source| files.contains(&source.path))
+                    .map_or_else(|| matches_key(key), |source| matches_source(&source.path))
             })
             .map(|(key, _)| key.clone())
-            .chain(self.pending.iter().filter(|key| matches_file(key)).cloned())
+            .chain(self.pending.iter().filter(|key| matches_key(key)).cloned())
             .collect();
         self.cancel_requests(&keys);
-        self.failed.retain(|key, _| !matches_file(key));
-    }
-
-    pub fn invalidate_directories(&mut self, directories: impl IntoIterator<Item = PathBuf>) {
-        let directories: Vec<PathBuf> = directories
-            .into_iter()
-            .map(|path| PathBuf::from(crate::helper::normalize_path_string(&path)))
-            .collect();
-        if directories.is_empty() {
-            return;
-        }
-
-        media::invalidate_sources(&directories, true);
-
-        let matches_dir = |key: &str| -> bool {
-            let entry_path = source_path_from_asset_key(key)
-                .unwrap_or_else(|| key.strip_prefix("sidebar:").unwrap_or(key));
-            let entry_path = Path::new(entry_path);
-            directories.iter().any(|dir| {
-                crate::helper::path_starts_with_dir(entry_path, dir)
-                    || entry_path
-                        .parent()
-                        .is_some_and(|parent| crate::helper::path_starts_with_dir(parent, dir))
-            })
-        };
-
-        let keys_to_remove: Vec<String> = self
-            .textures
-            .iter()
-            .filter(|(key, _)| matches_dir(key))
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in keys_to_remove {
-            self.textures.pop(&key);
-        }
-        self.texture_bytes = self
-            .textures
-            .iter()
-            .map(|(_, texture)| texture.size()[0] * texture.size()[1] * 4)
-            .sum();
-        let animation_keys_to_remove: Vec<String> = self
-            .animations
-            .iter()
-            .filter(|(key, _)| matches_dir(key))
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in animation_keys_to_remove {
-            self.animations.pop(&key);
-        }
-        self.animation_bytes = self
-            .animations
-            .iter()
-            .map(|(_, value)| value.byte_len)
-            .sum();
-        let keys: HashSet<_> = self
-            .pending
-            .iter()
-            .filter(|key| matches_dir(key))
-            .cloned()
-            .collect();
-        self.cancel_requests(&keys);
-        self.failed.retain(|key, _| !matches_dir(key));
-    }
-
-    fn effective_icon_size(&self, entry: &DirEntry) -> IconSize {
-        let (dir, _) = entry.get_splitted_path();
-        self.per_dir_icon_size
-            .get(dir)
-            .copied()
-            .unwrap_or(self.icon_size)
+        self.failed.retain(|key, _| !matches_key(key));
     }
 
     fn request_animated_preview(
         &mut self,
         ctx: &Context,
-        entry: &DirEntry,
+        entry: &EntryRef<'_>,
         intent: PreviewIntent,
         source_kind: AnimatedSourceKind,
         spec: PreviewSpec,
-    ) -> HoverPreview {
-        if ctx.input(|input| input.viewport().focused == Some(false)) {
-            return HoverPreview::Fallback;
-        }
+    ) -> Preview {
         let path = entry.get_path();
         let key = format!(
             "{}#{}:{}#overview_v7_px{}",
@@ -1539,6 +1413,15 @@ impl AssetManager {
             entry.meta.size,
             spec.max_edge
         );
+        // In the background, keep showing frames already decoded but don't
+        // start new work.
+        if ctx.input(|input| input.viewport().focused == Some(false)) {
+            return if self.animations.contains(&key) {
+                self.render_animated_preview(ctx, &key)
+            } else {
+                Preview::Fallback
+            };
+        }
         if intent == PreviewIntent::Selected {
             if !self.selected_previews_enabled
                 || self
@@ -1546,7 +1429,7 @@ impl AssetManager {
                     .as_ref()
                     .is_some_and(|selected| selected != &key)
             {
-                return HoverPreview::Fallback;
+                return Preview::Fallback;
             }
             self.selected_preview_key = Some(key.clone());
         }
@@ -1562,7 +1445,7 @@ impl AssetManager {
             .elapsed();
         if dwell < PREVIEW_DWELL {
             ctx.request_repaint_after(PREVIEW_DWELL.saturating_sub(dwell));
-            return HoverPreview::Pending;
+            return Preview::Pending;
         }
         let cached_frame = if self.animations.contains(&key) {
             Some(self.render_animated_preview(ctx, &key))
@@ -1574,10 +1457,10 @@ impl AssetManager {
             .peek(&key)
             .is_some_and(|animation| animation.complete)
         {
-            return cached_frame.unwrap_or(HoverPreview::Pending);
+            return cached_frame.unwrap_or(Preview::Pending);
         }
         if let Some(state) = self.preview_failure_state(&key) {
-            if let HoverPreview::Unavailable {
+            if let Preview::Unavailable {
                 retry_after: Some(delay),
                 ..
             } = &state
@@ -1594,19 +1477,33 @@ impl AssetManager {
                 self.preview_scheduler
                     .reprioritize(&key, intent.job_class());
             }
-            return cached_frame.unwrap_or(HoverPreview::Pending);
+            return cached_frame.unwrap_or(Preview::Pending);
         }
+        self.enqueue_animated_preview(entry, &path, key, intent, source_kind, spec);
+        cached_frame.unwrap_or(Preview::Pending)
+    }
+
+    /// Starts decoding an animated preview on the preview worker.
+    fn enqueue_animated_preview(
+        &mut self,
+        entry: &EntryRef<'_>,
+        path: &Path,
+        key: String,
+        intent: PreviewIntent,
+        source_kind: AnimatedSourceKind,
+        spec: PreviewSpec,
+    ) {
         let (request_id, cancel) = self.start_request(
             &key,
             Some(SourceKey::from_normalized(
-                &path,
+                path,
                 entry.meta.source_revision,
                 entry.meta.size,
             )),
         );
         let enqueue = self.preview_scheduler.enqueue(
             AssetJob::AnimatedPreview {
-                source_path: path.clone(),
+                source_path: path.to_path_buf(),
                 request_key: key.clone(),
                 source_revision: entry.meta.source_revision,
                 source_size: entry.meta.size,
@@ -1617,8 +1514,7 @@ impl AssetManager {
                 task: None,
             },
             intent.job_class(),
-            path.parent()
-                .map(|path| path.to_string_lossy().replace("\\\\?\\", "")),
+            path.parent().map(directory_key),
         );
         self.clear_evicted_requests(enqueue.evicted);
         if enqueue.accepted {
@@ -1627,10 +1523,9 @@ impl AssetManager {
                 .insert(key, PreviewJobControl { intent, cancel });
             self.last_asset_activity = Instant::now();
         }
-        cached_frame.unwrap_or(HoverPreview::Pending)
     }
 
-    fn render_animated_preview(&mut self, ctx: &Context, key: &str) -> HoverPreview {
+    fn render_animated_preview(&mut self, ctx: &Context, key: &str) -> Preview {
         let can_upload = self.frame_uploads < MAX_TEXTURES_PER_FRAME
             && (self.frame_uploads == 0 || self.upload_time < Duration::from_millis(2));
         let gpu_bytes: usize = self
@@ -1640,22 +1535,20 @@ impl AssetManager {
             .map(TextureHandle::byte_size)
             .sum();
         let Some(animation) = self.animations.get_mut(key) else {
-            return HoverPreview::Pending;
+            return Preview::Pending;
         };
         let (index, next_frame) = animation.current_frame();
         if animation.frames.len() > 1 {
             ctx.request_repaint_after(next_frame);
         }
         let Some(frame) = animation.frames.get(index) else {
-            return HoverPreview::Fallback;
+            return Preview::Fallback;
         };
         if animation.texture_frame == Some(index) {
             return animation
                 .texture
                 .as_ref()
-                .map_or(HoverPreview::Pending, |texture| {
-                    HoverPreview::Ready(texture.clone())
-                });
+                .map_or(Preview::Pending, |texture| Preview::Ready(texture.clone()));
         }
         let old_bytes = animation
             .texture
@@ -1668,9 +1561,7 @@ impl AssetManager {
             return animation
                 .texture
                 .as_ref()
-                .map_or(HoverPreview::Pending, |texture| {
-                    HoverPreview::Ready(texture.clone())
-                });
+                .map_or(Preview::Pending, |texture| Preview::Ready(texture.clone()));
         }
         let started = Instant::now();
         let image = ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
@@ -1683,28 +1574,19 @@ impl AssetManager {
         self.upload_time += started.elapsed();
         self.frame_uploads += 1;
         self.total_uploads += 1;
-        HoverPreview::Ready(animation.texture.as_ref().expect("uploaded frame").clone())
+        Preview::Ready(animation.texture.as_ref().expect("uploaded frame").clone())
     }
 
-    fn preview_failure_state(&self, key: &str) -> Option<HoverPreview> {
+    fn preview_failure_state(&self, key: &str) -> Option<Preview> {
         let record = self.failed.get(key)?;
-        if record.tries >= ICON_RETRY_MAX_TRIES
-            && matches!(
-                record.kind,
-                ErrorKind::InvalidMedia | ErrorKind::Unsupported | ErrorKind::Limit
-            )
-        {
-            return Some(HoverPreview::Unavailable {
-                reason: record.reason.clone(),
-                retry_after: None,
-            });
-        }
-        let shift = (record.tries - 1).min(ICON_BACKOFF_SHIFT_CAP);
-        let backoff = Duration::from_secs(ICON_RETRY_BASE_SECS * (1u64 << shift));
-        let elapsed = record.last_attempt.elapsed();
-        (elapsed < backoff).then(|| HoverPreview::Unavailable {
+        let retry_after = match record.retry() {
+            Retry::Now => return None,
+            Retry::Never => None,
+            Retry::After(wait) => Some(wait),
+        };
+        Some(Preview::Unavailable {
             reason: record.reason.clone(),
-            retry_after: Some(backoff.saturating_sub(elapsed)),
+            retry_after,
         })
     }
 
@@ -1748,8 +1630,7 @@ impl AssetManager {
                 cancel,
             },
             class,
-            path.parent()
-                .map(|path| path.to_string_lossy().replace("\\\\?\\", "")),
+            path.parent().map(directory_key),
         );
         self.clear_evicted_requests(enqueue.evicted);
         if enqueue.accepted {
@@ -1775,34 +1656,15 @@ impl AssetManager {
         if self.pending.contains(key) {
             return true;
         }
-        if let Some(record) = self.failed.get(key) {
-            // Exponential backoff (30s, 60s, 120s); once we hit the max tries
-            // the entry is considered permanently failed and never retried.
-            if record.tries >= ICON_RETRY_MAX_TRIES
-                && matches!(
-                    record.kind,
-                    ErrorKind::InvalidMedia | ErrorKind::Unsupported | ErrorKind::Limit
-                )
-            {
-                return true;
-            }
-            let shift = (record.tries - 1).min(ICON_BACKOFF_SHIFT_CAP);
-            let backoff = ICON_RETRY_BASE_SECS * (1u64 << shift);
-            return record.last_attempt.elapsed().as_secs() < backoff;
-        }
-        false
+        self.failed
+            .get(key)
+            .is_some_and(|record| record.retry() != Retry::Now)
     }
 }
 
 impl Default for AssetManager {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl AssetManager {
-    pub fn render_size_for(&self, entry: &DirEntry) -> f32 {
-        self.effective_icon_size(entry).render_px()
     }
 }
 
@@ -1886,7 +1748,7 @@ fn publish_result(
     }
     let size = result.byte_len();
     while bytes
-        .fetch_update(
+        .try_update(
             AtomicOrdering::AcqRel,
             AtomicOrdering::Acquire,
             |retained| {
@@ -1982,10 +1844,50 @@ fn asset_worker(
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "exhaustive dispatch for three asset job types"
-)]
+/// The step that ends a job whose result is no longer wanted.
+const fn cancelled(request_key: String, request_id: u64) -> JobStep {
+    JobStep::Complete(AssetJobResult::Cancelled {
+        request_key,
+        request_id,
+    })
+}
+
+/// A finished image job as a result for the UI.
+fn image_result(
+    request_key: String,
+    request_id: u64,
+    result: Result<DecodedImage, MediaError>,
+) -> AssetJobResult {
+    match result {
+        Ok(image) => AssetJobResult::Ready {
+            image,
+            request_key,
+            request_id,
+        },
+        Err(error) => AssetJobResult::Failed {
+            request_key,
+            reason: error.message,
+            kind: error.kind,
+            request_id,
+        },
+    }
+}
+
+/// A video poster that is already cached, by us or by Windows. Anything that
+/// needs generating is left to the video worker, so a slow thumbnail handler
+/// can't stall image thumbnails on the quick pool.
+fn cached_video_poster(
+    source: &SourceKey,
+    source_path: &Path,
+    target_edge: u32,
+    cancel: &AtomicBool,
+) -> Option<DecodedImage> {
+    let cache_path = thumbnail_cache_path(source_path, target_edge, source.revision, source.size);
+    media::cached_poster_image(source, target_edge, cancel)
+        .or_else(|| cached_shell_poster(&cache_path, source_path))
+        .or_else(|| shell_thumbnail_image(source_path, target_edge, true))
+}
+
 fn process_asset_job(job: AssetJob, media_backend: &dyn MediaBackend) -> JobStep {
     match job {
         AssetJob::Thumbnail {
@@ -2000,74 +1902,43 @@ fn process_asset_job(job: AssetJob, media_backend: &dyn MediaBackend) -> JobStep
             cache_checked,
             cancel,
         } => {
+            if cancel.load(AtomicOrdering::Acquire) {
+                return cancelled(request_key, request_id);
+            }
+            let source = SourceKey::new(&source_path, source_revision, source_size);
+            let changed = |source: &SourceKey| source_revision != 0 && !source.unchanged();
             if kind == ThumbnailKind::Video && !cache_checked {
-                if cancel.load(AtomicOrdering::Acquire) {
-                    return JobStep::Complete(AssetJobResult::Cancelled {
-                        request_key,
-                        request_id,
-                    });
-                }
-                let source = SourceKey::new(&source_path, source_revision, source_size);
-                if let Some(image) = media::cached_poster_image(&source, target_edge, &cancel) {
-                    if source_revision != 0 && !source.unchanged() {
-                        return JobStep::Complete(AssetJobResult::Cancelled {
-                            request_key,
-                            request_id,
-                        });
+                return match cached_video_poster(&source, &source_path, target_edge, &cancel) {
+                    Some(_) if changed(&source) => cancelled(request_key, request_id),
+                    Some(image) => {
+                        JobStep::Complete(image_result(request_key, request_id, Ok(image)))
                     }
-                    return JobStep::Complete(AssetJobResult::Ready {
+                    None => JobStep::Transfer(AssetJob::Thumbnail {
+                        source_path,
                         request_key,
+                        kind,
+                        icon_size,
+                        source_revision,
+                        source_size,
                         request_id,
-                        image,
-                    });
-                }
-                return JobStep::Transfer(AssetJob::Thumbnail {
-                    source_path,
-                    request_key,
-                    kind,
-                    icon_size,
-                    source_revision,
-                    source_size,
-                    request_id,
-                    target_edge,
-                    cache_checked: true,
-                    cancel,
-                });
+                        target_edge,
+                        cache_checked: true,
+                        cancel,
+                    }),
+                };
             }
             let result = load_or_generate_thumbnail(
                 &source_path,
                 kind,
-                icon_size,
                 target_edge,
                 source_revision,
                 source_size,
                 &cancel,
             );
-            JobStep::Complete(
-                if cancel.load(AtomicOrdering::Acquire)
-                    || (source_revision != 0
-                        && !SourceKey::new(&source_path, source_revision, source_size).unchanged())
-                {
-                    AssetJobResult::Cancelled {
-                        request_key,
-                        request_id,
-                    }
-                } else {
-                    match result {
-                        Ok(image) => AssetJobResult::Ready {
-                            image,
-                            request_key,
-                            request_id,
-                        },
-                        Err(error) => AssetJobResult::Failed {
-                            request_key,
-                            reason: error.message,
-                            kind: error.kind,
-                            request_id,
-                        },
-                    }
-                },
-            )
+            if cancel.load(AtomicOrdering::Acquire) || changed(&source) {
+                return cancelled(request_key, request_id);
+            }
+            JobStep::Complete(image_result(request_key, request_id, result))
         }
         AssetJob::SystemIcon {
             request_key,
@@ -2077,97 +1948,77 @@ fn process_asset_job(job: AssetJob, media_backend: &dyn MediaBackend) -> JobStep
             cancel,
         } => {
             if cancel.load(AtomicOrdering::Acquire) {
-                return JobStep::Complete(AssetJobResult::Cancelled {
-                    request_key,
-                    request_id,
-                });
+                return cancelled(request_key, request_id);
             }
-            JobStep::Complete(match load_system_icon_image(&lookup_arg, icon_size) {
-                Some(image) => AssetJobResult::Ready {
-                    image,
-                    request_key,
-                    request_id,
-                },
-                None => AssetJobResult::Failed {
-                    request_key,
-                    reason: format!("Could not load system icon for {lookup_arg}"),
-                    kind: ErrorKind::InvalidMedia,
-                    request_id,
-                },
-            })
+            let result = load_system_icon_image(&lookup_arg, icon_size).ok_or_else(|| {
+                MediaError::new(
+                    ErrorKind::InvalidMedia,
+                    format!("Could not load system icon for {lookup_arg}"),
+                )
+            });
+            JobStep::Complete(image_result(request_key, request_id, result))
         }
-        AssetJob::AnimatedPreview {
-            source_path,
+        job @ AssetJob::AnimatedPreview { .. } => step_animated_preview(job, media_backend),
+    }
+}
+
+/// Runs one step of an animated preview and decides what happens next.
+fn step_animated_preview(job: AssetJob, media_backend: &dyn MediaBackend) -> JobStep {
+    let AssetJob::AnimatedPreview {
+        source_path,
+        request_key,
+        source_revision,
+        source_size,
+        source_kind,
+        request_id,
+        cancel,
+        spec,
+        mut task,
+    } = job
+    else {
+        unreachable!("only animated preview jobs are stepped");
+    };
+    if cancel.load(AtomicOrdering::Acquire) {
+        return cancelled(request_key, request_id);
+    }
+    let source = SourceKey::new(&source_path, source_revision, source_size);
+    let step = media_backend.step_preview(&source, spec, source_kind, &cancel, &mut task);
+    if (source_revision != 0 && !source.unchanged()) || cancel.load(AtomicOrdering::Acquire) {
+        return cancelled(request_key, request_id);
+    }
+    match step {
+        Ok(PreviewStep::Complete(animation)) => JobStep::Complete(AssetJobResult::AnimationReady {
             request_key,
-            source_revision,
-            source_size,
-            source_kind,
             request_id,
-            cancel,
-            spec,
-            mut task,
-        } => {
-            if cancel.load(AtomicOrdering::Acquire) {
-                return JobStep::Complete(AssetJobResult::Cancelled {
+            animation,
+        }),
+        Ok(PreviewStep::Continue(progress)) => {
+            let result = progress.map(|animation| AssetJobResult::AnimationProgress {
+                request_key: request_key.clone(),
+                request_id,
+                animation,
+            });
+            JobStep::Continue(
+                AssetJob::AnimatedPreview {
+                    source_path,
                     request_key,
+                    source_revision,
+                    source_size,
+                    source_kind,
                     request_id,
-                });
-            }
-            let source = SourceKey::new(&source_path, source_revision, source_size);
-            let step = media_backend.step_preview(&source, spec, source_kind, &cancel, &mut task);
-            if source_revision != 0 && !source.unchanged() {
-                return JobStep::Complete(AssetJobResult::Cancelled {
-                    request_key,
-                    request_id,
-                });
-            }
-            match step {
-                Ok(PreviewStep::Complete(animation)) if !cancel.load(AtomicOrdering::Acquire) => {
-                    JobStep::Complete(AssetJobResult::AnimationReady {
-                        request_key,
-                        request_id,
-                        animation,
-                    })
-                }
-                Ok(PreviewStep::Continue(progress)) if !cancel.load(AtomicOrdering::Acquire) => {
-                    let result = progress.map(|animation| AssetJobResult::AnimationProgress {
-                        request_key: request_key.clone(),
-                        request_id,
-                        animation,
-                    });
-                    JobStep::Continue(
-                        AssetJob::AnimatedPreview {
-                            source_path,
-                            request_key,
-                            source_revision,
-                            source_size,
-                            source_kind,
-                            request_id,
-                            cancel,
-                            spec,
-                            task,
-                        },
-                        result,
-                    )
-                }
-                Ok(_) => JobStep::Complete(AssetJobResult::Cancelled {
-                    request_key,
-                    request_id,
-                }),
-                Err(_) if cancel.load(AtomicOrdering::Acquire) => {
-                    JobStep::Complete(AssetJobResult::Cancelled {
-                        request_key,
-                        request_id,
-                    })
-                }
-                Err(error) => JobStep::Complete(AssetJobResult::Failed {
-                    request_key,
-                    request_id,
-                    reason: error.message,
-                    kind: error.kind,
-                }),
-            }
+                    cancel,
+                    spec,
+                    task,
+                },
+                result,
+            )
         }
+        Err(error) => JobStep::Complete(AssetJobResult::Failed {
+            request_key,
+            request_id,
+            reason: error.message,
+            kind: error.kind,
+        }),
     }
 }
 
@@ -2241,124 +2092,182 @@ fn directory_lookup_arg(_path: &Path) -> String {
     "folder".to_string()
 }
 
-pub fn entry_has_animated_preview(entry: &DirEntry) -> bool {
-    let Some(ext) = entry
-        .get_path()
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .map(str::to_ascii_lowercase)
-    else {
-        return false;
-    };
-    ext == "gif" || VIDEO_EXTS.contains(&ext.as_str())
+pub fn entry_has_animated_preview(entry: &EntryRef<'_>) -> bool {
+    kinds::media_kind(Path::new(entry.file_name)).is_some_and(kinds::MediaKind::is_animated)
 }
 
 fn thumbnail_kind(path: &Path) -> Option<ThumbnailKind> {
-    const IMAGE: &[&str] = &[
-        "png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif", "ico", "avif", "tga",
-    ];
-    const VIDEO: &[&str] = &[
-        "mp4", "mov", "mkv", "avi", "webm", "wmv", "flv", "m4v", "3gp", "ogv",
-    ];
-    // Match case-insensitively WITHOUT allocating a lowercased string (this is
-    // called for every visible row every frame).
-    let ext = path.extension()?.to_str()?;
-    if IMAGE.iter().any(|c| ext.eq_ignore_ascii_case(c)) {
-        Some(ThumbnailKind::Image)
-    } else if VIDEO.iter().any(|c| ext.eq_ignore_ascii_case(c)) {
-        Some(ThumbnailKind::Video)
-    } else {
-        None
-    }
+    // A GIF's thumbnail is its first frame, like any other image.
+    kinds::media_kind(path).map(|kind| match kind {
+        kinds::MediaKind::Image | kinds::MediaKind::AnimatedImage => ThumbnailKind::Image,
+        kinds::MediaKind::Video => ThumbnailKind::Video,
+    })
 }
 
-/// On-disk thumbnail extension chosen per source type. Photo-like and video
-/// sources use JPEG (faster encode/decode, far smaller); formats that can
-/// carry meaningful alpha keep PNG so transparency isn't lost on the tile.
+/// The thumbnail of an image or video: from our disk cache when it is still
+/// current, otherwise decoded (or, for video, sampled) and cached.
 fn load_or_generate_thumbnail(
     source_path: &Path,
     kind: ThumbnailKind,
-    icon_size: IconSize,
     target_edge: u32,
     source_revision: u128,
     source_size: u64,
     cancel: &AtomicBool,
 ) -> Result<DecodedImage, MediaError> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + THUMBNAIL_DEADLINE;
     process::check(cancel, deadline)?;
-    let path = thumbnail_cache_path(
-        source_path,
-        icon_size,
-        target_edge,
-        source_revision,
-        source_size,
-    );
+    let name = source_path.to_string_lossy().into_owned();
+    // Without a revision (metadata unavailable) we can't tell a stale cache
+    // entry from a current one, so the disk cache is skipped.
+    let cacheable = source_revision != 0;
+    let path = thumbnail_cache_path(source_path, target_edge, source_revision, source_size);
     let source = SourceKey::new(source_path, source_revision, source_size);
     if kind == ThumbnailKind::Video {
         if let Some(image) = media::cached_poster_image(&source, target_edge, cancel) {
-            media::schedule_poster_cache(source, path, target_edge, image.clone());
+            // Posters made while building an overview live only in memory;
+            // save them once so they survive a restart, without rewriting
+            // the file on every hit.
+            if cacheable && !path.is_file() {
+                media::schedule_poster_cache(source, path, target_edge, image.clone());
+            }
             return Ok(image);
         }
-    } else if let Some(image) = decode_image_file(&path, source_path.to_full_path_string()) {
-        cache::touch(&path);
-        return Ok(image);
-    }
-    if path.exists() {
-        let _ = fs::remove_file(&path);
+    } else if cacheable && let Some(cached) = cache::cached_variant(&path) {
+        if let Some(image) = decode::cached_thumbnail(&cached, name.clone()) {
+            cache::touch(&cached);
+            return Ok(image);
+        }
+        let _ = fs::remove_file(&cached);
     }
     let image = match kind {
-        ThumbnailKind::Video => media::poster(&source, target_edge, cancel)?,
+        ThumbnailKind::Video => {
+            if let Some(image) = generate_shell_poster(source_path, target_edge, &path, cacheable) {
+                return Ok(image);
+            }
+            media::poster_cached_to(
+                &source,
+                target_edge,
+                cancel,
+                cacheable.then(|| path.clone()),
+            )?
+        }
         ThumbnailKind::Image => {
-            let mut reader = image::ImageReader::open(source_path)
-                .map_err(|err| MediaError::new(ErrorKind::InvalidMedia, err.to_string()))?;
-            let mut limits = image::Limits::default();
-            limits.max_alloc = Some(128 * 1024 * 1024);
-            reader.limits(limits);
-            let image = reader
-                .decode()
-                .map_err(|err| MediaError::new(ErrorKind::InvalidMedia, err.to_string()))?
-                .thumbnail(target_edge, target_edge);
-            decoded_from_dynamic(&image, source_path.to_full_path_string())
+            let image = decode::thumbnail_from_source(source_path, target_edge)?;
+            process::check(cancel, deadline)?;
+            if cacheable && source.unchanged() {
+                // Encode before taking the publication lock; hold it only to
+                // check the source is still current and to rename the file.
+                if let Some((bytes, ext)) = cache::encode_thumbnail(&image) {
+                    let _publication = media::PUBLICATION.lock().expect("asset publication");
+                    if source.unchanged() {
+                        cache::atomic_write_thumbnail(&path, &bytes, ext);
+                    }
+                }
+            }
+            decode::decoded_from_dynamic(&image, name)
         }
     };
     process::check(cancel, deadline)?;
-    if kind == ThumbnailKind::Video {
-        media::schedule_poster_cache(source, path, target_edge, image.clone());
-    } else if source.unchanged()
-        && let Some(rgba) =
-            image::RgbaImage::from_raw(image.width as u32, image.height as u32, image.rgba.to_vec())
-    {
-        let _publication = media::PUBLICATION.lock().expect("asset publication");
-        if source.unchanged() {
-            atomic_save_image(&image::DynamicImage::ImageRgba8(rgba), &path);
-        }
-    }
     Ok(image)
 }
 
-fn decode_image_file(path: &Path, name: String) -> Option<DecodedImage> {
-    let bytes = cache::read_bounded(path, 16 * 1024 * 1024).ok()?;
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(16 * 1024 * 1024);
-    limits.max_image_width = Some(media::MAX_EDGE);
-    limits.max_image_height = Some(media::MAX_EDGE);
-    reader.limits(limits);
-    Some(decoded_from_dynamic(&reader.decode().ok()?, name))
+/// Thumbnail from the Windows shell thumbnail cache, fitted to `edge`. Used
+/// for video posters, where it replaces an ffmpeg process. For images it is
+/// not worth it: measured on a 12 MP JPEG, a cache-miss probe costs ~7 ms and
+/// a cold generation ~90 ms, versus ~23 ms for our DCT-scaled decode.
+/// Disabled in tests so snapshots do not depend on host thumbnail handlers.
+#[cfg(all(windows, not(test)))]
+fn shell_thumbnail_image(path: &Path, edge: u32, cached_only: bool) -> Option<DecodedImage> {
+    let (width, height, pixels) = crate::windows_tools::shell_thumbnail(path, edge, cached_only)?;
+    let mut image = image::RgbaImage::from_raw(width, height, pixels)?;
+    let longest = width.max(height);
+    if longest > edge {
+        let scale =
+            |side: u32| (u64::from(side) * u64::from(edge) / u64::from(longest)).max(1) as u32;
+        image = image::imageops::thumbnail(&image, scale(width), scale(height));
+    }
+    Some(DecodedImage {
+        name: path.to_string_lossy().into_owned(),
+        width: image.width() as usize,
+        height: image.height() as usize,
+        rgba: image.into_raw().into(),
+    })
 }
 
-fn decoded_from_dynamic(image: &image::DynamicImage, name: String) -> DecodedImage {
-    let rgba = image.to_rgba8();
-    let width = rgba.width() as usize;
-    let height = rgba.height() as usize;
-    DecodedImage {
-        name,
-        width,
-        height,
-        rgba: rgba.into_raw().into(),
+/// Where a poster made by the Windows Shell is cached, next to (not in) our
+/// `FFmpeg` posters: Shell posters aren't frames at a known time, so they must
+/// not seed video overviews.
+fn shell_poster_path(cache_path: &Path) -> PathBuf {
+    cache_path.with_extension("shell.jpg")
+}
+
+fn cached_shell_poster(cache_path: &Path, source_path: &Path) -> Option<DecodedImage> {
+    let path = shell_poster_path(cache_path);
+    let image = decode::cached_thumbnail(&path, source_path.to_string_lossy().into_owned())?;
+    cache::touch(&path);
+    Some(image)
+}
+
+/// How long the Windows Shell may take to make a video thumbnail.
+#[cfg(all(windows, not(test)))]
+const SHELL_GENERATION_TIMEOUT: Duration = Duration::from_secs(3);
+/// Shell calls that timed out and are still running; past this many we stop
+/// asking the Shell until they finish.
+#[cfg(all(windows, not(test)))]
+const MAX_STUCK_SHELL_CALLS: usize = 2;
+
+/// Asks the Windows Shell to make a video thumbnail, giving up after
+/// [`SHELL_GENERATION_TIMEOUT`] (third-party handlers, offline shares). The
+/// result is cached so it is made only once.
+#[cfg(all(windows, not(test)))]
+fn generate_shell_poster(
+    source_path: &Path,
+    edge: u32,
+    cache_path: &Path,
+    cacheable: bool,
+) -> Option<DecodedImage> {
+    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+    if IN_FLIGHT.load(AtomicOrdering::Acquire) > MAX_STUCK_SHELL_CALLS {
+        return None;
     }
+    IN_FLIGHT.fetch_add(1, AtomicOrdering::AcqRel);
+    let (sender, receiver) = mpsc::channel();
+    let source = source_path.to_path_buf();
+    thread::spawn(move || {
+        let _ = sender.send(shell_thumbnail_image(&source, edge, false));
+        IN_FLIGHT.fetch_sub(1, AtomicOrdering::AcqRel);
+    });
+    let image = receiver
+        .recv_timeout(SHELL_GENERATION_TIMEOUT)
+        .ok()
+        .flatten()?;
+    if cacheable
+        && let Some(rgba) =
+            image::RgbaImage::from_raw(image.width as u32, image.height as u32, image.rgba.to_vec())
+        && let Some((bytes, _)) = cache::encode_thumbnail(&image::DynamicImage::ImageRgba8(rgba))
+    {
+        cache::atomic_save_bytes(&bytes, &shell_poster_path(cache_path));
+    }
+    Some(image)
+}
+
+#[cfg(not(all(windows, not(test))))]
+const fn generate_shell_poster(
+    _source_path: &Path,
+    _edge: u32,
+    _cache_path: &Path,
+    _cacheable: bool,
+) -> Option<DecodedImage> {
+    None
+}
+
+#[cfg(not(all(windows, not(test))))]
+const fn shell_thumbnail_image(
+    _path: &Path,
+    _edge: u32,
+    _cached_only: bool,
+) -> Option<DecodedImage> {
+    None
 }
 
 #[allow(
@@ -2510,6 +2419,103 @@ fn encode_animation_gif(animation: &DecodedAnimation) -> Result<Vec<u8>, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helper::PathHelper;
+    use media::load_or_generate_animated_preview;
+
+    /// Test backends that produce a whole preview in one call.
+    trait WholePreviewBackend: Send + Sync {
+        fn load_animated_preview(
+            &self,
+            path: &Path,
+            source_revision: u128,
+            source_size: u64,
+            source_kind: AnimatedSourceKind,
+            cancel: &AtomicBool,
+        ) -> Result<DecodedAnimation, String>;
+    }
+
+    impl<T: WholePreviewBackend> MediaBackend for T {
+        fn step_preview(
+            &self,
+            source: &SourceKey,
+            _spec: PreviewSpec,
+            kind: AnimatedSourceKind,
+            cancel: &AtomicBool,
+            _task: &mut Option<Box<VideoTask>>,
+        ) -> Result<PreviewStep, MediaError> {
+            self.load_animated_preview(&source.path, source.revision, source.size, kind, cancel)
+                .map(PreviewStep::Complete)
+                .map_err(|error| MediaError::new(ErrorKind::InvalidMedia, error))
+        }
+    }
+    /// Thumbnail decode paths for a 12 MP JPEG. Run with
+    /// `cargo test --release perf_thumbnail -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "performance baseline; run explicitly"]
+    fn perf_thumbnail_decode_paths() {
+        let path = std::env::temp_dir().join("lwa_fm_perf_photo.jpg");
+        if !path.exists() {
+            let photo = RgbaImage::from_fn(4000, 3000, |x, y| {
+                image::Rgba([(x % 256) as u8, (y % 256) as u8, ((x ^ y) % 256) as u8, 255])
+            });
+            image::DynamicImage::ImageRgba8(photo)
+                .to_rgb8()
+                .save(&path)
+                .expect("write perf photo");
+        }
+        let time = |label: &str, mut f: Box<dyn FnMut() -> bool>| {
+            let runs: Vec<_> = (0..4)
+                .map(|_| {
+                    let started = Instant::now();
+                    let ok = f();
+                    (started.elapsed(), ok)
+                })
+                .collect();
+            eprintln!("perf thumbnail {label:<24} runs={runs:?}");
+        };
+        let full = path.clone();
+        time(
+            "full decode + resize",
+            Box::new(move || {
+                image::ImageReader::open(&full)
+                    .and_then(image::ImageReader::with_guessed_format)
+                    .ok()
+                    .and_then(|reader| reader.decode().ok())
+                    .map(|image| image.thumbnail(160, 160))
+                    .is_some()
+            }),
+        );
+        #[cfg_attr(not(windows), allow(clippy::redundant_clone))]
+        let scaled = path.clone();
+        time(
+            "DCT-scaled decode",
+            Box::new(move || {
+                decode::decode_jpeg_scaled(&scaled, 160)
+                    .map(|image| image.thumbnail(160, 160))
+                    .is_some()
+            }),
+        );
+        #[cfg(windows)]
+        {
+            let shell = path;
+            time(
+                "Windows shell cache",
+                Box::new(move || {
+                    crate::windows_tools::shell_thumbnail(&shell, 160, false).is_some()
+                }),
+            );
+            let missing = std::env::temp_dir()
+                .join(format!("lwa_fm_perf_uncached_{}.jpg", std::process::id()));
+            let _ = fs::copy(std::env::temp_dir().join("lwa_fm_perf_photo.jpg"), &missing);
+            time(
+                "shell cache miss probe",
+                Box::new(move || {
+                    crate::windows_tools::shell_thumbnail(&missing, 160, true).is_none()
+                }),
+            );
+        }
+    }
+
     #[test]
     fn unchanged_priority_does_not_rebuild_the_queue() {
         let scheduler = JobScheduler::default();
@@ -2631,7 +2637,7 @@ mod tests {
         struct WaitingBackend {
             started: AtomicBool,
         }
-        impl MediaBackend for WaitingBackend {
+        impl WholePreviewBackend for WaitingBackend {
             fn load_animated_preview(
                 &self,
                 _path: &Path,
@@ -2725,7 +2731,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(4);
         assets.receiver = rx;
         let (old, _) = assets.start_request("same", None);
-        assets.cancel_requests(&HashSet::from(["same".into()]));
+        assets.cancel_requests(&std::iter::once("same".to_owned()).collect());
         let (new, _) = assets.start_request("same", None);
         assets.pending.insert("same".into());
         tx.send(AssetJobResult::Cancelled {
@@ -2750,7 +2756,7 @@ mod tests {
     #[test]
     fn source_change_during_generation_discards_the_result() {
         struct MutatingBackend;
-        impl MediaBackend for MutatingBackend {
+        impl WholePreviewBackend for MutatingBackend {
             fn load_animated_preview(
                 &self,
                 path: &Path,
@@ -2792,12 +2798,14 @@ mod tests {
     fn brief_hover_starts_no_work_and_selected_playback_is_globally_limited() {
         let ctx = Context::default();
         let mut assets = AssetManager::new();
-        let one = DirEntry::test_new("C:/media/one.mp4");
-        let two = DirEntry::test_new("C:/media/two.mp4");
+        let one_owned = DirEntry::test_new("C:/media/one.mp4");
+        let one = one_owned.entry_ref();
+        let two_owned = DirEntry::test_new("C:/media/two.mp4");
+        let two = two_owned.entry_ref();
         assets.begin_frame();
         assert!(matches!(
-            assets.request_hover_preview(&ctx, &one, PreviewIntent::Hovered),
-            HoverPreview::Pending
+            assets.request_preview(&ctx, &one, PreviewIntent::Hovered),
+            Preview::Pending
         ));
         assert!(assets.pending.is_empty());
         assert!(assets.requests.is_empty());
@@ -2806,21 +2814,26 @@ mod tests {
         assets.end_frame();
         assert!(assets.dwell.is_empty());
         assert!(matches!(
-            assets.request_hover_preview(&ctx, &one, PreviewIntent::Selected),
-            HoverPreview::Fallback
+            assets.request_preview(&ctx, &one, PreviewIntent::Selected),
+            Preview::Fallback
+        ));
+        // The inspector and Quick Look animate whatever the grid setting says.
+        assert!(matches!(
+            assets.request_preview(&ctx, &one, PreviewIntent::Focused),
+            Preview::Pending
         ));
         assets.set_selected_previews_enabled(true);
         assert!(matches!(
-            assets.request_hover_preview(&ctx, &one, PreviewIntent::Selected),
-            HoverPreview::Pending
+            assets.request_preview(&ctx, &one, PreviewIntent::Selected),
+            Preview::Pending
         ));
         assert!(matches!(
-            assets.request_hover_preview(&ctx, &two, PreviewIntent::Selected),
-            HoverPreview::Fallback
+            assets.request_preview(&ctx, &two, PreviewIntent::Selected),
+            Preview::Fallback
         ));
         assert!(matches!(
-            assets.request_hover_preview(&ctx, &two, PreviewIntent::Hovered),
-            HoverPreview::Pending
+            assets.request_preview(&ctx, &two, PreviewIntent::Hovered),
+            Preview::Pending
         ));
     }
 
@@ -2838,7 +2851,7 @@ mod tests {
         decoded.frame_delays.push(VIDEO_PREVIEW_FRAME_DELAY);
         decoded.source_timestamps.push(Duration::from_secs(1));
         assets.put_animation("preview".into(), AnimatedPreview::new(decoded));
-        let HoverPreview::Ready(first) = assets.render_animated_preview(&ctx, "preview") else {
+        let Preview::Ready(first) = assets.render_animated_preview(&ctx, "preview") else {
             panic!("first frame");
         };
         assets
@@ -2849,7 +2862,7 @@ mod tests {
             .checked_sub(Duration::from_millis(300))
             .expect("past");
         assets.frame_uploads = MAX_TEXTURES_PER_FRAME;
-        let HoverPreview::Ready(deferred) = assets.render_animated_preview(&ctx, "preview") else {
+        let Preview::Ready(deferred) = assets.render_animated_preview(&ctx, "preview") else {
             panic!("must retain visible frame");
         };
         assert_eq!(first.id(), deferred.id());
@@ -2862,7 +2875,7 @@ mod tests {
             Some(0)
         );
         assets.begin_frame();
-        let HoverPreview::Ready(next) = assets.render_animated_preview(&ctx, "preview") else {
+        let Preview::Ready(next) = assets.render_animated_preview(&ctx, "preview") else {
             panic!("next frame");
         };
         assert_eq!(first.id(), next.id());
@@ -2895,12 +2908,13 @@ mod tests {
     #[test]
     fn incomplete_preview_is_displayed_while_completion_resumes() {
         let ctx = Context::default();
-        let entry = DirEntry::test_new("C:/media/partial.mp4");
+        let entry_owned = DirEntry::test_new("C:/media/partial.mp4");
+        let entry = entry_owned.entry_ref();
         let backend = Arc::new(MockMediaBackend {
             result: Mutex::new(Ok(tiny_animation())),
         });
         let mut assets = AssetManager::with_media_backend(backend);
-        let _ = assets.request_hover_preview(&ctx, &entry, PreviewIntent::Hovered);
+        let _ = assets.request_preview(&ctx, &entry, PreviewIntent::Hovered);
         let key = assets.dwell.keys().next().expect("dwell key").clone();
         let mut preview = AnimatedPreview::new(tiny_animation());
         preview.complete = false;
@@ -2908,8 +2922,8 @@ mod tests {
         *assets.dwell.get_mut(&key).expect("dwell") =
             Instant::now().checked_sub(PREVIEW_DWELL).expect("past");
         assert!(matches!(
-            assets.request_hover_preview(&ctx, &entry, PreviewIntent::Hovered),
-            HoverPreview::Ready(_)
+            assets.request_preview(&ctx, &entry, PreviewIntent::Hovered),
+            Preview::Ready(_)
         ));
         assert!(assets.pending.contains(&key));
         wait_for_preview_result(&mut assets, &ctx);
@@ -2926,7 +2940,7 @@ mod tests {
         result: Mutex<Result<DecodedAnimation, String>>,
     }
 
-    impl MediaBackend for MockMediaBackend {
+    impl WholePreviewBackend for MockMediaBackend {
         fn load_animated_preview(
             &self,
             _path: &Path,
@@ -2964,7 +2978,8 @@ mod tests {
     #[test]
     fn mock_media_backend_drives_ready_and_unavailable_states() {
         let ctx = Context::default();
-        let entry = DirEntry::test_new("C:/media/mock.mp4");
+        let entry_owned = DirEntry::test_new("C:/media/mock.mp4");
+        let entry = entry_owned.entry_ref();
         let ready_backend = Arc::new(MockMediaBackend {
             result: Mutex::new(Ok(DecodedAnimation {
                 frames: vec![DecodedImage {
@@ -2980,20 +2995,20 @@ mod tests {
         let mut ready_assets = AssetManager::with_media_backend(ready_backend);
         ready_assets.begin_frame();
         assert!(matches!(
-            ready_assets.request_hover_preview(&ctx, &entry, PreviewIntent::Hovered),
-            HoverPreview::Pending
+            ready_assets.request_preview(&ctx, &entry, PreviewIntent::Hovered),
+            Preview::Pending
         ));
         for time in ready_assets.dwell.values_mut() {
             *time = Instant::now()
                 .checked_sub(PREVIEW_DWELL)
                 .expect("dwell timestamp");
         }
-        let _ = ready_assets.request_hover_preview(&ctx, &entry, PreviewIntent::Hovered);
+        let _ = ready_assets.request_preview(&ctx, &entry, PreviewIntent::Hovered);
         ready_assets.end_frame();
         wait_for_preview_result(&mut ready_assets, &ctx);
         assert!(matches!(
-            ready_assets.request_hover_preview(&ctx, &entry, PreviewIntent::Hovered),
-            HoverPreview::Ready(_)
+            ready_assets.request_preview(&ctx, &entry, PreviewIntent::Hovered),
+            Preview::Ready(_)
         ));
 
         let failed_backend = Arc::new(MockMediaBackend {
@@ -3002,20 +3017,20 @@ mod tests {
         let mut failed_assets = AssetManager::with_media_backend(failed_backend);
         failed_assets.begin_frame();
         assert!(matches!(
-            failed_assets.request_hover_preview(&ctx, &entry, PreviewIntent::Hovered),
-            HoverPreview::Pending
+            failed_assets.request_preview(&ctx, &entry, PreviewIntent::Hovered),
+            Preview::Pending
         ));
         for time in failed_assets.dwell.values_mut() {
             *time = Instant::now()
                 .checked_sub(PREVIEW_DWELL)
                 .expect("dwell timestamp");
         }
-        let _ = failed_assets.request_hover_preview(&ctx, &entry, PreviewIntent::Hovered);
+        let _ = failed_assets.request_preview(&ctx, &entry, PreviewIntent::Hovered);
         failed_assets.end_frame();
         wait_for_preview_result(&mut failed_assets, &ctx);
         assert!(matches!(
-            failed_assets.request_hover_preview(&ctx, &entry, PreviewIntent::Hovered),
-            HoverPreview::Unavailable {
+            failed_assets.request_preview(&ctx, &entry, PreviewIntent::Hovered),
+            Preview::Unavailable {
                 retry_after: Some(_),
                 ..
             }
@@ -3049,7 +3064,7 @@ mod tests {
         for index in 0..(MAX_ASSET_JOBS + 100) {
             scheduler.enqueue(
                 icon_job(&index.to_string()),
-                AssetJobClass::SidebarIcon,
+                AssetJobClass::PrefetchThumbnail,
                 None,
             );
         }
@@ -3065,7 +3080,7 @@ mod tests {
         for index in 0..MAX_ASSET_JOBS {
             scheduler.enqueue(
                 icon_job(&index.to_string()),
-                AssetJobClass::SidebarIcon,
+                AssetJobClass::PrefetchThumbnail,
                 None,
             );
         }
@@ -3140,8 +3155,7 @@ mod tests {
             AssetJobClass::VisibleThumbnail,
             Some("old".to_owned()),
         );
-        let evicted = scheduler.set_active_directory(Some("new".to_owned()));
-        assert!(evicted.is_empty());
+        scheduler.set_active_directory(Some("new".to_owned()));
         assert_eq!(
             scheduler.state.lock().expect("scheduler state").queue.len(),
             1
@@ -3151,10 +3165,10 @@ mod tests {
     #[test]
     fn source_revision_changes_thumbnail_cache_key() {
         let path = Path::new("example.jpg");
-        let first = thumbnail_cache_path(path, IconSize::Medium, 96, 1, 10);
-        let second = thumbnail_cache_path(path, IconSize::Medium, 96, 2, 10);
+        let first = thumbnail_cache_path(path, 96, 1, 10);
+        let second = thumbnail_cache_path(path, 96, 2, 10);
         assert_ne!(first, second);
-        assert!(first.to_string_lossy().contains("_v6.jpg"));
+        assert!(first.to_string_lossy().contains("_v7.jpg"));
     }
 
     #[test]
@@ -3163,7 +3177,7 @@ mod tests {
         let first = animated_preview_cache_path(path, 1, 10);
         let second = animated_preview_cache_path(path, 2, 10);
         assert_ne!(first, second);
-        assert!(first.to_string_lossy().contains("_overview_v7.bin"));
+        assert!(first.to_string_lossy().contains("_overview_v8.bin"));
     }
 
     #[test]
@@ -3293,14 +3307,14 @@ mod tests {
                 "broken".to_owned(),
                 FailureRecord {
                     last_attempt: Instant::now(),
-                    tries: ICON_RETRY_MAX_TRIES,
+                    tries: failures::RETRY_MAX_TRIES,
                     reason: "Unsupported codec".to_owned(),
                     kind,
                 },
             );
             assert!(matches!(
                 assets.preview_failure_state("broken"),
-                Some(HoverPreview::Unavailable {
+                Some(Preview::Unavailable {
                     retry_after: None,
                     ..
                 })
@@ -3323,7 +3337,7 @@ mod tests {
         );
         assert!(matches!(
             assets.preview_failure_state("retryable"),
-            Some(HoverPreview::Unavailable {
+            Some(Preview::Unavailable {
                 retry_after: Some(_),
                 ..
             })
@@ -3333,7 +3347,7 @@ mod tests {
             .get_mut("retryable")
             .expect("failure record")
             .last_attempt = Instant::now()
-            .checked_sub(Duration::from_secs(ICON_RETRY_BASE_SECS + 1))
+            .checked_sub(Duration::from_secs(31))
             .expect("test duration must fit before now");
         assert!(assets.preview_failure_state("retryable").is_none());
     }
@@ -3375,19 +3389,12 @@ mod tests {
         rgba.save(&source).expect("save source image");
         let metadata = fs::metadata(&source).expect("source metadata");
         let meta: crate::data::files::DirEntryMetaData = metadata.into();
-        let cache_path = thumbnail_cache_path(
-            &source,
-            IconSize::Small,
-            64,
-            meta.source_revision,
-            meta.size,
-        );
+        let cache_path = thumbnail_cache_path(&source, 64, meta.source_revision, meta.size);
         let _ = fs::remove_file(&cache_path);
 
         let first = load_or_generate_thumbnail(
             &source,
             ThumbnailKind::Image,
-            IconSize::Small,
             64,
             meta.source_revision,
             meta.size,
@@ -3395,13 +3402,24 @@ mod tests {
         )
         .expect("thumbnail miss should generate");
         assert_eq!(first.rgba[3], 0, "PNG alpha must be preserved");
-        assert!(cache_path.exists());
+        // Transparent thumbnails are cached as PNG next to the `.jpg` name.
+        let png_path = cache_path.with_extension("png");
+        assert!(png_path.exists() && !cache_path.exists());
+        let from_cache = load_or_generate_thumbnail(
+            &source,
+            ThumbnailKind::Image,
+            64,
+            meta.source_revision,
+            meta.size,
+            &AtomicBool::new(false),
+        )
+        .expect("cached thumbnail");
+        assert_eq!(from_cache.rgba[3], 0, "alpha must survive the cache");
 
-        fs::write(&cache_path, b"truncated").expect("corrupt cache");
+        fs::write(&png_path, b"truncated").expect("corrupt cache");
         let recovered = load_or_generate_thumbnail(
             &source,
             ThumbnailKind::Image,
-            IconSize::Small,
             64,
             meta.source_revision,
             meta.size,
@@ -3410,14 +3428,13 @@ mod tests {
         .expect("corrupt cache should regenerate immediately");
         assert_eq!(recovered.rgba[3], 0);
 
-        let _ = fs::remove_file(&cache_path);
+        let _ = fs::remove_file(&png_path);
         let workers = [(), ()].map(|()| {
             let source = source.clone();
             thread::spawn(move || {
                 load_or_generate_thumbnail(
                     &source,
                     ThumbnailKind::Image,
-                    IconSize::Small,
                     64,
                     meta.source_revision,
                     meta.size,
@@ -3431,9 +3448,9 @@ mod tests {
                 .expect("thumbnail worker should not panic")
                 .is_ok()
         }));
-        assert!(decode_image_file(&cache_path, "cached".to_owned()).is_some());
+        assert!(decode::cached_thumbnail(&png_path, "cached".to_owned()).is_some());
 
         let _ = fs::remove_file(source);
-        let _ = fs::remove_file(cache_path);
+        let _ = fs::remove_file(png_path);
     }
 }

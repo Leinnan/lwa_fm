@@ -1,48 +1,44 @@
 use egui::text::{LayoutJob, TextWrapping};
-use egui::util::undoer::Undoer;
-use egui::{
-    Color32, Context, FontId, FontSelection, Galley, Id, Layout, Sense, TextBuffer, TextFormat, Ui,
-    WidgetText,
-};
-use egui_dock::{DockArea, DockState, Style, TabViewer};
-use icu::collator::options::{AlternateHandling, CollatorOptions, Strength};
-use icu::collator::{Collator, CollatorBorrowed};
-use icu::locale::Locale;
+use egui::{Color32, Context, FontId, FontSelection, Galley, Id, TextFormat, Ui, WidgetText};
+use egui_dock::TabViewer;
+use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
+use icu_collator::{Collator, CollatorBorrowed};
+use icu_locale_core::Locale;
 use lru::LruCache;
-use mlua::{Function, UserData};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
-use std::fs;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
-use egui::Vec2;
-use egui_taffy::{
-    TuiBuilderLogic, taffy, tid, tui,
-    virtual_tui::{VirtualGridRowHelper, VirtualGridRowHelperParams},
-};
-use taffy::prelude::*;
-use taffy::style_helpers;
-
-use super::assets::{AssetManager, HoverPreview, PreviewIntent, entry_has_animated_preview};
+use super::assets::{AssetManager, PreviewIntent};
 use super::commands::ActionToPerform;
-use crate::app::command_palette::build_for_path;
-use crate::app::commands::{ModalWindow, TabAction, TabTarget};
+use crate::app::commands::TabAction;
 use crate::app::dir_handling::WatcherSpecsCache;
-use crate::app::directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings};
+use crate::app::history::History;
+use crate::app::selection::Selection;
 use crate::app::top_bottom::TopDisplayPath;
-use crate::app::{DisplayType, LUA_INSTANCE, Search, Sort};
-use crate::data::files::{DirEntry, DirList};
+use crate::app::{DisplayType, Search};
+use crate::data::files::{EntryRef, Listing};
 use crate::data::time::ElapsedTime;
-use crate::helper::{DataHolder, KeyWithCommandPressed, PathFixer, PathHelper};
+use crate::helper::DataHolder;
 use crate::locations::Locations;
-use crate::toast;
-use crate::widgets::label_scrollable::ScrollableLabel;
-use crate::widgets::time_label::draw_size;
 use std::cell::RefCell;
+
+mod columns;
+mod entry_actions;
+mod grid_view;
+mod interaction;
+mod list_view;
+mod quick_look;
+mod text_fit;
+mod workspace;
+
+pub use columns::kind_label;
+#[cfg(test)]
+pub use columns::{CELL_PADDING, Column, ListColumns};
+pub use workspace::{SavedWindow, WindowId, Workspace};
 
 thread_local! {
     pub static TIME_POOL: RefCell<LruCache<ElapsedTime, Arc<Galley>>> =
@@ -131,11 +127,37 @@ fn ensure_text_cache_style(ui: &Ui) {
     if changed {
         FILE_NAME_POOL.with_borrow_mut(LruCache::clear);
         FOLDER_NAME_POOL.with_borrow_mut(LruCache::clear);
-        DIR_POOL.with_borrow_mut(LruCache::clear);
         TIME_POOL.with_borrow_mut(LruCache::clear);
         SIZES_POOL.with_borrow_mut(LruCache::clear);
-        INDEXED_GALLEYS.with_borrow_mut(|cache| *cache = Default::default());
+        text_fit::clear_pool();
     }
+}
+
+/// A file name with the searched words highlighted; `None` when nothing in
+/// the name matches (then the cached plain galley is used).
+fn highlighted_name_galley(
+    ui: &Ui,
+    name: &str,
+    highlights: &crate::app::search::filter::Highlights,
+) -> Option<Arc<Galley>> {
+    let ranges = highlights.ranges(name);
+    if ranges.is_empty() {
+        return None;
+    }
+    let plain = TextFormat::simple(FontId::default(), ui.visuals().text_color());
+    let marked = TextFormat {
+        background: crate::app::ui::Palette::of(ui).accent.gamma_multiply(0.45),
+        ..plain.clone()
+    };
+    let mut job = LayoutJob::default();
+    let mut at = 0;
+    for range in ranges {
+        job.append(&name[at..range.start], 0.0, plain.clone());
+        job.append(&name[range.clone()], 0.0, marked.clone());
+        at = range.end;
+    }
+    job.append(&name[at..], 0.0, plain);
+    Some(ui.fonts_mut(|fonts| fonts.layout_job(job)))
 }
 
 fn file_name_galley(ui: &Ui, name: &str, is_dir: bool) -> Arc<Galley> {
@@ -177,72 +199,6 @@ fn file_name_galley(ui: &Ui, name: &str, is_dir: bool) -> Arc<Galley> {
     }
 }
 
-thread_local! {
-    /// Pre-rendered galleys for the `[1]`..`[9]` quick-select hints shown next
-    /// to the first rows when the modifier key is held. Indexed by the digit
-    /// (1..=9); slot 0 is unused. Laid out lazily on first use and reused every
-    /// frame to avoid per-frame text layout.
-    static INDEXED_GALLEYS: RefCell<[Option<Arc<Galley>>; 10]> =
-        const { RefCell::new([const { None }; 10]) };
-
-    /// Galleys for the directory-prefix label shown in search / multi-dir mode.
-    /// Keyed by the directory string; laid out once and reused across frames.
-    pub static DIR_POOL: RefCell<LruCache<String, Arc<Galley>>> =
-        RefCell::new(LruCache::new(NonZeroUsize::new(2048).expect("capacity must be > 0")));
-}
-
-/// Returns the cached galley for the `[n]` quick-select hint (n in 1..=9),
-/// laying it out on first use. The galley is reused across frames, eliminating
-/// the per-frame `LayoutJob` allocation and text-layout cost.
-fn indexed_hint_galley(ui: &Ui, n: u8) -> Arc<Galley> {
-    debug_assert!((1..=9).contains(&n));
-    INDEXED_GALLEYS.with_borrow_mut(|cache| {
-        cache[n as usize]
-            .get_or_insert_with(|| {
-                WidgetText::LayoutJob(Arc::new(LayoutJob::simple_format(
-                    format!("[{n}]"),
-                    TextFormat {
-                        color: ui.visuals().weak_text_color(),
-                        ..Default::default()
-                    },
-                )))
-                .into_galley_impl(
-                    ui.ctx(),
-                    ui.style(),
-                    TextWrapping::default(),
-                    FontSelection::Default,
-                    egui::Align::Center,
-                )
-            })
-            .clone()
-    })
-}
-
-/// Pre-renders galleys for the directory-prefix labels used in search /
-/// multi-directory mode, so the per-row draw path can reuse them instead of
-/// relaying out text every frame.
-fn directory_prefix_galley(ui: &Ui, dir: &str) -> Arc<Galley> {
-    DIR_POOL.with_borrow_mut(|pool| {
-        if let Some(galley) = pool.get(dir) {
-            return galley.clone();
-        }
-        let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-            format!("{dir}{}", std::path::MAIN_SEPARATOR),
-            FontId::default(),
-            ui.visuals().weak_text_color(),
-        )))
-        .into_galley_impl(
-            ui.ctx(),
-            ui.style(),
-            TextWrapping::default(),
-            FontSelection::Default,
-            egui::Align::Center,
-        );
-        pool.put(dir.to_owned(), galley.clone());
-        galley
-    })
-}
-
 pub fn populate_sizes_pool(components: impl Iterator<Item = u64>, ui: &Context) {
     SIZES_POOL.with_borrow_mut(|pool| {
         for component in components {
@@ -272,44 +228,23 @@ pub enum CurrentPath {
     None,
     One(PathBuf),
     Multiple(Vec<PathBuf>),
-}
-
-impl UserData for CurrentPath {
-    fn add_fields<F: mlua::UserDataFields<Self>>(_: &mut F) {}
-
-    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("print_path", |c, this, ()| {
-            let path = this.get_name_from_path();
-            let full_path: Cow<'static, str> = match this {
-                Self::One(path_buf) => path_buf
-                    .to_full_path()
-                    .map(|p| Cow::Owned(p.to_string_lossy().to_string())),
-                _ => None,
-            }
-            .unwrap_or_default();
-            let print: Function = c.globals().get("print")?;
-            print.call::<()>(("FROM LUA: ", path.as_str()))?;
-            print.call::<()>(("Full path: ", full_path.as_ref()))?;
-            Ok(())
-        });
-
-        // Constructor
-        // methods.add_meta_function(MetaMethod::Call, |_, ()| Ok(Rectangle::default()));
-    }
+    /// The Recycle Bin / Trash, listed by `fileops::trash_bin`.
+    Trash,
 }
 
 impl CurrentPath {
-    pub fn print_from_lua(&self) {
-        let data = self.clone();
-        LUA_INSTANCE.with_borrow(|f| {
-            let globals = f.globals();
-            _ = globals.set("cur_dir", data);
-            let _ = f.load("cur_dir:print_path()").exec();
-        });
+    /// Every folder shown: one, several (favorites search) or none.
+    pub fn get_paths(&self) -> Vec<PathBuf> {
+        match self {
+            Self::None | Self::Trash => Vec::new(),
+            Self::One(path) => vec![path.clone()],
+            Self::Multiple(paths) => paths.clone(),
+        }
     }
+
     pub fn get_path(&self) -> Option<PathBuf> {
         match self {
-            Self::None => None,
+            Self::None | Self::Trash => None,
             Self::One(path) => Some(path.clone()),
             Self::Multiple(paths) => {
                 let mut common_path = paths.first()?.clone();
@@ -371,6 +306,7 @@ impl CurrentPath {
                 }
             }
             Self::Multiple(_) => "Multiple".into(),
+            Self::Trash => crate::fileops::trash_bin::LABEL.into(),
         }
     }
     pub fn parent(&self) -> Option<PathBuf> {
@@ -389,31 +325,169 @@ impl CurrentPath {
     pub const fn multiple_paths(&self) -> bool {
         matches!(self, Self::Multiple(_))
     }
+
+    /// Whether this is the Recycle Bin view, whose rows are not real files.
+    pub const fn is_trash(&self) -> bool {
+        matches!(self, Self::Trash)
+    }
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TabData {
-    pub list: Vec<DirEntry>,
-    pub visible_entries: Vec<usize>,
+    /// Shared, immutable listing (also held by the directory cache).
+    pub listing: Arc<Listing>,
+    /// Display order: indices into `listing`.
+    pub order: Vec<u32>,
+    /// Rows that pass the current filter, in display order.
+    pub visible_entries: Vec<u32>,
+    /// Bumped whenever `order` changes, so filter narrowing can detect it.
+    pub(crate) order_generation: u64,
+    pub(crate) filter_key: Option<crate::app::dir_handling::FilterKey>,
     pub active_watch_specs: Vec<(PathBuf, notify::RecursiveMode)>,
     pub current_path: CurrentPath,
     pub show_hidden: bool,
     pub display_type: DisplayType,
     pub search: Option<Search>,
-    pub loading: bool,
-    pub loading_progress: Option<String>,
+    /// The search options kept while the search bar is closed.
+    pub(crate) closed_search: Option<Search>,
+    /// The address bar is being edited: its text and suggestions.
+    pub(crate) path_edit: Option<crate::app::directory_path_info::DirectoryPathInfo>,
+    pub load: LoadState,
     pub(crate) refresh_generation: Arc<AtomicU64>,
-    pub(crate) pending_refresh: bool,
     pub(crate) cancel_token: Arc<AtomicBool>,
-    undoer: Undoer<CurrentPath>,
-    pub id: u32,
+    pub(crate) history: History,
+    pub id: TabId,
     pub top_display_path: TopDisplayPath,
-    pub dir_list: Option<DirList>,
     /// Memoised `(path, RecursiveMode)` watcher specs plus the input snapshot
     /// that produced them. Recomputed only when `current_path` / search depth /
     /// `extra_dirs` change, so the per-frame `should_refresh_for_directories`
     /// path avoids `walkdir` + `canonicalize` syscalls during change bursts.
     pub(crate) watcher_specs_cache: WatcherSpecsCache,
+    /// Directory symlinks followed by the last deep walk (extra watch roots).
+    pub(crate) linked_watch_roots: crate::app::dir_handling::LinkedWatchRoots,
+    /// Selected rows (positions in `visible_entries`), anchor and cursor.
+    pub selection: Selection,
+    /// What the selection referred to when last drawn; see [`SelectionSnapshot`].
+    selection_snapshot: Option<SelectionSnapshot>,
+    /// Items to select once a reload shows them, e.g. after "New folder".
+    pub(crate) pending_select: Option<crate::app::file_ops::PendingSelect>,
+    /// The search as last recorded for undo and history.
+    pub(crate) search_committed: Option<Search>,
+    /// When the search text last changed without being recorded yet.
+    pub(crate) search_dirty_since: Option<std::time::Instant>,
+    /// The next path change restores a history entry, so it keeps the search.
+    pub(crate) keep_search_once: bool,
+    /// Quick Look is showing a large preview of the focused item.
+    pub(crate) quick_look: bool,
+    /// Scroll and pointer state of the files view.
+    pub(crate) view: ViewState,
+    /// Restored but not read yet: the folder is read when the tab is first
+    /// shown, so tabs left in the background never touch the disk (nor make
+    /// macOS ask for folder access) at launch.
+    pub(crate) unloaded: bool,
+}
+
+/// Whether a tab's listing is being read in the background.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum LoadState {
+    #[default]
+    Idle,
+    Loading {
+        /// What the reader is doing, once it has said.
+        progress: Option<String>,
+        /// Another refresh was asked for meanwhile: run it when this ends.
+        rerun: bool,
+    },
+}
+
+impl LoadState {
+    pub const fn loading(progress: Option<String>) -> Self {
+        Self::Loading {
+            progress,
+            rerun: false,
+        }
+    }
+    pub const fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading { .. })
+    }
+    pub fn progress(&self) -> Option<&str> {
+        match self {
+            Self::Loading { progress, .. } => progress.as_deref(),
+            Self::Idle => None,
+        }
+    }
+    pub fn set_progress(&mut self, text: String) {
+        if let Self::Loading { progress, .. } = self {
+            *progress = Some(text);
+        }
+    }
+    /// Asks for a refresh once the running load ends. False when idle,
+    /// so the caller refreshes now.
+    pub const fn defer_refresh(&mut self) -> bool {
+        match self {
+            Self::Loading { rerun, .. } => {
+                *rerun = true;
+                true
+            }
+            Self::Idle => false,
+        }
+    }
+    /// Drops a refresh deferred by [`Self::defer_refresh`].
+    pub const fn cancel_rerun(&mut self) {
+        if let Self::Loading { rerun, .. } = self {
+            *rerun = false;
+        }
+    }
+    /// Ends the load. Returns whether a deferred refresh is waiting.
+    pub fn finish(&mut self) -> bool {
+        matches!(std::mem::take(self), Self::Loading { rerun: true, .. })
+    }
+}
+
+/// Scroll and pointer state of a tab's files view, measured while drawing.
+#[derive(Debug, Default)]
+pub struct ViewState {
+    /// Full rows that fit on screen, for Page Up and Page Down.
+    pub page_rows: usize,
+    /// The scroll offset when last drawn; saved in the history on leaving.
+    pub scroll_y: f32,
+    /// Height of the list's sticky header row when last drawn.
+    pub header_height: f32,
+    /// Distance between the tops of two rows when last drawn.
+    pub row_pitch: f32,
+    /// Empty space between two rows (part of `row_pitch`): 0 in the list.
+    pub row_gap: f32,
+    /// Height of the area rows scroll in, below any header.
+    pub viewport_height: f32,
+    /// Items per row: 1 in the list.
+    pub columns: usize,
+    /// Screen area the rows scroll in (below any header), when last drawn.
+    pub rows_area: Option<egui::Rect>,
+    /// Grid tiles when last drawn: left edge of the first column, tile
+    /// size and the gaps between tiles. For hit-testing drag selection.
+    pub tiles: Option<GridGeometry>,
+    /// The folder shown when last drawn: a new one starts at the top.
+    shown_path: Option<CurrentPath>,
+    /// Where to scroll once the listing has loaded (Back / Forward).
+    restore_scroll: Option<f32>,
+}
+
+/// Where the grid's tiles were drawn, in screen points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridGeometry {
+    pub left: f32,
+    pub tile: egui::Vec2,
+    pub gap: egui::Vec2,
+}
+
+/// Where a view should scroll this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScrollRequest {
+    /// Show this row, scrolling as little as possible.
+    Cursor(usize),
+    /// Scroll to this offset from the top.
+    Offset(f32),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -425,57 +499,270 @@ impl Default for PopupOpened {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
-pub struct Selected {
-    pub selected_fields: Vec<usize>,
-    pub just_changed: bool,
+/// Where egui memory keeps the tab's open row menu.
+fn popup_memory_id(tab: TabId) -> Id {
+    Id::new(("popup_opened", tab))
+}
+
+impl ViewState {
+    /// Whether the whole of row `index` was on screen when last drawn.
+    #[cfg(test)]
+    pub fn shows(&self, index: usize) -> bool {
+        let top = (index / self.columns.max(1)) as f32 * self.row_pitch;
+        top >= self.scroll_y - 0.5
+            && top + self.row_pitch - self.row_gap <= self.scroll_y + self.viewport_height + 0.5
+    }
 }
 
 impl TabData {
-    pub fn can_undo(&self) -> bool {
-        self.undoer.has_undo(&self.current_path)
+    /// Selects the items an operation created once the listing shows them.
+    fn apply_pending_select(&mut self) {
+        let Some(pending) = &self.pending_select else {
+            return;
+        };
+        if pending.since.elapsed() > std::time::Duration::from_secs(10) {
+            self.pending_select = None;
+            return;
+        }
+        let rows: Vec<usize> = self
+            .visible_entries
+            .iter()
+            .enumerate()
+            .filter(|&(_, &index)| {
+                let entry = self.listing.entry(index as usize);
+                let path = Path::new(entry.dir.as_ref()).join(entry.file_name);
+                pending.paths.contains(&path)
+            })
+            .map(|(row, _)| row)
+            .collect();
+        let Some(&first) = rows.first() else {
+            return;
+        };
+        let rename = pending.rename;
+        self.pending_select = None;
+        self.selection.select_only(first);
+        self.selection.set_rows(rows);
+        self.selection.just_changed = true;
+        if rename && let Some(entry) = self.entry_at(first) {
+            ActionToPerform::BeginRename(entry.get_path()).schedule();
+        }
     }
-    pub fn can_redo(&self) -> bool {
-        self.undoer.has_redo(&self.current_path)
+
+    fn reconcile_selection(&mut self) {
+        self.apply_pending_select();
+        let Some(previous) = &self.selection_snapshot else {
+            return;
+        };
+        if previous.directory != self.current_path {
+            self.selection.clear();
+            return;
+        }
+        let same_listing = Arc::ptr_eq(&previous.listing, &self.listing);
+        if same_listing && previous.visible_hash == slice_hash(&self.visible_entries) {
+            return;
+        }
+        if self.selection.is_empty() && previous.selected.is_empty() {
+            return;
+        }
+        let rows: Vec<usize> = if same_listing {
+            // Sorted or filtered: the same listing indices, new rows.
+            let mut wanted = fixedbitset::FixedBitSet::with_capacity(self.listing.len());
+            for &index in &previous.selected {
+                wanted.insert(index as usize);
+            }
+            self.visible_entries
+                .iter()
+                .enumerate()
+                .filter(|&(_, &index)| wanted.contains(index as usize))
+                .map(|(row, _)| row)
+                .collect()
+        } else {
+            // Reloaded: match the previously selected files by path.
+            let wanted: foldhash::HashSet<(&str, &str)> = previous
+                .selected
+                .iter()
+                .filter(|&&index| (index as usize) < previous.listing.len())
+                .map(|&index| {
+                    let entry = previous.listing.entry(index as usize);
+                    (entry.dir.as_ref(), entry.file_name)
+                })
+                .collect();
+            self.visible_entries
+                .iter()
+                .enumerate()
+                .filter(|&(_, &index)| {
+                    let entry = self.listing.entry(index as usize);
+                    wanted.contains(&(entry.dir.as_ref(), entry.file_name))
+                })
+                .map(|(row, _)| row)
+                .collect()
+        };
+        // The cursor follows its file too, even when it is not selected.
+        let cursor_row = previous
+            .cursor
+            .filter(|_| same_listing)
+            .and_then(|index| self.visible_entries.iter().position(|&i| i == index));
+        self.selection.set_rows(rows);
+        if let Some(row) = cursor_row {
+            self.selection.set_cursor(row);
+        }
+        self.selection.truncate(self.visible_entries.len());
     }
-    pub fn undo(&mut self) -> Option<ActionToPerform> {
-        self.undoer.undo(&self.current_path).map(|s| {
+
+    fn remember_selection(&mut self) {
+        let visible_hash = slice_hash(&self.visible_entries);
+        let selection_hash = {
+            use std::hash::{BuildHasher, Hash, Hasher};
+            let mut hasher = foldhash::fast::FixedState::default().build_hasher();
+            for row in self.selection.rows() {
+                row.hash(&mut hasher);
+            }
+            self.selection.cursor().hash(&mut hasher);
+            hasher.finish()
+        };
+        if let Some(previous) = &self.selection_snapshot
+            && previous.directory == self.current_path
+            && Arc::ptr_eq(&previous.listing, &self.listing)
+            && previous.visible_hash == visible_hash
+            && previous.selection_hash == selection_hash
+        {
+            return;
+        }
+        let selected = self
+            .selection
+            .rows()
+            .filter_map(|row| self.visible_entries.get(row).copied())
+            .collect();
+        let cursor = self
+            .selection
+            .cursor()
+            .and_then(|row| self.visible_entries.get(row).copied());
+        self.selection_snapshot = Some(SelectionSnapshot {
+            directory: self.current_path.clone(),
+            listing: Arc::clone(&self.listing),
+            visible_hash,
+            selection_hash,
+            selected,
+            cursor,
+        });
+    }
+
+    /// Where you are in this folder: the scroll position and selection.
+    pub(crate) fn current_place(&self) -> crate::app::history::Place {
+        crate::app::history::Place {
+            scroll_y: self.view.scroll_y,
+            selected: self
+                .selection
+                .rows()
+                .filter_map(|row| self.entry_at(row).map(|entry| entry.get_path()))
+                .collect(),
+        }
+    }
+
+    /// Takes where the view should scroll this frame: the top of a newly
+    /// shown folder, a position restored by Back / Forward once loaded, or
+    /// the cursor after it moved (`cursor_moved`).
+    pub(crate) fn take_scroll_request(&mut self, cursor_moved: bool) -> Option<ScrollRequest> {
+        if self.view.shown_path.as_ref() != Some(&self.current_path) {
+            self.view.shown_path = Some(self.current_path.clone());
+            if self.view.restore_scroll.is_none() {
+                return Some(ScrollRequest::Offset(0.0));
+            }
+        }
+        if !self.load.is_loading()
+            && let Some(offset) = self.view.restore_scroll.take()
+        {
+            return Some(ScrollRequest::Offset(offset));
+        }
+        cursor_moved
+            .then(|| self.selection.cursor())
+            .flatten()
+            .map(ScrollRequest::Cursor)
+    }
+
+    /// Whether Back / Forward is bringing back a place, which the next path
+    /// change must not overwrite.
+    pub(crate) const fn view_restoring(&self) -> bool {
+        self.view.restore_scroll.is_some()
+    }
+
+    /// Brings back where you were in the entry Back / Forward lands on.
+    fn restore_place(&mut self) {
+        let place = self.history.place().cloned().unwrap_or_default();
+        self.view.restore_scroll = Some(place.scroll_y);
+        self.pending_select =
+            (!place.selected.is_empty()).then(|| crate::app::file_ops::PendingSelect {
+                paths: place.selected,
+                rename: false,
+                since: std::time::Instant::now(),
+            });
+    }
+
+    pub const fn can_go_back(&self) -> bool {
+        self.history.can_go_back()
+    }
+    pub const fn can_go_forward(&self) -> bool {
+        self.history.can_go_forward()
+    }
+    /// Steps back in this tab's history and returns the navigation to run.
+    pub fn go_back(&mut self) -> Option<ActionToPerform> {
+        let place = self.current_place();
+        self.history.save_place(place);
+        let entry = self.history.back();
+        if entry.is_some() {
+            self.restore_place();
+        }
+        entry.map(|entry| {
             ActionToPerform::TabAction(
                 super::commands::TabTarget::TabWithId(self.id),
-                TabAction::ChangePaths(s.to_owned()),
+                TabAction::Restore(entry),
             )
         })
     }
-    pub fn redo(&mut self) -> Option<ActionToPerform> {
-        self.undoer.redo(&self.current_path).map(|s| {
+    /// Steps forward in this tab's history and returns the navigation to run.
+    pub fn go_forward(&mut self) -> Option<ActionToPerform> {
+        let place = self.current_place();
+        self.history.save_place(place);
+        let entry = self.history.forward();
+        if entry.is_some() {
+            self.restore_place();
+        }
+        entry.map(|entry| {
             ActionToPerform::TabAction(
                 super::commands::TabTarget::TabWithId(self.id),
-                TabAction::ChangePaths(s.to_owned()),
+                TabAction::Restore(entry),
             )
         })
     }
-    pub fn toggle_search(&mut self, data_source: &impl DataHolder) {
-        if let Some(search) = &self.search {
+    /// Closes the search bar without navigating, keeping its options for
+    /// the next time it opens.
+    pub fn end_search(&mut self) {
+        if let Some(search) = self.search.take() {
+            self.closed_search = Some(Search {
+                value: String::new(),
+                chips: Vec::new(),
+                saved_from: None,
+                ..search
+            });
+        }
+    }
+
+    pub fn toggle_search(&mut self) {
+        if let Some(search) = self.search.take() {
             let was_deep = search.depth > 1;
-            data_source.data_set_tab::<Search>(self.id, search.clone());
-            self.search = None;
+            self.closed_search = Some(search);
             if self.current_path.multiple_paths() {
-                let Some(path) = self
-                    .undoer
-                    .undo(&self.current_path)
-                    .map(std::borrow::ToOwned::to_owned)
-                else {
+                let Some(mut entry) = self.history.back() else {
                     return;
                 };
-                TabAction::ChangePaths(path).schedule_tab(self.id);
-                // self.set_path(path, Some(data_source));
+                // Leaving favorites closes the search, whatever was there.
+                entry.search = None;
+                TabAction::Restore(entry).schedule_tab(self.id);
             } else if was_deep {
                 TabAction::RequestFilesRefresh.schedule_tab(self.id);
             }
         } else {
-            let search = data_source
-                .data_get_tab::<Search>(self.id)
-                .unwrap_or_default();
+            let search = self.closed_search.take().unwrap_or_default();
             let restored_depth = search.depth;
             let is_multiple = self.current_path.multiple_paths();
             self.search = Some(search);
@@ -500,96 +787,142 @@ pub fn build_collator(case_sensitive: bool) -> CollatorBorrowed<'static> {
     Collator::try_new(prefs.into(), options).expect("Failed to create collator")
 }
 
-pub fn get_id() -> u32 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+/// Names one tab for its whole life, whichever pane or window it is in.
+/// Ids are never reused, so a stale one finds nothing instead of another tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TabId(std::num::NonZeroU32);
+
+impl TabId {
+    /// The id as a number, for plugins.
+    pub const fn number(self) -> u32 {
+        self.0.get()
+    }
+
+    fn next() -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(1);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self(std::num::NonZeroU32::new(id).expect("tab ids start at 1"))
+    }
+}
+
+impl std::fmt::Display for TabId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 impl TabData {
-    pub const fn is_searching(&self) -> bool {
-        match &self.search {
-            Some(Search {
-                value,
-                terms,
-                depth: _,
-                case_sensitive: _,
-                term_type: _,
-                extra_dirs: _,
-                match_mode: _,
-                new_dir_input: _,
-                save_name_input: _,
-            }) => !value.is_empty() || !terms.is_empty(),
-            None => false,
-        }
+    /// Stops what a closed tab still runs, its load and its watchers, and
+    /// forgets the per-tab state kept in egui memory.
+    pub fn release(self, watchers: &mut crate::watcher::DirectoryWatchers, ctx: &Context) {
+        use std::sync::atomic::Ordering;
+        self.cancel_token.store(true, Ordering::SeqCst);
+        self.refresh_generation.fetch_add(1, Ordering::SeqCst);
+        watchers.stop_many(self.active_watch_specs.into_iter().map(|(path, _)| path));
+        ctx.data_mut(|data| data.remove::<PopupOpened>(popup_memory_id(self.id)));
     }
 
-    /// Materialise the entry visible at `visible_row` (0-based in visible order).
-    ///
-    /// For single-directory reads the backing store is a lazily-materialised
-    /// [`DirList`] (so [`TabData::list`] stays empty and full [`DirEntry`]s are
-    /// only built for the rows actually shown — roughly half the memory of
-    /// keeping both stores). For searches / multi-directory reads `list` is the
-    /// populated store and the entry is cloned from it.
-    pub fn entry_at(&self, visible_row: usize) -> Option<DirEntry> {
-        let data_idx = *self.visible_entries.get(visible_row)?;
-        self.dir_list.as_ref().map_or_else(
-            || self.list.get(data_idx).cloned(),
-            |list| Some(list.materialize(data_idx)),
-        )
+    pub fn is_searching(&self) -> bool {
+        self.search.as_ref().is_some_and(Search::has_query)
+    }
+
+    /// Borrow the entry visible at `visible_row` (0-based in visible order).
+    /// No allocation: the row borrows the shared listing.
+    pub fn entry_at(&self, visible_row: usize) -> Option<EntryRef<'_>> {
+        let index = *self.visible_entries.get(visible_row)? as usize;
+        Some(self.listing.entry(index))
     }
 
     pub fn total_entry_count(&self) -> usize {
-        self.dir_list
-            .as_ref()
-            .map_or(self.list.len(), DirList::total_count)
+        self.listing.len()
     }
     pub fn from_path(path: &Path) -> Self {
+        let new = Self::blank(path);
+        TabAction::ChangePaths(CurrentPath::One(path.into())).schedule_tab(new.id);
+        new
+    }
+
+    /// A tab showing `path` that reads it only once it is first drawn.
+    pub fn unloaded(path: &Path) -> Self {
+        let mut tab = Self::blank(path);
+        tab.current_path = CurrentPath::One(path.to_path_buf());
+        tab.unloaded = true;
+        tab
+    }
+
+    fn blank(path: &Path) -> Self {
         let mut top_display_path = TopDisplayPath::default();
-        top_display_path.build(path, false);
-        let new = Self {
-            id: get_id(),
-            list: vec![],
+        top_display_path.build(path);
+        Self {
+            id: TabId::next(),
+            listing: Arc::default(),
+            order: vec![],
             visible_entries: vec![],
+            order_generation: 0,
+            filter_key: None,
             active_watch_specs: vec![],
             current_path: CurrentPath::None,
             show_hidden: false,
             display_type: DisplayType::default(),
             search: None,
-            loading: false,
-            loading_progress: None,
+            closed_search: None,
+            path_edit: None,
+            load: LoadState::Idle,
             refresh_generation: Arc::new(AtomicU64::new(0)),
-            pending_refresh: false,
             cancel_token: Arc::new(AtomicBool::new(false)),
-            undoer: Undoer::default(),
+            history: History::default(),
             top_display_path,
-            dir_list: None,
             watcher_specs_cache: WatcherSpecsCache::default(),
-        };
-        TabAction::ChangePaths(CurrentPath::One(path.into())).schedule_tab(new.id);
-        new
+            linked_watch_roots: crate::app::dir_handling::LinkedWatchRoots::default(),
+            selection: Selection::default(),
+            selection_snapshot: None,
+            pending_select: None,
+            search_committed: None,
+            search_dirty_since: None,
+            keep_search_once: false,
+            quick_look: false,
+            view: ViewState::default(),
+            unloaded: false,
+        }
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct MyTabViewer<'a> {
+    tabs: &'a mut TabStore,
     closeable: bool,
+    /// The window has more than one tab, so one can move out.
+    has_other_tabs: bool,
     tab_paths: Vec<PathBuf>,
-    active_tab: u32,
+    active_tab: TabId,
     focused: bool,
     assets: &'a mut AssetManager,
+    cut: Arc<std::collections::HashSet<PathBuf>>,
+    /// Tab-bar actions collected while drawing, applied after the dock is shown.
+    tab_requests: TabRequests,
+    /// Grid tooltips show full paths (search results can share names).
+    show_full_paths: bool,
 }
 
-// Column dimension constants used in both the header and data rows of the file grid.
-const COL_MODIFIED_W: f32 = 125.0;
-const COL_MODIFIED_MIN: f32 = 100.0;
-const COL_MODIFIED_MAX: f32 = 150.0;
-const COL_SIZE_W: f32 = 125.0;
-const COL_SIZE_MIN: f32 = 100.0;
-const COL_SIZE_MAX: f32 = 150.0;
+/// Tab-bar actions that change the dock layout, which can't be done while
+/// the dock is being drawn.
+#[derive(Default)]
+struct TabRequests {
+    /// Panes whose "+" (or "New tab") was used: open a tab there.
+    add: Vec<(egui_dock::NodePath, Option<PathBuf>)>,
+    /// Tabs to close.
+    close: Vec<TabId>,
+    /// Close every tab except this one.
+    close_others: Option<TabId>,
+    /// Move this tab into a window of its own.
+    to_new_window: Option<TabId>,
+    /// Tabs the dock already took out of the layout while drawing.
+    closed: Vec<TabId>,
+}
+
 const GRID_TILE_PADDING: f32 = 10.0;
 const GRID_VIEW_PADDING: f32 = 8.0;
-const GRID_TILE_TEXT_HEIGHT: f32 = 20.0;
-const GRID_TILE_HINT_HEIGHT: f32 = 18.0;
 
 const fn tile_preview_intent(
     eligible: bool,
@@ -618,60 +951,135 @@ struct RowResult {
 }
 
 /// Shared per-frame setup extracted from [`MyTabViewer::grid_view`] and
-/// [`MyTabViewer::list_view`]: keyboard shortcuts (toggle search, toggle
-/// hidden, go to parent, undoer feed) handled identically by both views, plus
-/// the per-tab interaction state (selection, open popup, favorites) loaded once
-/// instead of in each view. Returns `None` when the caller should early-return
-/// (parent navigation was scheduled, or the tab is still loading).
+/// [`MyTabViewer::list_view`]: keyboard shortcuts (toggle hidden, go to
+/// parent, undoer feed) handled identically by both views, plus the per-tab
+/// interaction state (open popup, favorites) loaded once instead of in each
+/// view. Returns `None` when the caller should early-return (parent
+/// navigation was scheduled, or the tab is still loading).
 struct ViewHeader {
-    cmd: bool,
-    shift_pressed: bool,
-    tab_id: u32,
+    tab_id: TabId,
     tab_popup_id: Id,
-    selected_tabs: Selected,
     opened_popup: usize,
-    just_changed: bool,
+    /// Where to scroll this frame: the moved cursor, or a folder's start or
+    /// restored position.
+    scroll: Option<ScrollRequest>,
     favorites: Locations,
+    /// Click target behind the rows: clicking empty space clears the
+    /// selection, dragging selects the items in a rectangle and
+    /// right-clicking it opens the folder's menu.
+    background: egui::Response,
+}
+
+/// Draws the keyboard cursor's ring: a thin inset outline, so the cursor
+/// shows inside a selected row as well as on its own.
+/// Tells assistive technology what a row or tile is.
+fn describe_entry(response: &egui::Response, entry: &EntryRef<'_>, selected: bool) {
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            true,
+            selected,
+            entry.file_name,
+        )
+    });
+}
+
+fn draw_cursor_ring(ui: &Ui, rect: egui::Rect, radius: f32) {
+    ui.painter().rect_stroke(
+        rect.shrink(2.0),
+        radius,
+        egui::Stroke::new(1.0, ui.visuals().text_color().gamma_multiply(0.6)),
+        egui::StrokeKind::Inside,
+    );
 }
 
 impl MyTabViewer<'_> {
+    /// The row whose cursor ring to draw: the cursor, while this view has
+    /// keyboard focus and the cursor isn't simply the one selected row.
+    fn cursor_ring_row(&self, tab: &TabData) -> Option<usize> {
+        let cursor = tab.selection.cursor()?;
+        let only_selected = tab.selection.len() == 1 && tab.selection.contains(cursor);
+        (self.focused && self.active_tab == tab.id && !only_selected).then_some(cursor)
+    }
+
+    /// Selection color: the accent while this view has keyboard focus,
+    /// faded otherwise, so the focused pane of a split stands out.
+    fn selection_fill(&self, ui: &Ui, tab: &TabData) -> Color32 {
+        let fill = ui.visuals().selection.bg_fill;
+        if self.focused && self.active_tab == tab.id {
+            fill
+        } else {
+            ui.visuals().gray_out(fill)
+        }
+    }
+
+    /// The message shown in place of an empty folder.
+    fn empty_folder_message(ui: &mut Ui, tab: &TabData) {
+        let area = ui.available_rect_before_wrap();
+        let rect = egui::Rect::from_center_size(area.center(), egui::vec2(area.width(), 80.0));
+        let mut message = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+        );
+        if tab.current_path.is_trash() {
+            message.weak(format!("The {} is empty", crate::fileops::trash_bin::LABEL));
+            return;
+        }
+        if Self::access_denied(ui, tab) {
+            message.weak("DirFleet doesn't have permission to open this folder");
+            #[cfg(target_os = "macos")]
+            if message.link("Open Privacy settings").clicked() {
+                crate::shell::open_full_disk_access_settings();
+            }
+            return;
+        }
+        message.weak("This folder is empty");
+        if !tab.show_hidden {
+            message.weak("Hidden items aren't shown.");
+            if message.link("Show hidden items").clicked() {
+                ActionToPerform::RunCommand(crate::app::keymap::Command::ToggleHidden).schedule();
+            }
+        }
+    }
+
+    /// Whether the folder came back empty because it can't be read. Asked
+    /// once per loaded listing, not every frame.
+    fn access_denied(ui: &Ui, tab: &TabData) -> bool {
+        let Some(path) = tab.current_path.single_path() else {
+            return false;
+        };
+        let id = Id::new(("access_denied", tab.id, Arc::as_ptr(&tab.listing)));
+        ui.data_mut(|data| {
+            *data.get_temp_mut_or_insert_with(id, || {
+                std::fs::read_dir(&path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+            })
+        })
+    }
+
+    /// Whether the entry was cut to the clipboard and should look dimmed.
+    fn is_cut(&self, entry: &EntryRef<'_>) -> bool {
+        !self.cut.is_empty() && self.cut.contains(&entry.get_path())
+    }
+
     /// Shared header for both views. Runs the keyboard shortcuts that
     /// `grid_view` and `list_view` previously duplicated verbatim, draws the
     /// loading spinner, and loads the per-tab interaction state into a
     /// [`ViewHeader`]. Returning `None` signals the caller must early-return.
-    fn begin_view(&self, ui: &mut Ui, tab: &mut TabData) -> Option<ViewHeader> {
-        if !matches!(&tab.current_path, CurrentPath::None) {
-            tab.undoer
-                .feed_state(ui.ctx().input(|input| input.time), &tab.current_path);
-        }
-        if self.active_tab == tab.id && ui.key_with_command_pressed(egui::Key::H) {
-            let mut show_hidden =
-                ui.data_get_path_or_persisted::<DirectoryShowHidden>(&tab.current_path);
-            show_hidden.0 = !show_hidden.0;
-            ui.data_set_path(&tab.current_path, show_hidden.data);
-            ActionToPerform::ViewSettingsChanged(super::DataSource::Local).schedule();
-        }
-        if self.focused && ui.key_with_command_pressed(egui::Key::ArrowUp) && !tab.is_searching() {
-            let parent = tab.current_path.parent()?;
-            TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
-            return None;
-        }
-
-        if tab.loading && tab.visible_entries.is_empty() {
+    fn begin_view(ui: &mut Ui, tab: &mut TabData) -> Option<ViewHeader> {
+        if tab.load.is_loading() && tab.visible_entries.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.spinner();
-                ui.label(tab.loading_progress.as_deref().unwrap_or("Loading..."));
+                ui.label(tab.load.progress().unwrap_or("Loading..."));
             });
             return None;
         }
 
         let tab_id = tab.id;
-        let mut selected_tabs = ui
-            .data_get_path::<Selected>(&tab.current_path)
-            .unwrap_or_default();
         let opened_popup = ui
             .ctx()
-            .data_get_tab::<PopupOpened>(tab_id)
+            .data(|data| data.get_temp::<PopupOpened>(popup_memory_id(tab_id)))
             .and_then(|d| {
                 if egui::Popup::is_id_open(ui.ctx(), d.0) {
                     Some(d.1)
@@ -680,1297 +1088,106 @@ impl MyTabViewer<'_> {
                 }
             })
             .unwrap_or(usize::MAX);
-        let just_changed = if selected_tabs.just_changed {
-            selected_tabs.just_changed = false;
-            ui.data_set_path(&tab.current_path, selected_tabs.clone());
-            true
-        } else {
-            false
-        };
-
+        let just_changed = std::mem::take(&mut tab.selection.just_changed);
+        let scroll = tab.take_scroll_request(just_changed);
+        // Registered before the rows, so rows (added later) win the hit test.
+        let background = ui.interact(
+            ui.available_rect_before_wrap(),
+            Id::new("view_background").with(tab_id),
+            egui::Sense::click_and_drag(),
+        );
+        if !tab.load.is_loading() && tab.visible_entries.is_empty() && !tab.is_searching() {
+            Self::empty_folder_message(ui, tab);
+        }
         Some(ViewHeader {
-            cmd: ui.command_pressed(),
-            shift_pressed: ui.input(|i| i.modifiers.shift),
+            background,
             tab_id,
             tab_popup_id: Id::new(tab_id).with(1500),
-            selected_tabs,
             opened_popup,
-            just_changed,
+            scroll,
             favorites: ui.data_get_persisted::<Locations>().unwrap_or_default(),
         })
-    }
-
-    fn grid_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
-        let Some(ViewHeader {
-            cmd,
-            shift_pressed,
-            tab_popup_id,
-            mut selected_tabs,
-            opened_popup,
-            just_changed,
-            favorites,
-            ..
-        }) = self.begin_view(ui, tab)
-        else {
-            return;
-        };
-
-        let entries_len = tab.visible_entries.len();
-        let icon_size = self.assets.icon_size();
-        let tile_width = icon_size.tile_width();
-        let tile_height = icon_size.tile_height();
-        let preview_size = Vec2::new(tile_width - 20.0, tile_height - 40.0);
-        let item_spacing = ui.spacing().item_spacing;
-        let content_width = GRID_VIEW_PADDING
-            .mul_add(-2.0, ui.available_width())
-            .max(tile_width);
-        let columns = ((content_width + item_spacing.x) / (tile_width + item_spacing.x))
-            .floor()
-            .max(1.0) as usize;
-        let used_width = (columns as f32).mul_add(
-            tile_width,
-            (columns.saturating_sub(1)) as f32 * item_spacing.x,
-        );
-        let side_padding = (content_width - used_width)
-            .max(0.0)
-            .mul_add(0.5, GRID_VIEW_PADDING);
-        let row_count = entries_len.div_ceil(columns);
-
-        let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
-        let inspector_owns_preview = ui
-            .ctx()
-            .data(|data| data.get_temp::<bool>(Id::new("inspector_owns_preview")))
-            .unwrap_or(false);
-        let mut selected_inline_budget: u32 =
-            u32::from(self.assets.selected_previews_enabled() && !inspector_owns_preview);
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, tile_height, row_count, |ui, row_range| {
-                let visible_rows = row_range.clone();
-                for row in row_range {
-                    ui.horizontal_top(|ui| {
-                        ui.add_space(side_padding);
-                        ui.spacing_mut().item_spacing.x = item_spacing.x;
-
-                        for col in 0..columns {
-                            let row_index = row * columns + col;
-                            if row_index >= entries_len {
-                                break;
-                            }
-
-                            let Some(val) = tab.entry_at(row_index) else {
-                                continue;
-                            };
-                            let response = self.draw_grid_tile(
-                                ui,
-                                &val,
-                                tile_width,
-                                tile_height,
-                                selected_tabs.selected_fields.contains(&row_index),
-                                row_index == opened_popup,
-                                cmd,
-                                row_index + 1,
-                                &mut selected_inline_budget,
-                            );
-                            row_results.push(RowResult {
-                                row_index,
-                                response,
-                            });
-                        }
-                    });
-                }
-                self.prefetch_grid_rows(ui.ctx(), tab, visible_rows, columns, preview_size);
-            });
-
-        self.process_grid_interactions(
-            ui,
-            tab,
-            &mut selected_tabs,
-            shift_pressed,
-            just_changed,
-            tab_popup_id,
-            &favorites,
-            &row_results,
-        );
-        self.handle_grid_keyboard_navigation(ui, tab, &mut selected_tabs, shift_pressed, columns);
-    }
-    fn prefetch_grid_rows(
-        &mut self,
-        ctx: &egui::Context,
-        tab: &TabData,
-        visible_rows: std::ops::Range<usize>,
-        columns: usize,
-        preview_size: Vec2,
-    ) {
-        let row_count = tab.visible_entries.len().div_ceil(columns);
-        let pixels_per_point = ctx.pixels_per_point();
-        let overscan_rows = visible_rows.len().max(1);
-        let prefetch_start = visible_rows.start.saturating_sub(overscan_rows);
-        let prefetch_end = visible_rows
-            .end
-            .saturating_add(overscan_rows)
-            .min(row_count);
-        for row in prefetch_start..prefetch_end {
-            if visible_rows.contains(&row) {
-                continue;
-            }
-            for col in 0..columns {
-                let index = row * columns + col;
-                if let Some(entry) = tab.entry_at(index) {
-                    self.assets.prefetch_entry_texture_for_size(
-                        &entry,
-                        preview_size,
-                        pixels_per_point,
-                    );
-                }
-            }
-        }
-    }
-
-    // Keep the virtualized grid layout together, as in the icon view.
-    #[allow(clippy::too_many_lines)]
-    fn list_view(&mut self, ui: &mut Ui, tab: &mut TabData) {
-        ensure_text_cache_style(ui);
-        let Some(ViewHeader {
-            cmd,
-            shift_pressed,
-            tab_id,
-            tab_popup_id,
-            mut selected_tabs,
-            opened_popup,
-            just_changed,
-            favorites,
-        }) = self.begin_view(ui, tab)
-        else {
-            return;
-        };
-
-        let is_searching = tab.is_searching();
-        let multiple_dirs = tab.deep_or_multiple_paths();
-        let text_height = crate::app::ui::control_height(ui);
-        let fluent = crate::app::ui::is_fluent(ui.ctx());
-        let name_column = if fluent {
-            minmax(length(0.0_f32), fr(1.0_f32))
-        } else {
-            fr(1.0_f32)
-        };
-        // Narrow Fluent split panes still need useful file-name space.
-        // Keep the legacy column layout on other platforms and in its tests.
-        let (modified_width, modified_min, modified_max, size_width, size_min, size_max) = if fluent
-        {
-            let modified = (ui.available_width() * 0.28).clamp(104.0, COL_MODIFIED_W);
-            let size = (ui.available_width() * 0.20).clamp(64.0, COL_SIZE_W);
-            (modified, modified, modified, size, size, size)
-        } else {
-            (
-                COL_MODIFIED_W,
-                COL_MODIFIED_MIN,
-                COL_MODIFIED_MAX,
-                COL_SIZE_W,
-                COL_SIZE_MIN,
-                COL_SIZE_MAX,
-            )
-        };
-
-        let entries_len = tab.visible_entries.len();
-
-        let mut new_sort = None;
-
-        // ── Unified virtual-grid: sticky header row + scrollable body ────────
-        //
-        // The grid has 3 columns:  [Name (flex) | Modified (fixed) | Size (fixed)]
-        // Row 1 is the sticky header.  Data rows follow via VirtualGridRowHelper.
-        // Row interactions are collected into a Vec and processed after the tui
-        // closure, because we cannot borrow `tab` inside the closure.
-        let header_row_count: u16 = 1;
-
-        // We need to collect row responses outside the tui closure because
-        // borrowing `tab` inside it is not possible.
-        let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
-
-        tui(ui, Id::new("file_grid").with(tab.id))
-        .reserve_available_space()
-        .style(taffy::Style {
-            padding: Rect {
-                left: LengthPercentage::ZERO,
-                right: LengthPercentage::ZERO,
-                top: LengthPercentage::ZERO,
-                bottom: LengthPercentage::ZERO,
-            },
-            margin: Rect {
-                left: LengthPercentageAuto::ZERO,
-                right: LengthPercentageAuto::ZERO,
-                top: LengthPercentageAuto::ZERO,
-                bottom: LengthPercentageAuto::ZERO,
-            },
-            flex_direction: taffy::FlexDirection::Column,
-            size: percent(1_f32),
-            max_size: percent(1_f32),
-            ..Default::default()
-        })
-        .show(|tui| {
-            // ── Scrollable grid container ────────────────────────────────
-            tui.style(taffy::Style {
-                display: taffy::Display::Grid,
-                overflow: taffy::Point {
-                    x: taffy::Overflow::Hidden,
-                    y: taffy::Overflow::Scroll,
-                },
-                margin: Rect {
-                    left: LengthPercentageAuto::ZERO,
-                    right: LengthPercentageAuto::ZERO,
-                    top: LengthPercentageAuto::ZERO,
-                    bottom: LengthPercentageAuto::ZERO,
-                },
-                padding: Rect {
-                    left: LengthPercentage::ZERO,
-                    right: LengthPercentage::ZERO,
-                    top: LengthPercentage::ZERO,
-                    bottom: LengthPercentage::ZERO,
-                },
-                // 3 columns: Name (1fr, fills remaining), Modified (fixed), Size (fixed)
-                grid_template_columns: vec![name_column, length(modified_width), length(size_width)],
-                size: taffy::Size {
-                    width: percent(1_f32),
-                    height: auto(),
-                },
-                max_size: percent(1_f32),
-                grid_auto_rows: vec![min_content()],
-                ..Default::default()
-            })
-            .add(|tui| {
-                // ── Virtual data rows ────────────────────────────────────
-                VirtualGridRowHelper::show(
-                    VirtualGridRowHelperParams {
-                        header_row_count,
-                        row_count: entries_len,
-                    },
-                    tui,
-                    |tui, info| {
-                        #[cfg(feature = "profiling")]
-                        puffin::profile_scope!("lwa_fm::MyTabViewer::ui::table_body");
-
-                        let mut idgen = info.id_gen();
-                        let grid_row_param = info.grid_row_setter();
-
-                        let row_index = info.idx;
-                        let Some(val) = tab.entry_at(row_index) else {
-                            return;
-                        };
-                        let val = &val;
-                        let is_dir = !val.is_file();
-                        let indexed = row_index + 1;
-
-                        let is_hovered = row_index == opened_popup;
-                        let is_selected = selected_tabs.selected_fields.contains(&row_index);
-
-                        let bg_color = if is_selected {
-                            tui.egui_ui().style().visuals.selection.bg_fill
-                        } else if is_hovered {
-                            tui.egui_ui().style().visuals.widgets.hovered.bg_fill
-                        } else if row_index % 2 == 0 {
-                            tui.egui_ui().style().visuals.faint_bg_color
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        };
-                        let height = length(text_height);
-                        let min_size = taffy::Size {
-                            width: length(0.0_f32),
-                            height,
-                        };
-
-                        // ── Name column ───────────────────────────────
-                        let name_response = tui
-                            .id(idgen())
-                            .mut_style(&grid_row_param)
-                            .mut_style(|style| {
-                                style.min_size = min_size;
-                                style.overflow.x = taffy::Overflow::Hidden;
-                                style.align_items = Some(taffy::AlignItems::Stretch);
-                            })
-                            .add_with_background_ui(
-                                |ui, container| {
-                                    ui.painter().rect_filled(
-                                        container.full_container(),
-                                        0.0,
-                                        bg_color,
-                                    );
-                                },
-                                |tui, ()| {
-                                    tui.mut_style(|style| {
-                                        style.padding =
-                                            Rect {
-                                                left: LengthPercentage::length(10.0),
-                                                right: LengthPercentage::length(10.0),
-                                                top: LengthPercentage::ZERO,
-                                                bottom: LengthPercentage::ZERO,
-                                            };
-                                        style.size.width = percent(1_f32);
-                                        style.overflow.x = taffy::Overflow::Hidden;
-                                        style.align_items =
-                                            Some(taffy::AlignItems::Center);
-                                    })
-                                    .ui(|ui: &mut Ui| {
-                                        #[cfg(feature = "profiling")]
-                                        puffin::profile_scope!(
-                                            "lwa_fm::MyTabViewer::ui::table_body::first_column"
-                                        );
-                                        let color = ui.visuals().text_color();
-
-                                          let (dir, file) = val.get_splitted_path();
-                                          let render_sz = self.assets.render_size_for(val).min(24.0);
-                                          ui.with_layout(
-                                              Layout::left_to_right(egui::Align::Center),
-                                              |ui| {
-                                                  if let Some(texture) = self.assets.request_entry_texture(val) {
-                                                      ui.add(
-                                                          egui::Image::new(&texture)
-                                                              .fit_to_exact_size(Vec2::splat(render_sz)),
-                                                      );
-                                                  } else {
-                                                      ui.allocate_space(Vec2::splat(render_sz));
-                                                  }
-                                                  if cmd && indexed < 10 {
-                                                      // Reuse a pre-rendered galley for the
-                                                      // `[1]`..`[9]` hint to avoid a text
-                                                      // layout every frame.
-                                                      let hint_galley = indexed_hint_galley(ui, indexed as u8);
-                                                      ui.add(
-                                                          egui::Label::new(WidgetText::Galley(hint_galley))
-                                                             .selectable(false)
-                                                             .sense(Sense::empty()),
-                                                     );
-                                                 }
-                                                if is_searching || multiple_dirs {
-                                                    // Reuse the pooled directory galley and
-                                                    // clip to the allocated rect instead of
-                                                    // relaying out (truncating) every frame.
-                                                    let galley = directory_prefix_galley(ui, dir);
-                                                        let available_width = ui.available_width();
-                                                        let w = galley.size().x.min(available_width * 0.35);
-                                                        let (rect, _resp) = ui.allocate_exact_size(
-                                                            egui::vec2(w, galley.size().y),
-                                                            Sense::empty(),
-                                                        );
-                                                        if ui.is_rect_visible(rect) {
-                                                            ui.painter()
-                                                                .with_clip_rect(rect)
-                                                                .add(
-                                                                    egui::epaint::TextShape::new(
-                                                                        rect.min,
-                                                                        galley,
-                                                                        ui.global_style().visuals.weak_text_color(),
-                                                                    ),
-                                                                );
-                                                        }
-                                                }
-
-                                                let galley = file_name_galley(ui, file, is_dir);
-                                                let file_name_response = {
-                                                    let available_width = ui.available_width();
-                                                    let galley = if galley.size().x > available_width {
-                                                        let mut job=(*galley.job).clone();
-                                                        job.wrap.max_width=available_width.max(0.0);
-                                                        job.wrap.max_rows=1;
-                                                        job.wrap.break_anywhere=true;
-                                                        ui.fonts_mut(|fonts|fonts.layout_job(job))
-                                                    } else {galley};
-                                                    let galley_width = galley.size().x.min(available_width);
-                                                    let (rect, response) = ui.allocate_exact_size(
-                                                        egui::vec2(galley_width, galley.size().y),
-                                                        Sense::empty(),
-                                                    );
-                                                    if ui.is_rect_visible(rect) {
-                                                        ui.painter().add(egui::epaint::TextShape::new(
-                                                            rect.min,
-                                                            galley,
-                                                            color,
-                                                        ));
-                                                    }
-                                                    response
-                                                };
-
-                                                file_name_response.on_hover_ui(|ui| {
-                                                    Self::show_entry_hover_preview(
-                                                        self.assets,
-                                                        ui,
-                                                        val,
-                                                    );
-                                                });
-                                            },
-                                        )
-                                        .response
-                                    })
-                                },
-                            )
-                            .main;
-
-                        // ── Modified column ───────────────────────────
-                        tui.id(idgen())
-                            .mut_style(&grid_row_param)
-                            .mut_style(|style| {
-                                style.padding = Rect {
-                                    left: LengthPercentage::length(10.0),
-                                    right: LengthPercentage::length(10.0),
-                                    top: LengthPercentage::ZERO,
-                                    bottom: LengthPercentage::ZERO,
-                                };
-                                style.size = taffy::Size {
-                                    width: length(modified_width),
-                                    height: auto(),
-                                };
-                                style.min_size = taffy::Size {
-                                    width: length(modified_min),
-                                    height,
-                                };
-                                style.max_size = taffy::Size {
-                                    width: length(modified_max),
-                                    height: auto(),
-                                };
-                                style.align_items = Some(taffy::AlignItems::Stretch);
-                                // style.align_items = Some(taffy::AlignItems::Center);
-                            })
-                            .add_with_background_ui(
-                                |ui, container| {
-                                    ui.painter().rect_filled(
-                                        container.full_container(),
-                                        0.0,
-                                        bg_color,
-                                    );
-                                },
-                                |tui, ()| {
-                                    tui.mut_style(|style| {
-                                        style.size.width = percent(1_f32);
-                                    })
-                                    .ui(|ui: &mut Ui| {
-                                        #[cfg(feature = "profiling")]
-                                        puffin::profile_scope!(
-                                            "lwa_fm::MyTabViewer::ui::table_body::time_column"
-                                        );
-
-                                        ui.with_layout(
-                                            Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if *val.meta.modified_at == 0 { ui.weak("Unavailable");return; }
-                                                let elapsed = val.meta.modified_at.elapsed();
-                                                populate_time_pool(
-                                                    std::iter::once(elapsed),
-                                                    ui.ctx(),
-                                                );
-                                                ui.add(elapsed);
-                                            },
-                                        )
-                                        .response
-                                    })
-                                },
-                            );
-
-                        // ── Size column ───────────────────────────────
-                        tui.id(idgen())
-                            .mut_style(&grid_row_param)
-                            .mut_style(|style| {
-                                style.padding = Rect {
-                                    left: LengthPercentage::length(10.0),
-                                    right: LengthPercentage::length(10.0),
-                                    top: LengthPercentage::ZERO,
-                                    bottom: LengthPercentage::ZERO,
-                                };
-                                style.size = taffy::Size {
-                                    width: length(size_width),
-                                    height: auto(),
-                                };
-                                style.min_size = taffy::Size {
-                                    width: length(size_min),
-                                    height,
-                                };
-                                style.max_size = taffy::Size {
-                                    width: length(size_max),
-                                    height: auto(),
-                                };
-                                style.align_items = Some(taffy::AlignItems::Stretch);
-                                // style.align_items = Some(taffy::AlignItems::Center);
-                            })
-                            .add_with_background_ui(
-                                |ui, container| {
-                                    ui.painter().rect_filled(
-                                        container.full_container(),
-                                        0.0,
-                                        bg_color,
-                                    );
-                                },
-                                |tui, ()| {
-                                    tui.mut_style(|style| {
-                                        style.size.width = percent(1_f32);
-                                    })
-                                    .ui(|ui: &mut Ui| {
-                                        #[cfg(feature = "profiling")]
-                                        puffin::profile_scope!(
-                                            "lwa_fm::MyTabViewer::ui::table_body::size_column"
-                                        );
-
-                                        if is_dir {
-                                            ui.allocate_response(
-                                                egui::Vec2::ZERO,
-                                                Sense::empty(),
-                                            )
-                                        } else {
-                                            ui.with_layout(
-                                                Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    populate_sizes_pool(
-                                                        std::iter::once(val.meta.size),
-                                                        ui.ctx(),
-                                                    );
-                                                    draw_size(ui, val.meta.size);
-                                                },
-                                            )
-                                            .response
-                                        }
-                                    })
-                                },
-                            );
-
-                        // ── Row interaction sense (full row) ──────────
-                        // Build a rect that spans the full available width at the
-                        // same vertical position as the name cell.
-                        let available_width =
-                            tui.egui_ui().available_rect_before_wrap().width();
-                        let full_row_rect = egui::Rect::from_min_max(
-                            egui::pos2(name_response.rect.left(), name_response.rect.top()),
-                            egui::pos2(
-                                name_response.rect.left() + available_width,
-                                name_response.rect.bottom(),
-                            ),
-                        );
-                        let row_response = tui.egui_ui_mut().interact(
-                            full_row_rect,
-                            Id::new("row_sense_full").with(tab_id).with(row_index),
-                            Sense::click(),
-                        );
-
-                        row_results.push(RowResult {
-                            row_index,
-                            response: row_response,
-                        });
-                    },
-                );
-
-                // ── Sticky header row (grid row 1) ───────────────────────
-                // Name header
-                tui.sticky([false, true].into())
-                    .id(tid(("header_name", tab_id)))
-                    .mut_style(|style| {
-                        style.grid_row = style_helpers::line(1);
-                        style.grid_column = line(1);
-                        style.padding = length(4_f32);
-                        style.align_items = Some(taffy::AlignItems::Center);
-                        // Allow the Name cell to shrink with the column but
-                        // never below zero; text uses Extend so it is never
-                        // clipped to "…" regardless of the measured width.
-                        style.min_size.width = length(0.0_f32);
-                        style.overflow.x = taffy::Overflow::Hidden;
-                    })
-                    .add_with_background_color(|tui| {
-                        tui.mut_style(|style| {
-                            style.size.width = percent(1_f32);
-                            style.overflow.x = taffy::Overflow::Hidden;
-                        })
-                        .ui(|ui: &mut Ui| {
-                            let res = ui.add(
-                                egui::Label::new("Name")
-                                    // Extend keeps the full text visible even
-                                    // when the column is narrow; the parent
-                                    // cell clips it via overflow:hidden.
-                                    .wrap_mode(egui::TextWrapMode::Extend)
-                                    .selectable(false)
-                                    .sense(Sense::click()),
-                            );
-                            if res.clicked() {
-                                new_sort = Some(Sort::Name);
-                            }
-                        });
-                    });
-
-                // Modified header
-                tui.sticky([false, true].into())
-                    .id(tid(("header_modified", tab_id)))
-                    .mut_style(|style| {
-                        style.grid_row = style_helpers::line(1);
-                        style.grid_column = line(2);
-                        style.padding = length(4_f32);
-                        style.align_items = Some(taffy::AlignItems::Center);
-                        style.justify_content = Some(taffy::JustifyContent::FlexEnd);
-                        style.size = taffy::Size {
-                            width: length(modified_width),
-                            height: auto(),
-                        };
-                        style.min_size = taffy::Size {
-                            width: length(modified_min),
-                            height: auto(),
-                        };
-                        style.max_size = taffy::Size {
-                            width: length(modified_max),
-                            height: auto(),
-                        };
-                    })
-                    .add_with_background_color(|tui| {
-                        tui.mut_style(|style| {
-                            style.size.width = percent(1_f32);
-                        })
-                        .ui(|ui: &mut Ui| {
-                            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                                let res = ui.add(
-                                    egui::Label::new("Modified")
-                                        .wrap_mode(egui::TextWrapMode::Extend)
-                                        .selectable(false)
-                                        .sense(Sense::click()),
-                                );
-                                if res.clicked() {
-                                    new_sort = Some(Sort::Modified);
-                                }
-                            });
-                        });
-                    });
-
-                // Size header
-                tui.sticky([false, true].into())
-                    .id(tid(("header_size", tab_id)))
-                    .mut_style(|style| {
-                        style.grid_row = style_helpers::line(1);
-                        style.grid_column = line(3);
-                        style.padding = length(4_f32);
-                        style.align_items = Some(taffy::AlignItems::Center);
-                        style.justify_content = Some(taffy::JustifyContent::FlexEnd);
-                        style.size = taffy::Size {
-                            width: length(size_width),
-                            height: auto(),
-                        };
-                        style.min_size = taffy::Size {
-                            width: length(size_min),
-                            height: auto(),
-                        };
-                        style.max_size = taffy::Size {
-                            width: length(size_max),
-                            height: auto(),
-                        };
-                    })
-                    .add_with_background_color(|tui| {
-                        tui.mut_style(|style| {
-                            style.size.width = percent(1_f32);
-                        })
-                        .ui(|ui: &mut Ui| {
-                            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                                let res = ui.add(
-                                    egui::Label::new("Size")
-                                        .wrap_mode(egui::TextWrapMode::Extend)
-                                        .selectable(false)
-                                        .sense(Sense::click()),
-                                );
-                                if res.clicked() {
-                                    new_sort = Some(Sort::Size);
-                                }
-                            });
-                        });
-                    });
-            });
-        });
-
-        // ── Process row interactions (post-tui, tab borrow is free again) ────
-        for RowResult {
-            row_index,
-            response: row_response,
-        } in &row_results
-        {
-            let row_index = *row_index;
-            let Some(val) = tab.entry_at(row_index) else {
-                continue;
-            };
-            let val = &val;
-            let indexed = row_index + 1;
-
-            if row_response.double_clicked()
-                || convert_nr_to_egui_key(indexed)
-                    .is_some_and(|k| row_response.ctx.key_with_command_pressed(k))
-            {
-                Self::activate_entry(val, tab_id, row_response.ctx.shift_pressed());
-            } else if row_response.clicked() {
-                if !shift_pressed {
-                    selected_tabs.selected_fields.clear();
-                }
-                selected_tabs.selected_fields.push(row_index);
-                selected_tabs.just_changed = true;
-                row_response
-                    .ctx
-                    .data_set_path(&tab.current_path, selected_tabs.clone());
-            }
-
-            self.show_entry_context_menu(
-                row_response,
-                tab,
-                val,
-                row_index,
-                tab_popup_id,
-                &favorites,
-            );
-
-            // Scroll selected row into view
-            if just_changed
-                && let Some(v) = selected_tabs.selected_fields.last()
-                && *v == row_index
-            {
-                ui.scroll_to_cursor(Some(egui::Align::Center));
-            }
-        }
-
-        if let Some(new_sort) = new_sort {
-            let mut settings: DirectoryViewSettings =
-                ui.data_get_path_or_persisted(&tab.current_path).data;
-            settings.change_sort(new_sort);
-            ui.data_set_path(&tab.current_path, settings);
-
-            ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Local).schedule();
-        }
-        if !self.focused || !self.active_tab.eq(&tab.id) || ui.ctx().text_edit_focused() {
-            return;
-        }
-
-        let input_key = ui.input(|i| {
-            if i.key_pressed(egui::Key::ArrowDown) {
-                Some(egui::Key::ArrowDown)
-            } else if i.key_pressed(egui::Key::ArrowUp) {
-                Some(egui::Key::ArrowUp)
-            } else if i.key_pressed(egui::Key::ArrowLeft) {
-                Some(egui::Key::ArrowLeft)
-            } else if i.key_pressed(egui::Key::Enter) {
-                Some(egui::Key::Enter)
-            } else if i.key_pressed(egui::Key::ArrowRight) {
-                Some(egui::Key::ArrowRight)
-            } else {
-                None
-            }
-        });
-        if let Some(change) = input_key {
-            let visible_len = tab.visible_entries.len();
-            if visible_len == 0 {
-                return;
-            }
-            let new_value = match selected_tabs.selected_fields.last() {
-                Some(i) => match change {
-                    egui::Key::ArrowDown => i.saturating_add(1).min(visible_len.saturating_sub(1)),
-                    egui::Key::ArrowUp => i.saturating_sub(1),
-                    egui::Key::ArrowLeft => {
-                        if let Some(parent) = tab.current_path.parent() {
-                            TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
-                        }
-                        return;
-                    }
-                    egui::Key::Enter | egui::Key::ArrowRight => {
-                        let Some(entry) = tab.entry_at(*i) else {
-                            return;
-                        };
-                        Self::activate_entry(&entry, tab_id, false);
-                        *i
-                    }
-                    _ => return,
-                },
-                None => 0,
-            };
-            if !shift_pressed {
-                selected_tabs.selected_fields.clear();
-            }
-            selected_tabs.selected_fields.push(new_value);
-            selected_tabs.just_changed = true;
-            ui.data_set_path(&tab.current_path, selected_tabs.clone());
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn draw_grid_tile(
-        &mut self,
-        ui: &mut Ui,
-        entry: &DirEntry,
-        tile_width: f32,
-        tile_height: f32,
-        is_selected: bool,
-        is_popup_open: bool,
-        cmd: bool,
-        indexed: usize,
-        selected_inline_budget: &mut u32,
-    ) -> egui::Response {
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(tile_width, tile_height), Sense::click());
-        let visuals = &ui.style().visuals;
-        let hovered = response.hovered() || is_popup_open;
-        let bg_fill = if is_selected {
-            visuals.selection.bg_fill
-        } else if hovered {
-            visuals.widgets.hovered.bg_fill.gamma_multiply(0.45)
-        } else {
-            Color32::TRANSPARENT
-        };
-        let stroke = if is_selected {
-            visuals.selection.stroke
-        } else {
-            egui::Stroke::NONE
-        };
-
-        ui.painter().rect_filled(rect, 8.0, bg_fill);
-        if stroke != egui::Stroke::NONE {
-            ui.painter()
-                .rect_stroke(rect, 8.0, stroke, egui::StrokeKind::Inside);
-        }
-
-        let inner_rect = rect.shrink2(Vec2::splat(GRID_TILE_PADDING));
-        let text_width = inner_rect.width().max(0.0);
-        let hint_height = if cmd { GRID_TILE_HINT_HEIGHT } else { 0.0 };
-        let preview_height = (inner_rect.height() - GRID_TILE_TEXT_HEIGHT - hint_height).max(0.0);
-        let preview_width = text_width;
-        let mut child_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(inner_rect)
-                .layout(Layout::bottom_up(egui::Align::Center)),
-        );
-        child_ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-
-        child_ui.add_sized(
-            [text_width, GRID_TILE_TEXT_HEIGHT],
-            ScrollableLabel::new(entry.get_splitted_path().1)
-                .scroll(hovered || is_selected)
-                .selectable(false)
-                .sense(Sense::empty()),
-        );
-
-        if cmd {
-            let shortcut = if indexed < 10 {
-                format!("[{indexed}]")
-            } else {
-                String::new()
-            };
-            child_ui.add_sized(
-                [text_width, GRID_TILE_HINT_HEIGHT],
-                egui::Label::new(LayoutJob::simple_format(
-                    shortcut,
-                    TextFormat {
-                        color: Color32::from_gray(110),
-                        ..Default::default()
-                    },
-                ))
-                .wrap_mode(egui::TextWrapMode::Truncate)
-                .selectable(false)
-                .sense(Sense::empty()),
-            );
-        }
-
-        child_ui.allocate_ui_with_layout(
-            Vec2::new(text_width, preview_height),
-            Layout::top_down_justified(egui::Align::Center),
-            |ui| {
-                let eligible = entry_has_animated_preview(entry);
-                let preview_intent = tile_preview_intent(
-                    eligible,
-                    response.hovered()
-                        && !(is_selected
-                            && ui
-                                .ctx()
-                                .data(|data| {
-                                    data.get_temp::<bool>(Id::new("inspector_owns_preview"))
-                                })
-                                .unwrap_or(false)),
-                    is_selected,
-                    selected_inline_budget,
-                );
-
-                self.draw_grid_preview(
-                    ui,
-                    entry,
-                    preview_intent,
-                    Vec2::new(preview_width, preview_height),
-                );
-            },
-        );
-
-        response.on_hover_text(&entry.file_name)
-    }
-
-    fn draw_grid_preview(
-        &mut self,
-        ui: &mut Ui,
-        entry: &DirEntry,
-        intent: Option<PreviewIntent>,
-        size: Vec2,
-    ) {
-        let animated = intent.and_then(|intent| {
-            match self
-                .assets
-                .request_hover_preview_at_size(ui.ctx(), entry, intent, size)
-            {
-                HoverPreview::Ready(texture) => Some(texture),
-                HoverPreview::Pending
-                | HoverPreview::Unavailable { .. }
-                | HoverPreview::Fallback => None,
-            }
-        });
-        let texture = animated.or_else(|| {
-            self.assets
-                .request_entry_texture_for_size(entry, size, ui.ctx().pixels_per_point())
-        });
-        if let Some(texture) = texture {
-            ui.add(
-                egui::Image::new(&texture)
-                    .maintain_aspect_ratio(true)
-                    .fit_to_exact_size(size),
-            );
-        } else {
-            ui.allocate_space(size);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn process_grid_interactions(
-        &self,
-        ui: &Ui,
-        tab: &TabData,
-        selected_tabs: &mut Selected,
-        shift_pressed: bool,
-        just_changed: bool,
-        tab_popup_id: Id,
-        favorites: &Locations,
-        row_results: &[RowResult],
-    ) {
-        for RowResult {
-            row_index,
-            response: row_response,
-        } in row_results
-        {
-            let row_index = *row_index;
-            let Some(val) = tab.entry_at(row_index) else {
-                continue;
-            };
-            let val = &val;
-            let indexed = row_index + 1;
-
-            if row_response.double_clicked()
-                || convert_nr_to_egui_key(indexed)
-                    .is_some_and(|key| row_response.ctx.key_with_command_pressed(key))
-            {
-                Self::activate_entry(val, tab.id, row_response.ctx.shift_pressed());
-            } else if row_response.clicked() {
-                if !shift_pressed {
-                    selected_tabs.selected_fields.clear();
-                }
-                if !selected_tabs.selected_fields.contains(&row_index) {
-                    selected_tabs.selected_fields.push(row_index);
-                }
-                selected_tabs.just_changed = true;
-                row_response
-                    .ctx
-                    .data_set_path(&tab.current_path, selected_tabs.clone());
-            }
-
-            self.show_entry_context_menu(
-                row_response,
-                tab,
-                val,
-                row_index,
-                tab_popup_id,
-                favorites,
-            );
-
-            if just_changed
-                && let Some(v) = selected_tabs.selected_fields.last()
-                && *v == row_index
-            {
-                ui.scroll_to_rect(row_response.rect, Some(egui::Align::Center));
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn show_entry_context_menu(
-        &self,
-        row_response: &egui::Response,
-        tab: &TabData,
-        val: &DirEntry,
-        row_index: usize,
-        tab_popup_id: Id,
-        favorites: &Locations,
-    ) {
-        let is_dir = !val.is_file();
-        let popup_id = tab_popup_id.with(row_index);
-        egui::Popup::context_menu(row_response)
-            .id(popup_id)
-            .show(|ui| {
-                ui.data_set_tab::<PopupOpened>(tab.id, PopupOpened(popup_id, row_index));
-                let options = build_for_path(&tab.current_path, &val.get_path(), favorites);
-                for option in options {
-                    if ui.button(option.name.as_str()).clicked() {
-                        option.action.clone().schedule();
-                        ui.close();
-                    }
-                }
-                if !is_dir {
-                    if ui.button("Open").clicked() {
-                        ActionToPerform::SystemOpen(val.full_path_string().into()).schedule();
-                        ui.close();
-                        return;
-                    }
-                    #[cfg(windows)]
-                    if ui.button("Show in explorer").clicked() {
-                        crate::windows_tools::display_in_explorer(val.get_path()).unwrap_or_else(
-                            |_| {
-                                toast!(Error, "Could not open in explorer");
-                            },
-                        );
-                        ui.close();
-                    }
-                    let val_dir = PathBuf::from(val.get_splitted_path().0);
-                    let matching_dirs = self.tab_paths.iter().filter(|path| !val_dir.eq(*path));
-                    #[allow(clippy::collapsible_else_if)]
-                    if matching_dirs.clone().count() > 0 {
-                        ui.separator();
-                        ui.menu_button("Move to", |ui| {
-                            for other in matching_dirs {
-                                let other = PathBuf::from(
-                                    std::fs::canonicalize(other)
-                                        .unwrap_or_else(|_| val.get_path())
-                                        .to_fixed_string(),
-                                );
-
-                                if ui
-                                    .button(format!(
-                                        "{}",
-                                        other.file_name().expect("Failed").to_string_lossy()
-                                    ))
-                                    .on_hover_text(other.display().to_string())
-                                    .clicked()
-                                {
-                                    let path = val.get_path();
-                                    let filename =
-                                        path.file_name().expect("NO FILENAME").to_os_string();
-                                    let target_path = other.join(&filename);
-                                    println!("{}", target_path.display());
-                                    let move_result = fs::rename(&path, &target_path);
-                                    let mut success = move_result.is_ok();
-                                    let _ = move_result.inspect_err(|e| {
-                                        e.raw_os_error().inspect(|nr| {
-                                            if *nr == 17 {
-                                                let copy_success =
-                                                    fs::copy(&path, target_path.clone()).is_ok();
-                                                if copy_success {
-                                                    success = fs::remove_file(&path).is_ok();
-                                                }
-                                            }
-                                        });
-                                    });
-                                    if success {
-                                        crate::app::database::invalidate_dir(&val_dir);
-                                        crate::app::database::invalidate_dir(&other);
-                                        crate::app::commands::COMMANDS_QUEUE.push(
-                                            ActionToPerform::TabAction(
-                                                TabTarget::AllTabs,
-                                                TabAction::RequestFilesRefresh,
-                                            ),
-                                        );
-                                    } else {
-                                        toast!(
-                                            Error,
-                                            "Failed to move file {}",
-                                            filename.to_string_lossy()
-                                        );
-                                    }
-                                    ui.close();
-                                }
-                            }
-                        });
-                    }
-                }
-                ui.separator();
-                if ui.button("Move to Trash").clicked() {
-                    let parent = PathBuf::from(val.get_splitted_path().0);
-                    trash::delete(val.get_path()).unwrap_or_else(|_| {
-                        toast!(Error, "Could not move it to trash.");
-                    });
-                    crate::app::database::invalidate_dir(&parent);
-                    ui.close();
-                    TabAction::RequestFilesRefresh.schedule_active_tab();
-                }
-                if ui.button("Copy path to clipboard").clicked() {
-                    let Ok(mut clipboard) = arboard::Clipboard::new() else {
-                        toast!(Error, "Failed to read the clipboard.");
-                        return;
-                    };
-                    clipboard
-                        .set_text(val.full_path_string())
-                        .unwrap_or_else(|_| {
-                            toast!(Error, "Failed to update the clipboard.");
-                        });
-                    ui.close();
-                }
-                if ui.button("Rename").clicked() {
-                    ui.data_mut(|w| {
-                        w.insert_temp(egui::Id::new(ModalWindow::Rename), val.clone());
-                    });
-                    ActionToPerform::ToggleModalWindow(ModalWindow::Rename).schedule();
-                    ui.close();
-                }
-
-                #[cfg(windows)]
-                {
-                    ui.separator();
-                    if ui.button("Properties").clicked() {
-                        crate::windows_tools::open_properties(val.get_path());
-                        ui.close();
-                    }
-                }
-            });
-    }
-
-    fn handle_grid_keyboard_navigation(
-        &self,
-        ui: &Ui,
-        tab: &TabData,
-        selected_tabs: &mut Selected,
-        shift_pressed: bool,
-        columns: usize,
-    ) {
-        if !self.focused || !self.active_tab.eq(&tab.id) || ui.ctx().text_edit_focused() {
-            return;
-        }
-
-        let input_key = ui.input(|i| {
-            if i.key_pressed(egui::Key::ArrowDown) {
-                Some(egui::Key::ArrowDown)
-            } else if i.key_pressed(egui::Key::ArrowUp) {
-                Some(egui::Key::ArrowUp)
-            } else if i.key_pressed(egui::Key::ArrowLeft) {
-                Some(egui::Key::ArrowLeft)
-            } else if i.key_pressed(egui::Key::ArrowRight) {
-                Some(egui::Key::ArrowRight)
-            } else if i.key_pressed(egui::Key::Enter) {
-                Some(egui::Key::Enter)
-            } else {
-                None
-            }
-        });
-
-        let visible_len = tab.visible_entries.len();
-        if visible_len == 0 {
-            return;
-        }
-
-        let Some(change) = input_key else {
-            return;
-        };
-        let current = selected_tabs
-            .selected_fields
-            .last()
-            .copied()
-            .filter(|index| *index < visible_len)
-            .unwrap_or_default();
-        let new_value = match change {
-            egui::Key::ArrowDown => current.saturating_add(columns).min(visible_len - 1),
-            egui::Key::ArrowUp => current.saturating_sub(columns),
-            egui::Key::ArrowLeft => current.saturating_sub(1),
-            egui::Key::ArrowRight => current.saturating_add(1).min(visible_len - 1),
-            egui::Key::Enter => {
-                let Some(entry) = tab.entry_at(current) else {
-                    return;
-                };
-                Self::activate_entry(&entry, tab.id, false);
-                current
-            }
-            _ => return,
-        };
-
-        if !shift_pressed {
-            selected_tabs.selected_fields.clear();
-        }
-        if !selected_tabs.selected_fields.contains(&new_value) {
-            selected_tabs.selected_fields.push(new_value);
-        }
-        selected_tabs.just_changed = true;
-        ui.data_set_path(&tab.current_path, selected_tabs.clone());
-    }
-
-    fn activate_entry(entry: &DirEntry, tab_id: u32, open_in_new_tab: bool) {
-        if entry.is_file() {
-            ActionToPerform::SystemOpen(entry.full_path_string().into()).schedule();
-        } else if let Ok(path) = std::fs::canonicalize(entry.get_path()) {
-            if open_in_new_tab {
-                ActionToPerform::NewTab(path).schedule();
-            } else {
-                TabAction::ChangePaths(path.into()).schedule_tab(tab_id);
-            }
-        }
-    }
-
-    fn show_entry_hover_preview(assets: &mut AssetManager, ui: &mut Ui, entry: &DirEntry) {
-        match assets.request_hover_preview(ui.ctx(), entry, PreviewIntent::Hovered) {
-            HoverPreview::Ready(texture) => {
-                ui.add(
-                    egui::Image::new(&texture)
-                        .maintain_aspect_ratio(true)
-                        .max_size(Vec2::new(300.0, 300.0)),
-                );
-            }
-            HoverPreview::Pending => {
-                if let Some(texture) = assets.request_entry_texture(entry) {
-                    ui.add(
-                        egui::Image::new(&texture)
-                            .maintain_aspect_ratio(true)
-                            .max_size(Vec2::new(300.0, 300.0)),
-                    );
-                }
-                ui.label("Loading preview...");
-                ui.label(entry.full_path_string());
-            }
-            HoverPreview::Unavailable {
-                reason,
-                retry_after,
-            } => {
-                if let Some(texture) = assets.request_entry_texture(entry) {
-                    ui.add(
-                        egui::Image::new(&texture)
-                            .maintain_aspect_ratio(true)
-                            .max_size(Vec2::new(300.0, 300.0)),
-                    );
-                }
-                ui.label("Preview unavailable");
-                ui.small(reason);
-                if let Some(retry_after) = retry_after {
-                    ui.small(format!(
-                        "Retrying in {} seconds",
-                        retry_after.as_secs().max(1)
-                    ));
-                }
-                ui.label(entry.full_path_string());
-            }
-            HoverPreview::Fallback => {
-                ui.label(entry.full_path_string());
-            }
-        }
     }
 }
 
 impl TabViewer for MyTabViewer<'_> {
-    // This associated type is used to attach some data to each tab.
-    type Tab = TabData;
+    // The dock holds only the layout; tab data lives in `Workspace::tabs`.
+    type Tab = TabId;
 
+    // A tab dragged out of the dock becomes an OS window of its own (see
+    // `Workspace::take_torn_off_tabs`). The main window keeps its last tab.
     fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
-        false
+        self.closeable
     }
 
     fn closeable(&mut self, _: &mut Self::Tab) -> bool {
         self.closeable
     }
 
+    fn on_add(&mut self, path: egui_dock::NodePath) {
+        self.tab_requests.add.push((path, None));
+    }
+
+    // Middle-click and the close button are handled by egui_dock itself,
+    // which calls `on_close` once per tab. Closing from the context menu is
+    // applied after the dock is drawn (see `Workspace::apply_tab_requests`):
+    // queuing those through `force_close` as well removed the same tab twice
+    // and, once a split pane emptied, indexed a node that no longer existed.
+    fn on_close(&mut self, tab: &mut Self::Tab) -> egui_dock::widgets::tab_viewer::OnCloseResponse {
+        self.tab_requests.closed.push(*tab);
+        egui_dock::widgets::tab_viewer::OnCloseResponse::Close
+    }
+
+    fn context_menu(&mut self, ui: &mut Ui, tab: &mut Self::Tab, path: egui_dock::NodePath) {
+        let id = *tab;
+        if ui.button("New tab").clicked() {
+            self.tab_requests.add.push((path, None));
+            ui.close();
+        }
+        if ui.button("Duplicate tab").clicked() {
+            let folder = self
+                .tabs
+                .get(&id)
+                .and_then(|tab| tab.current_path.single_path());
+            self.tab_requests.add.push((path, folder));
+            ui.close();
+        }
+        if ui
+            .add_enabled(self.has_other_tabs, egui::Button::new("Move to new window"))
+            .clicked()
+        {
+            self.tab_requests.to_new_window = Some(id);
+            ui.close();
+        }
+        ui.separator();
+        ui.add_enabled_ui(self.closeable, |ui| {
+            if ui.button("Close tab").clicked() {
+                self.tab_requests.close.push(id);
+                ui.close();
+            }
+            if ui.button("Close other tabs").clicked() {
+                self.tab_requests.close_others = Some(id);
+                ui.close();
+            }
+        });
+        if ui.button("Reopen closed tab").clicked() {
+            crate::app::commands::ActionToPerform::RunCommand(
+                crate::app::keymap::Command::ReopenClosedTab,
+            )
+            .schedule();
+            ui.close();
+        }
+    }
+
     fn id(&mut self, tab: &mut Self::Tab) -> Id {
-        Id::new(tab.id)
+        Id::new(*tab)
     }
 
     // Returns the current `tab`'s title.
     fn title(&mut self, tab: &mut Self::Tab) -> egui_dock::egui::WidgetText {
+        let Some(tab) = self.tabs.get(tab) else {
+            return WidgetText::default();
+        };
         if tab.is_searching() {
             tab.search
                 .as_ref()
@@ -1991,233 +1208,50 @@ impl TabViewer for MyTabViewer<'_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::MyTabViewer::ui");
-        match tab.display_type {
-            DisplayType::List => self.list_view(ui, tab),
-            DisplayType::Icons => self.grid_view(ui, tab),
-        }
-    }
-}
-
-// Here is a simple example of how you can manage a `DockState` of your application.
-#[derive(Debug)]
-pub struct MyTabs {
-    pub(super) dock_state: DockState<TabData>,
-    pub focused: bool,
-}
-
-#[derive(Clone, Default)]
-struct SelectionSnapshot {
-    directory: CurrentPath,
-    paths: Vec<PathBuf>,
-}
-
-impl MyTabs {
-    pub(crate) fn reconcile_selection(&mut self, ctx: &Context) {
-        for (_, tab) in self.dock_state.iter_all_tabs_mut() {
-            let Some(previous) = ctx.data_get_tab::<SelectionSnapshot>(tab.id) else {
-                continue;
-            };
-            let mut selected = ctx
-                .data_get_path::<Selected>(&tab.current_path)
-                .unwrap_or_default();
-            if previous.directory == tab.current_path {
-                let current: Vec<_> = selected
-                    .selected_fields
-                    .iter()
-                    .filter_map(|&index| tab.entry_at(index).map(|e| e.get_path()))
-                    .collect();
-                if current != previous.paths {
-                    let wanted: std::collections::HashSet<_> = previous.paths.into_iter().collect();
-                    selected.selected_fields = (0..tab.visible_entries.len())
-                        .filter(|&index| {
-                            tab.entry_at(index)
-                                .is_some_and(|entry| wanted.contains(&entry.get_path()))
-                        })
-                        .collect();
-                }
-            } else {
-                selected.selected_fields.clear();
-            }
-            ctx.data_set_path(&tab.current_path, selected);
-        }
-    }
-    fn remember_selection(&mut self, ctx: &Context) {
-        for (_, tab) in self.dock_state.iter_all_tabs_mut() {
-            let selected = ctx
-                .data_get_path::<Selected>(&tab.current_path)
-                .unwrap_or_default();
-            let paths = selected
-                .selected_fields
-                .iter()
-                .filter_map(|&index| tab.entry_at(index).map(|e| e.get_path()))
-                .collect();
-            ctx.data_set_tab(
-                tab.id,
-                SelectionSnapshot {
-                    directory: tab.current_path.clone(),
-                    paths,
-                },
-            );
-        }
-    }
-
-    pub fn get_current_path(&mut self) -> Option<PathBuf> {
-        let active_tab = self.get_current_tab()?;
-        active_tab.current_path.single_path()
-    }
-    pub fn new(path: &Path) -> Self {
-        // Create a `DockState` with an initial tab "tab1" in the main `Surface`'s root node.
-        let tabs = vec![TabData::from_path(path)];
-        let dock_state = DockState::new(tabs);
-        Self {
-            dock_state,
-            focused: false,
-        }
-    }
-
-    pub fn get_current_index(&mut self) -> Option<u32> {
-        self.get_current_tab().map(|tab| tab.id)
-    }
-
-    pub fn has_loading(&mut self) -> bool {
-        self.dock_state
-            .iter_all_tabs_mut()
-            .any(|(_, tab)| tab.loading)
-    }
-
-    #[inline]
-    pub fn get_tab_by_id(&mut self, id: u32) -> Option<&mut TabData> {
-        self.dock_state
-            .iter_all_tabs_mut()
-            .find(|(_, tab)| tab.id == id)
-            .map(|(_, tab)| tab)
-    }
-    #[inline]
-    pub fn get_tab_ids(&mut self) -> Vec<u32> {
-        self.dock_state
-            .iter_all_tabs_mut()
-            .map(|(_, tab)| tab.id)
-            .collect()
-    }
-
-    pub fn get_current_tab(&mut self) -> Option<&mut TabData> {
-        let length = self.dock_state.iter_all_tabs_mut().count();
-        if length == 1 {
-            return Some(
-                self.dock_state
-                    .iter_all_tabs_mut()
-                    .next()
-                    .expect("Failed to get data")
-                    .1,
-            );
-        }
-        let (_, active_tab) = self.dock_state.find_active_focused()?;
-        Some(active_tab)
-    }
-
-    pub fn ui(&mut self, ui: &mut Ui, assets: &mut AssetManager) {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("lwa_fm::MyTabs::ui");
-        let tabs = self.get_tabs_paths();
-        let tabs_len = self.dock_state.iter_all_tabs().count();
-        let Some(active_tab) = self.get_current_index() else {
+        // Taken out while drawn, so the views can borrow the viewer mutably.
+        let Some(mut data) = self.tabs.remove(tab) else {
             return;
         };
-        // {
-        //     #[cfg(feature = "profiling")]
-        //     puffin::profile_scope!("lwa_fm::MyTabs::ui::check_for_file_system_events");
-        //     for ((_, _), item) in self.dock_state.iter_all_tabs_mut() {
-        //         if item.check_for_file_system_events() {
-        //             TabAction::RequestFilesRefresh.schedule_tab(item.id);
-        //         }
-        //     }
-        // }
-        let mut my_tab_viewer = MyTabViewer {
-            closeable: tabs_len > 1,
-            tab_paths: tabs,
-            active_tab,
-            focused: self.focused,
-            assets,
-        };
-        ui.spacing_mut().item_spacing = [0.0, 0.0].into();
-        DockArea::new(&mut self.dock_state)
-            .show_leaf_close_all_buttons(false)
-            .show_leaf_collapse_buttons(false)
-            .show_add_popup(true)
-            .show_add_buttons(true)
-            .style(Self::get_dock_style(ui.style().as_ref(), tabs_len))
-            .show_inside(ui, &mut my_tab_viewer);
-        self.remember_selection(ui.ctx());
-    }
-
-    pub fn open_in_new_tab(&mut self, path: &Path) {
-        let is_not_focused = self.dock_state.focused_leaf().is_none();
-        if is_not_focused {
-            self.dock_state
-                .set_focused_node_and_surface(egui_dock::NodePath::MAIN_ROOT);
+        if std::mem::take(&mut data.unloaded) {
+            TabAction::ChangePaths(data.current_path.clone()).schedule_tab(data.id);
         }
-        let new_window = TabData::from_path(path);
-        let root_node = self
-            .dock_state
-            .main_surface_mut()
-            .root_node_mut()
-            .expect("NO ROOT");
-        if root_node.is_leaf() {
-            root_node.append_tab(new_window);
-        } else {
-            self.dock_state.push_to_focused_leaf(new_window);
+        match data.display_type {
+            DisplayType::List => self.list_view(ui, &mut data),
+            DisplayType::Icons => self.grid_view(ui, &mut data),
         }
-    }
-
-    fn get_tabs_paths(&self) -> Vec<PathBuf> {
-        self.dock_state
-            .iter_all_tabs()
-            .filter_map(|(_, tab)| tab.current_path.single_path())
-            .collect()
-    }
-
-    fn get_dock_style(ui: &egui::Style, tabs_amount: usize) -> Style {
-        let mut style = Style::from_egui(ui);
-        style.dock_area_padding = None;
-        style.tab_bar.fill_tab_bar = true;
-        style.tab_bar.height = if tabs_amount > 1 {
-            style.tab_bar.height * 1.4
-        } else {
-            0.0
-        };
-        style.tab.tab_body.inner_margin = egui::Margin::same(0);
-        style.tab.tab_body.stroke = egui::Stroke::NONE;
-        style.tab.tab_body.bg_fill = ui.visuals.panel_fill;
-        style.tab_bar.height = if tabs_amount > 1 {
-            ui.spacing.interact_size.y.max(30.0)
-        } else {
-            0.0
-        };
-        style
+        self.tabs.insert(*tab, data);
     }
 }
 
-const fn convert_nr_to_egui_key(nr: usize) -> Option<egui::Key> {
-    match nr {
-        1 => Some(egui::Key::Num1),
-        2 => Some(egui::Key::Num2),
-        3 => Some(egui::Key::Num3),
-        4 => Some(egui::Key::Num4),
-        5 => Some(egui::Key::Num5),
-        6 => Some(egui::Key::Num6),
-        7 => Some(egui::Key::Num7),
-        8 => Some(egui::Key::Num8),
-        9 => Some(egui::Key::Num9),
-        0 => Some(egui::Key::Num0),
-        _ => None,
-    }
+/// Every open tab, by id. The dock layout only refers to them.
+pub type TabStore = foldhash::HashMap<TabId, TabData>;
+
+/// What the selection referred to when last drawn, so it can follow the same
+/// files after the view is re-sorted, filtered or reloaded. Identities are
+/// listing indices plus the listing itself, which is cheap to record every
+/// frame (no per-row path allocation).
+#[derive(Debug, Clone, Default)]
+struct SelectionSnapshot {
+    directory: CurrentPath,
+    listing: Arc<Listing>,
+    visible_hash: u64,
+    selection_hash: u64,
+    /// Listing indices of the selected rows.
+    selected: Vec<u32>,
+    /// Listing index of the cursor row.
+    cursor: Option<u32>,
+}
+
+fn slice_hash<T: std::hash::Hash>(values: &[T]) -> u64 {
+    use std::hash::BuildHasher;
+    foldhash::fast::FixedState::default().hash_one(values)
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
     use crate::data::files::{DirEntry, EntryType};
-    use crate::helper::DataHolder;
+
     use image::{Rgba, RgbaImage};
     use std::cell::RefCell;
     use std::sync::OnceLock;
@@ -2246,12 +1280,29 @@ pub mod tests {
     ///
     /// Using real filesystem entries means paths, timestamps, and sizes are all
     /// realistic, which exercises the galley-pool paths in the renderer.
+    /// A fixed listing, so snapshots don't change when the source tree does.
     fn make_entries() -> Vec<DirEntry> {
-        std::fs::read_dir("src")
-            .expect("src/ must exist")
-            .filter_map(std::result::Result::ok)
-            .filter_map(|e| DirEntry::try_from(e).ok())
-            .take(20)
+        let folders = ["app", "data", "widgets"];
+        let files = [
+            "consts.rs",
+            "helper.rs",
+            "locations.rs",
+            "main.rs",
+            "watcher.rs",
+            "windows_tools.rs",
+        ];
+        folders
+            .iter()
+            .map(|name| {
+                let mut entry = DirEntry::test_new(&format!("src/{name}"));
+                entry.meta.entry_type = crate::data::files::EntryType::Directory;
+                entry
+            })
+            .chain(
+                files
+                    .iter()
+                    .map(|name| DirEntry::test_new(&format!("src/{name}"))),
+            )
             .collect()
     }
 
@@ -2355,34 +1406,34 @@ pub mod tests {
         entries
     }
 
-    fn populated_tabs_from_entries(entries: Vec<DirEntry>, display_type: DisplayType) -> MyTabs {
+    fn populated_tabs_from_entries(entries: &[DirEntry], display_type: DisplayType) -> Workspace {
         let path = fixture_root();
         let mut tab = TabData::from_path(path);
         tab.display_type = display_type;
-        tab.list = entries;
-        tab.visible_entries = (0..tab.list.len()).collect();
-        MyTabs {
-            dock_state: egui_dock::DockState::new(vec![tab]),
-            focused: true,
+        tab.set_entries(entries);
+        {
+            let mut tabs = Workspace::from_tabs(vec![tab]);
+            tabs.focused = true;
+            tabs
         }
     }
 
-    /// Build a [`MyTabs`] whose active tab is populated from `src/`.
-    fn populated_tabs() -> MyTabs {
+    /// Build a [`Workspace`] whose active tab is populated from `src/`.
+    fn populated_tabs() -> Workspace {
         let path = std::path::Path::new("src");
         let mut tab = TabData::from_path(path);
-        tab.list = make_entries();
-        tab.visible_entries = (0..tab.list.len()).collect();
-        MyTabs {
-            dock_state: egui_dock::DockState::new(vec![tab]),
-            focused: true,
+        tab.set_entries(&make_entries());
+        {
+            let mut tabs = Workspace::from_tabs(vec![tab]);
+            tabs.focused = true;
+            tabs
         }
     }
 
     /// Draw one frame of the dock view, seeding galley pools and draining commands.
     fn draw_frame(
         ui: &mut egui::Ui,
-        my_tabs: &mut MyTabs,
+        my_tabs: &mut Workspace,
         assets: &RefCell<crate::app::assets::AssetManager>,
     ) {
         draw_frame_with_selection(ui, my_tabs, None, assets);
@@ -2390,7 +1441,7 @@ pub mod tests {
 
     fn draw_frame_with_selection(
         ui: &mut egui::Ui,
-        my_tabs: &mut MyTabs,
+        my_tabs: &mut Workspace,
         selected_fields: Option<&[usize]>,
         assets: &RefCell<crate::app::assets::AssetManager>,
     ) {
@@ -2405,27 +1456,19 @@ pub mod tests {
         );
         FILE_NAME_POOL.with_borrow_mut(LruCache::clear);
         FOLDER_NAME_POOL.with_borrow_mut(LruCache::clear);
-        DIR_POOL.with_borrow_mut(LruCache::clear);
+        text_fit::clear_pool();
         TIME_POOL.with_borrow_mut(LruCache::clear);
         SIZES_POOL.with_borrow_mut(LruCache::clear);
-        INDEXED_GALLEYS.with_borrow_mut(|cache| cache.fill(None));
         TEXT_CACHE_STYLE.with_borrow_mut(|style| *style = None);
         let mut assets = assets.borrow_mut();
         assets.poll_results(&ctx);
         {
             if let Some(indices) = selected_fields {
-                let current_path = my_tabs
+                my_tabs
                     .get_current_tab()
                     .expect("missing active tab")
-                    .current_path
-                    .clone();
-                ui.data_set_path(
-                    &current_path,
-                    Selected {
-                        selected_fields: indices.to_vec(),
-                        just_changed: false,
-                    },
-                );
+                    .selection
+                    .set_rows(indices.iter().copied());
             }
             my_tabs.ui(ui, &mut assets);
         }
@@ -2444,7 +1487,7 @@ pub mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         FILE_NAME_LAYOUT_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
-        let entries = (0..10_000)
+        let entries: Vec<DirEntry> = (0..10_000)
             .map(|index| DirEntry::test_new(&format!("/virtual/file_{index:05}.txt")))
             .collect();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
@@ -2452,8 +1495,8 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(900.0, 500.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
-                populated_tabs_from_entries(entries, DisplayType::List),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
+                populated_tabs_from_entries(&entries, DisplayType::List),
             );
 
         harness.run_steps(1);
@@ -2464,6 +1507,72 @@ pub mod tests {
             "virtualized list laid out {layouts} names for 10,000 entries"
         );
         FILE_NAME_POOL.with_borrow(|pool| assert!(pool.len() < 64));
+    }
+
+    /// Frame-time baseline for large listings. Run with
+    /// `cargo test --release perf_ -- --ignored --nocapture`.
+    /// `LWA_PERF_N` overrides the entry count (default 100k).
+    fn perf_frame_time(display_type: DisplayType, select_all: bool) {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = crate::app::perf_tests::perf_count(100_000);
+        let entries: Vec<DirEntry> = (0..count)
+            .map(|index| DirEntry::test_new(&format!("/virtual/file_{index:06}.txt")))
+            .collect();
+        let assets = RefCell::new(crate::app::assets::AssetManager::default());
+        let selection: Option<Vec<usize>> = select_all.then(|| (0..count).collect());
+        let mut harness = egui_kittest::Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
+            .with_size(egui::Vec2::new(1100.0, 720.0))
+            .build_ui_state(
+                |ui, my_tabs: &mut Workspace| {
+                    let ctx = ui.ctx().clone();
+                    crate::app::ui::configure_test(&ctx, false);
+                    if let Some(indices) = &selection {
+                        let tab = my_tabs.get_current_tab().expect("missing active tab");
+                        if tab.selection.is_empty() {
+                            tab.selection.set_rows(indices.iter().copied());
+                        }
+                    }
+                    let mut assets = assets.borrow_mut();
+                    assets.begin_frame();
+                    assets.poll_results(&ctx);
+                    my_tabs.ui(ui, &mut assets);
+                    assets.end_frame();
+                    while crate::app::commands::COMMANDS_QUEUE.pop().is_some() {}
+                },
+                populated_tabs_from_entries(&entries, display_type),
+            );
+        // Warm galley pools and icon requests before measuring.
+        harness.run_steps(5);
+        let frames = 50;
+        let started = std::time::Instant::now();
+        for _ in 0..frames {
+            harness.run_steps(1);
+        }
+        let per_frame = started.elapsed() / frames;
+        eprintln!(
+            "perf frame {display_type:?} entries={count} select_all={select_all}: {per_frame:?}/frame"
+        );
+    }
+
+    #[test]
+    #[ignore = "performance baseline; run explicitly"]
+    fn perf_list_view_frame() {
+        perf_frame_time(DisplayType::List, false);
+    }
+
+    #[test]
+    #[ignore = "performance baseline; run explicitly"]
+    fn perf_list_view_frame_all_selected() {
+        perf_frame_time(DisplayType::List, true);
+    }
+
+    #[test]
+    #[ignore = "performance baseline; run explicitly"]
+    fn perf_grid_view_frame_all_selected() {
+        perf_frame_time(DisplayType::Icons, true);
     }
 
     // ── Snapshot: dock view at a standard desktop width ──────────────────────
@@ -2478,7 +1587,7 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(900.0, 500.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
                 populated_tabs(),
             );
 
@@ -2502,7 +1611,7 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(350.0, 500.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
                 populated_tabs(),
             );
 
@@ -2528,11 +1637,11 @@ pub mod tests {
 
         let path = std::path::Path::new("src");
         let mut tab = TabData::from_path(path);
-        tab.list = all;
-        tab.visible_entries = (0..tab.list.len()).collect();
-        let my_tabs = MyTabs {
-            dock_state: egui_dock::DockState::new(vec![tab]),
-            focused: false,
+        tab.set_entries(&all);
+        let my_tabs = {
+            let mut tabs = Workspace::from_tabs(vec![tab]);
+            tabs.focused = false;
+            tabs
         };
 
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
@@ -2540,7 +1649,7 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(400.0, 600.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
                 my_tabs,
             );
 
@@ -2556,9 +1665,10 @@ pub mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tab = TabData::from_path(std::path::Path::new("src"));
-        let my_tabs = MyTabs {
-            dock_state: egui_dock::DockState::new(vec![tab]),
-            focused: false,
+        let my_tabs = {
+            let mut tabs = Workspace::from_tabs(vec![tab]);
+            tabs.focused = false;
+            tabs
         };
 
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
@@ -2566,7 +1676,7 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(700.0, 400.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
                 my_tabs,
             );
 
@@ -2584,8 +1694,8 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(960.0, 620.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
-                populated_tabs_from_entries(grid_entries(), DisplayType::Icons),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
+                populated_tabs_from_entries(&grid_entries(), DisplayType::Icons),
             );
 
         harness.run_steps(12);
@@ -2602,8 +1712,8 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(420.0, 620.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
-                populated_tabs_from_entries(grid_entries(), DisplayType::Icons),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
+                populated_tabs_from_entries(&grid_entries(), DisplayType::Icons),
             );
 
         harness.run_steps(12);
@@ -2620,8 +1730,8 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(620.0, 700.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
-                populated_tabs_from_entries(long_name_entries(), DisplayType::Icons),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
+                populated_tabs_from_entries(&long_name_entries(), DisplayType::Icons),
             );
 
         harness.run_steps(24);
@@ -2638,8 +1748,8 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(820.0, 520.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
-                populated_tabs_from_entries(mixed_thumbnail_entries(), DisplayType::Icons),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
+                populated_tabs_from_entries(&mixed_thumbnail_entries(), DisplayType::Icons),
             );
 
         harness.run_steps(24);
@@ -2653,9 +1763,10 @@ pub mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut tab = TabData::from_path(fixture_root());
         tab.display_type = DisplayType::Icons;
-        let my_tabs = MyTabs {
-            dock_state: egui_dock::DockState::new(vec![tab]),
-            focused: false,
+        let my_tabs = {
+            let mut tabs = Workspace::from_tabs(vec![tab]);
+            tabs.focused = false;
+            tabs
         };
 
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
@@ -2663,7 +1774,7 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(720.0, 420.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| draw_frame(ui, my_tabs, &assets),
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
                 my_tabs,
             );
 
@@ -2681,14 +1792,123 @@ pub mod tests {
             .with_options(crate::app::ui::snapshot_options())
             .with_size(egui::Vec2::new(960.0, 620.0))
             .build_ui_state(
-                |ui, my_tabs: &mut MyTabs| {
+                |ui, my_tabs: &mut Workspace| {
                     draw_frame_with_selection(ui, my_tabs, Some(&[2]), &assets);
                 },
-                populated_tabs_from_entries(grid_entries(), DisplayType::Icons),
+                populated_tabs_from_entries(&grid_entries(), DisplayType::Icons),
             );
 
         harness.run_steps(24);
         harness.snapshot("dock_view_icons_selected");
+    }
+
+    /// Two panes: `[a, b]` on the left, `[c]` alone on the right, as after
+    /// dragging a tab to the right edge.
+    fn split_tabs() -> (Workspace, [TabId; 3]) {
+        let [a, b, c] = ["src", "src/app", "src/data"].map(|folder| {
+            let mut tab = TabData::from_path(Path::new(folder));
+            tab.current_path = CurrentPath::One(folder.into());
+            tab
+        });
+        let ids = [a.id, b.id, c.id];
+        let mut tabs = Workspace::from_tabs(vec![a, b]);
+        tabs.focused = true;
+        tabs.split_right(c);
+        while crate::app::commands::COMMANDS_QUEUE.pop().is_some() {}
+        (tabs, ids)
+    }
+
+    #[test]
+    fn closing_lone_tab_of_split_pane_keeps_the_rest() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut tabs, [a, b, c]) = split_tabs();
+        tabs.apply_tab_requests(TabRequests {
+            close: vec![c, c],
+            ..TabRequests::default()
+        });
+        assert_eq!(tabs.get_tab_ids(), vec![a, b]);
+        assert_eq!(tabs.closed.len(), 1);
+    }
+
+    /// Middle-clicking the lone tab of a split pane used to queue its removal
+    /// twice and panic once the pane was gone.
+    #[test]
+    fn middle_click_closes_lone_tab_of_split_pane() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (tabs, [a, b, _]) = split_tabs();
+        let assets = RefCell::new(crate::app::assets::AssetManager::default());
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 500.0))
+            .build_ui_state(
+                |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
+                tabs,
+            );
+        harness.run_steps(2);
+        // Tab buttons carry no accessibility label: aim at the start of the
+        // right pane's tab bar, where its only tab is.
+        let pane = harness
+            .state_mut()
+            .dock_mut()
+            .iter_leaves()
+            .map(|(_, leaf)| leaf.rect)
+            .max_by(|l, r| l.left().total_cmp(&r.left()))
+            .expect("two panes");
+        let pos = pane.left_top() + egui::vec2(20.0, 12.0);
+        harness.event(egui::Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Middle,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        harness.run_steps(2);
+        assert_eq!(harness.state_mut().get_tab_ids(), vec![a, b]);
+    }
+
+    #[test]
+    fn closed_tab_releases_its_watchers_and_load() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut tabs, [_, _, c]) = split_tabs();
+        let folder = std::env::temp_dir();
+        let mut watchers = crate::watcher::DirectoryWatchers::default();
+        watchers.start(&folder, notify::RecursiveMode::NonRecursive);
+        let tab = tabs.get_tab_by_id(c).expect("tab");
+        tab.active_watch_specs = vec![(folder, notify::RecursiveMode::NonRecursive)];
+        let cancel = Arc::clone(&tab.cancel_token);
+        tabs.close_tab(c);
+        assert!(tabs.get_tab_by_id(c).is_none());
+        let ctx = egui::Context::default();
+        for tab in tabs.take_retired() {
+            tab.release(&mut watchers, &ctx);
+        }
+        assert_eq!(watchers.watched_roots(), 0);
+        assert!(cancel.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn close_others_across_split_panes() {
+        let _guard = SNAPSHOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut tabs, [a, b, c]) = split_tabs();
+        tabs.apply_tab_requests(TabRequests {
+            close_others: Some(b),
+            ..TabRequests::default()
+        });
+        assert_eq!(tabs.get_tab_ids(), vec![b]);
+        assert!(tabs.get_tab_by_id(a).is_none() && tabs.get_tab_by_id(c).is_none());
+        // The last tab stays open.
+        tabs.close_tab(b);
+        assert_eq!(tabs.get_tab_ids(), vec![b]);
     }
 
     // ── Unit: DirEntry constructed from real fs has correct entry type ────────

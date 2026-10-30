@@ -59,9 +59,15 @@ make_mac_icon:
     rm -rf static/icon.iconset
     mv static/icon.icns static/resources/icon.icns
 
+# Code signing identity for the macOS app. macOS remembers folder access
+# (and Full Disk Access) per signing identity, so a stable one keeps those
+# grants across rebuilds. Override with DIRFLEET_SIGN_IDENTITY, e.g. a
+# "Developer ID Application: ..." one for distribution, or "-" for ad-hoc.
+sign_identity := env("DIRFLEET_SIGN_IDENTITY", "Apple Development: PIOTR PAWEL SIUSZKO (348SLF5L4U)")
+
 # Build the macOS app
 [group('build')]
-[unix]
+[macos]
 build_mac_app: make_mac_icon
     rm -rf DirFleet.app
     cargo build --release
@@ -72,9 +78,17 @@ build_mac_app: make_mac_icon
     cp static/Info.plist DirFleet.app/Contents/Info.plist
     cp static/resources/* DirFleet.app/Contents/Resources/
     cp target/release/lwa_fm DirFleet.app/Contents/MacOS/lwa_fm
+    just sign_mac_app
+
+# Sign DirFleet.app with the hardened runtime
+[group('build')]
+[macos]
+sign_mac_app:
+    codesign --force --options runtime --timestamp=none --entitlements static/DirFleet.entitlements --sign "{{sign_identity}}" DirFleet.app
+    codesign --verify --strict --verbose=2 DirFleet.app
 
 # Create the macOS installer
-[unix]
+[macos]
 [group('build')]
 create_mac_installer: build_mac_app
     pkgbuild --install-location /Applications --component DirFleet.app DirFleetInstaller.pkg

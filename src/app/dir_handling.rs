@@ -1,27 +1,31 @@
 use std::{
     borrow::Cow,
-    cmp::Ordering,
     collections::BTreeSet,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
 };
 
 use notify::RecursiveMode;
 
-use icu::collator::CollatorBorrowed;
+use icu_collator::CollatorBorrowed;
 use rayon::{
-    iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
-    slice::ParallelSliceMut,
+    iter::{IntoParallelRefIterator, ParallelIterator},
+    slice::{ParallelSlice, ParallelSliceMut},
 };
 
 use crate::{
     app::{
-        Data, MatchMode, Search, SearchTermType, Sort, database,
+        Data, Search, Sort, database,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
     },
-    data::files::{DirEntry, DirEntryData, DirEntryMetaData, DirList, EntryType, SortKey},
-    helper::{DataHolder, normalize_path},
+    data::files::{
+        EntryType, Listing, ListingChange, is_hidden_entry, is_hidden_name, is_system_clutter,
+    },
+    helper::{DataHolder, canonical_form, normalize_path},
 };
 pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
     std::sync::LazyLock::new(|| build_collator(false));
@@ -34,12 +38,31 @@ use super::dock::TabData;
 struct SpecsInputs {
     roots: Vec<PathBuf>,
     is_recursive: bool,
+    depth: usize,
+    linked: Vec<PathBuf>,
 }
 
-/// Memoisation store for `TabData::watcher_specs`. Keeps the hot per-frame
-/// change-detection path (`should_refresh_for_directories`) from redoing the
-/// `walkdir` symlink walk + `canonicalize` syscalls that `compute_watcher_specs`
-/// performs.
+/// Symlinked directories that the last deep walk followed, together with the
+/// roots and depth it walked, so they are only used for the same view.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinkedWatchRoots {
+    roots: Vec<PathBuf>,
+    depth: usize,
+    dirs: Vec<PathBuf>,
+}
+
+/// Result of [`read_directory_streaming`].
+pub struct WalkResult {
+    pub listing: Arc<Listing>,
+    /// Canonical targets of the directory symlinks the walk descended into.
+    /// A recursive watch on the root does not follow them, so each needs its
+    /// own watch. Empty for flat reads.
+    pub linked_dirs: Vec<PathBuf>,
+}
+
+/// Memoisation store for `TabData::watcher_specs`, so the change-detection
+/// path (`should_refresh_for_directories`) does not rebuild and re-normalise
+/// the specs for every watcher batch.
 #[derive(Debug, Default)]
 pub struct WatcherSpecsCache {
     specs: Vec<(PathBuf, RecursiveMode)>,
@@ -72,28 +95,39 @@ where
             }
             extract(data_source.data_get_path_or_persisted::<T>(path))
         }
+        CurrentPath::Trash => extract(data_source.data_get_path_or_persisted::<T>(path)),
         CurrentPath::None => extract(Data::default()),
     }
 }
 
 impl TabData {
     pub fn watcher_specs(&mut self) -> Vec<(PathBuf, RecursiveMode)> {
-        // Always recompute fresh on this reconcile path (called from
-        // `reconcile_tab_watchers`) so newly-created symlinked watch roots are
-        // picked up for single-root recursive views. Multi-root views skip that
-        // discovery (see `compute_watcher_specs`), so this stays cheap for them.
-        // The result also warms the memoisation cache used by the hot
-        // `should_refresh_for_directories` path.
-        let specs = self.compute_watcher_specs();
-        self.watcher_specs_cache.specs.clone_from(&specs);
-        self.watcher_specs_cache.inputs = Some(self.specs_inputs());
-        specs
+        // Symlinked roots come from the deep walk (`set_linked_watch_roots`),
+        // so the specs are a pure function of the tab state and never walk
+        // the filesystem here.
+        self.ensure_watcher_specs_cached();
+        self.watcher_specs_cache.specs.clone()
+    }
+
+    /// Record the directory symlinks the latest walk followed. Returns whether
+    /// they changed, i.e. whether the tab's watchers need reconciling.
+    pub fn set_linked_watch_roots(&mut self, dirs: Vec<PathBuf>) -> bool {
+        let next = LinkedWatchRoots {
+            roots: self.specs_inputs().roots,
+            depth: self.search_depth(),
+            dirs,
+        };
+        if next == self.linked_watch_roots {
+            return false;
+        }
+        self.linked_watch_roots = next;
+        true
     }
 
     /// Recompute the cached watcher specs only if the spec-relevant inputs
     /// (`current_path`, search depth, `extra_dirs`) have changed since the last
     /// compute. This is the cheap path used by the per-frame change handler and
-    /// avoids the `walkdir` + `canonicalize` work done by `compute_watcher_specs`.
+    /// avoids re-normalising every root in `compute_watcher_specs`.
     fn ensure_watcher_specs_cached(&mut self) {
         let inputs = self.specs_inputs();
         let needs_recompute = self.watcher_specs_cache.inputs.as_ref() != Some(&inputs);
@@ -107,39 +141,33 @@ impl TabData {
         let is_recursive = self.search.as_ref().is_some_and(|s| s.depth > 1);
         let mut roots = Vec::new();
         match &self.current_path {
-            CurrentPath::None => {}
+            CurrentPath::None | CurrentPath::Trash => {}
             CurrentPath::One(p) => roots.push(p.clone()),
             CurrentPath::Multiple(ps) => roots.extend(ps.iter().cloned()),
         }
         if let Some(s) = &self.search {
-            roots.extend(s.extra_dirs.iter().cloned());
+            roots.extend(s.extra_dirs().cloned());
         }
         SpecsInputs {
             roots,
             is_recursive,
+            depth: self.search_depth(),
+            linked: self.linked_watch_roots.dirs.clone(),
         }
     }
 
     fn compute_watcher_specs(&self) -> Vec<(PathBuf, RecursiveMode)> {
         // Gather every root this view covers: the current path(s) plus any extra
         // search directories.
-        let mut roots: Vec<PathBuf> = match &self.current_path {
-            CurrentPath::None => vec![],
-            CurrentPath::One(path_buf) => vec![path_buf.clone()],
-            CurrentPath::Multiple(path_bufs) => path_bufs.clone(),
-        };
+        let mut roots: Vec<PathBuf> = self.current_path.get_paths();
         if let Some(search) = &self.search {
-            roots.extend(search.extra_dirs.iter().cloned());
+            roots.extend(search.extra_dirs().cloned());
         }
 
-        // Recursive watching requires discovering symlinked sub-directories,
-        // which `linked_watch_roots` does via a `walkdir` sweep plus a
-        // `canonicalize` syscall per symlink — work that scales with the number
-        // of roots × the tree size at the search depth. Running that once per
-        // favorite during a deep favorites search freezes the UI thread.
+        // A recursive watch does not follow directory symlinks, so each one the
+        // deep walk descended into gets its own watch (see `WalkResult`).
         //
-        // We therefore only afford recursive watching (with symlink expansion)
-        // for a SINGLE root. Multi-root views (favorites, multi-dir searches)
+        // Recursive watching is only used for a SINGLE root. Multi-root views (favorites, multi-dir searches)
         // watch each root non-recursively instead: a change directly inside a
         // root still triggers a refresh, while deeper changes require a manual
         // re-search — an acceptable trade-off for not stalling the UI.
@@ -158,18 +186,23 @@ impl TabData {
 
         let mut specs = BTreeSet::new();
         for root in &roots {
-            let normalized = normalize_path(root);
-            specs.insert((normalized.clone(), mode));
-            if recursive {
-                for linked_root in linked_watch_roots(&normalized, depth) {
-                    specs.insert((linked_root, mode));
-                }
+            specs.insert((normalize_path(root), mode));
+        }
+        let linked = &self.linked_watch_roots;
+        if recursive && linked.depth == depth && linked.roots == roots {
+            for dir in &linked.dirs {
+                specs.insert((dir.clone(), mode));
             }
         }
         specs.into_iter().collect()
     }
 
+    /// How deep to scan. Subfolders are only walked while there is a query,
+    /// so an empty search box shows the folder itself, not its whole tree.
     pub fn search_depth(&self) -> usize {
+        if !self.is_searching() {
+            return 1;
+        }
         self.search.as_ref().map_or(1, |search| search.depth.max(1))
     }
 
@@ -191,9 +224,33 @@ impl TabData {
 
     pub fn set_path(&mut self, path: impl Into<CurrentPath>) -> &CurrentPath {
         let path = path.into();
+        // Back / Forward already saved where you were and set what to restore.
+        let restoring = self.view_restoring();
+        if !restoring && path != self.current_path {
+            let place = self.current_place();
+            self.history.save_place(place);
+            // Going up (or to any folder above), select the folder you came
+            // from, as Explorer does.
+            if let (Some(old), CurrentPath::One(new)) = (self.current_path.single_path(), &path)
+                && let Ok(rest) = old.strip_prefix(new)
+                && let Some(child) = rest.components().next()
+            {
+                self.pending_select = Some(crate::app::file_ops::PendingSelect {
+                    paths: vec![new.join(child)],
+                    rename: false,
+                    since: std::time::Instant::now(),
+                });
+            }
+        }
+        self.history.visit(crate::app::history::HistoryEntry::new(
+            path.clone(),
+            self.search.clone(),
+        ));
         self.current_path = path;
         if let Some(path) = self.current_path.get_path() {
-            self.top_display_path.build(&path, self.show_hidden);
+            self.top_display_path.build(&path);
+        } else if self.current_path.is_trash() {
+            self.top_display_path = crate::app::top_bottom::TopDisplayPath::default();
         }
         &self.current_path
     }
@@ -210,7 +267,7 @@ impl TabData {
             |d: Data<DirectoryViewSettings>| d.data.display_type,
         );
         if let Some(path) = self.current_path.get_path() {
-            self.top_display_path.build(&path, self.show_hidden);
+            self.top_display_path.build(&path);
         }
     }
 
@@ -220,25 +277,62 @@ impl TabData {
             "dir_handling::update_visible_entries",
             self.total_entry_count().to_string()
         );
-        self.visible_entries = if let Some(dir_list) = &self.dir_list {
-            filter_visible_dir_list(dir_list, self.show_hidden, self.search.as_ref())
+        let key = FilterKey::new(
+            &self.listing,
+            self.order_generation,
+            self.show_hidden,
+            self.search.as_ref(),
+        );
+        // Typing extends the query: names matching the longer query are a
+        // subset of the previous matches, so only those need re-checking.
+        let narrowing = key
+            .as_ref()
+            .zip(self.filter_key.as_ref())
+            .is_some_and(|(next, previous)| next.narrows(previous));
+        let visible = if narrowing {
+            filter_visible(
+                &self.listing,
+                &self.visible_entries,
+                self.show_hidden,
+                self.search.as_ref(),
+            )
         } else {
-            filter_visible_entries(&self.list, self.show_hidden, self.search.as_ref())
+            filter_visible(
+                &self.listing,
+                &self.order,
+                self.show_hidden,
+                self.search.as_ref(),
+            )
         };
+        self.visible_entries = visible;
+        self.filter_key = key;
     }
 
     pub fn sort_entries(&mut self, sort_settings: &DirectoryViewSettings) {
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::dir_handling::sort_entries");
         self.display_type = sort_settings.display_type;
-        if let Some(dir_list) = &mut self.dir_list {
-            sort_dir_entry_data_slice(
-                std::sync::Arc::make_mut(&mut dir_list.entries),
-                sort_settings,
-            );
-        } else {
-            sort_entries_vec(&mut self.list, sort_settings);
-        }
+        self.order = sort_order(&self.listing, sort_settings);
+        self.order_generation = self.order_generation.wrapping_add(1);
+    }
+
+    /// Install a freshly loaded listing together with its precomputed sort
+    /// order and visible rows.
+    pub fn set_listing(&mut self, listing: Arc<Listing>, order: Vec<u32>, visible: Vec<u32>) {
+        self.listing = listing;
+        self.order = order;
+        self.visible_entries = visible;
+        self.order_generation = self.order_generation.wrapping_add(1);
+        self.filter_key = None;
+    }
+
+    /// Show `entries` in the given order, unfiltered (tests and fixtures).
+    #[cfg(test)]
+    pub fn set_entries(&mut self, entries: &[crate::data::files::DirEntry]) {
+        let listing = Arc::new(Listing::from_entries(entries));
+        let order: Vec<u32> = (0..listing.len() as u32).collect();
+        let visible = order.clone();
+        self.set_listing(listing, order, visible);
     }
 
     #[cfg(test)]
@@ -247,675 +341,485 @@ impl TabData {
         path: &Path,
         sort_settings: &DirectoryViewSettings,
     ) -> bool {
-        let Ok(metadata) = std::fs::metadata(path) else {
-            return false;
-        };
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
-        let meta: DirEntryMetaData = metadata.into();
-        let mut updated = false;
-
-        if let Some(dir_list) = &mut self.dir_list {
-            let Some(parent) = path.parent().map(normalize_path) else {
-                return false;
-            };
-            if normalize_path(Path::new(dir_list.dir.as_ref())) != parent {
-                return false;
-            }
-            let entries = std::sync::Arc::make_mut(&mut dir_list.entries);
-            if let Some(entry) = entries
-                .iter_mut()
-                .find(|entry| entry.file_name == file_name)
-            {
-                entry.meta = meta;
-                updated = true;
-            }
-        } else if let Some(entry) = self.list.iter_mut().find(|entry| {
-            entry.file_name == file_name
-                && path.parent().is_some_and(|parent| {
-                    normalize_path(Path::new(entry.dir.as_ref())) == normalize_path(parent)
-                })
-        }) {
-            entry.meta = meta;
-            updated = true;
-        }
-
-        if !updated {
-            return false;
-        }
-
-        if matches!(
-            sort_settings.sorting,
-            Sort::Modified | Sort::Created | Sort::Size
-        ) {
-            self.sort_entries(sort_settings);
-        }
-        self.update_visible_entries();
-        true
+        self.apply_listing_changes(
+            &[crate::watcher::ResolvedChange::from_disk(
+                path.to_path_buf(),
+                false,
+            )],
+            sort_settings,
+        ) == Some(true)
     }
 
-    /// Apply a coalesced watcher batch to a single-directory listing. The
-    /// backing slice is cloned once and sorting/filtering run once regardless
-    /// of how many files changed.
+    /// Apply a coalesced watcher batch to a single-directory listing. Returns
+    /// `false` when the batch cannot be applied surgically and the caller
+    /// should fall back to a structural refresh.
     pub fn apply_file_changes(
         &mut self,
-        changes: &[crate::watcher::FileChange],
+        changes: &[crate::watcher::ResolvedChange],
         sort_settings: &DirectoryViewSettings,
     ) -> bool {
-        let Some(dir_list) = self.dir_list.as_mut() else {
-            return false;
-        };
-        let listing_dir = normalize_path(Path::new(dir_list.dir.as_ref()));
-        if changes.iter().any(|change| {
-            let path = match change {
-                crate::watcher::FileChange::Metadata(path)
-                | crate::watcher::FileChange::Created(path)
-                | crate::watcher::FileChange::Removed(path) => path,
-            };
-            path.parent().map(normalize_path).as_ref() != Some(&listing_dir)
-        }) {
-            return false;
-        }
-
-        let mut entries = dir_list.entries.iter().cloned().collect::<Vec<_>>();
-        for change in changes {
-            let path = match change {
-                crate::watcher::FileChange::Metadata(path)
-                | crate::watcher::FileChange::Created(path)
-                | crate::watcher::FileChange::Removed(path) => path,
-            };
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                return false;
-            };
-            match change {
-                crate::watcher::FileChange::Metadata(_) => {
-                    let Ok(metadata) = std::fs::metadata(path) else {
-                        return false;
-                    };
-                    let Some(entry) = entries
-                        .iter_mut()
-                        .find(|entry| entry.file_name == file_name)
-                    else {
-                        return false;
-                    };
-                    entry.meta = metadata.into();
-                }
-                crate::watcher::FileChange::Created(_) => {
-                    let Ok(metadata) = std::fs::metadata(path) else {
-                        continue;
-                    };
-                    let meta: DirEntryMetaData = metadata.into();
-                    let data = DirEntryData {
-                        sort_key: SortKey::new_path(
-                            file_name,
-                            matches!(meta.entry_type, EntryType::File),
-                        ),
-                        file_name: file_name.to_owned(),
-                        meta,
-                    };
-                    if let Some(existing) = entries
-                        .iter_mut()
-                        .find(|entry| entry.file_name == file_name)
-                    {
-                        *existing = data;
-                    } else {
-                        entries.push(data);
-                    }
-                }
-                crate::watcher::FileChange::Removed(_) => {
-                    entries.retain(|entry| entry.file_name != file_name);
-                }
-            }
-        }
-
-        dir_list.entries = std::sync::Arc::from(entries);
-        self.sort_entries(sort_settings);
-        self.update_visible_entries();
-        true
+        self.apply_listing_changes(changes, sort_settings).is_some()
     }
 
-    /// Surgically insert a newly-created file entry without a full directory
-    /// re-read. Only the lazy single-directory listing (`dir_list`) supports
-    /// this; search / multi-directory / recursive views return `false` so the
-    /// caller can fall back to a structural refresh. Returns `true` if applied.
+    /// `None`: not applicable (refresh instead). `Some(changed)` otherwise.
+    /// Metadata was read on the watcher thread, so this never touches disk.
+    fn apply_listing_changes(
+        &mut self,
+        changes: &[crate::watcher::ResolvedChange],
+        sort_settings: &DirectoryViewSettings,
+    ) -> Option<bool> {
+        let listing_dir = canonical_form(Path::new(self.listing.single_dir()?.as_ref()));
+        let mut listing_changes: Vec<ListingChange<'_>> = Vec::with_capacity(changes.len());
+        for change in changes {
+            if change.path.parent().map(canonical_form).as_ref() != Some(&listing_dir) {
+                return None;
+            }
+            listing_changes.push(change.listing_change()?);
+        }
+        let Some(next) = self.listing.with_changes(&listing_changes) else {
+            return Some(false);
+        };
+        let structural = changes
+            .iter()
+            .any(|change| !matches!(change.kind, crate::watcher::ChangeKind::Update(_)));
+        self.listing = Arc::new(next);
+        // Metadata-only edits keep entry indices stable, so a name (or random)
+        // order and the filter results remain valid as they are.
+        if structural || !matches!(sort_settings.sorting, Sort::Name | Sort::Random) {
+            self.sort_entries(sort_settings);
+            self.update_visible_entries();
+        }
+        Some(true)
+    }
+
     #[cfg(test)]
     pub fn insert_file_entry(
         &mut self,
         path: &Path,
         sort_settings: &DirectoryViewSettings,
     ) -> bool {
-        let Some(dir_list) = self.dir_list.as_mut() else {
-            return false;
-        };
-        let Some(parent) = path.parent().map(normalize_path) else {
-            return false;
-        };
-        if normalize_path(Path::new(dir_list.dir.as_ref())) != parent {
-            return false;
-        }
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
-        let Ok(metadata) = std::fs::metadata(path) else {
-            return false;
-        };
-        let meta: DirEntryMetaData = metadata.into();
-        let is_file = matches!(meta.entry_type, EntryType::File);
-        let data = DirEntryData {
-            sort_key: SortKey::new_path(file_name, is_file),
-            file_name: file_name.to_string(),
-            meta,
-        };
-        // `entries` is an `Arc<[DirEntryData]>` (an immutable-sized slice), so a
-        // length change requires rebuilding it via a `Vec`. This stays far
-        // cheaper than a full directory re-scan (one metadata syscall + an
-        // in-memory clone, no per-entry `fs` reads).
-        let mut entries: Vec<DirEntryData> = dir_list.entries.iter().cloned().collect();
-        // Replace an existing entry with the same name rather than duplicating
-        // (a re-create after a fast delete, or a same-name rename target).
-        if let Some(existing) = entries
-            .iter_mut()
-            .find(|entry| entry.file_name == data.file_name)
-        {
-            *existing = data;
-        } else {
-            entries.push(data);
-        }
-        dir_list.entries = std::sync::Arc::from(entries);
-        self.sort_entries(sort_settings);
-        self.update_visible_entries();
-        true
+        self.apply_listing_changes(
+            &[crate::watcher::ResolvedChange::from_disk(
+                path.to_path_buf(),
+                true,
+            )],
+            sort_settings,
+        ) == Some(true)
     }
 
-    /// Surgically remove a deleted file entry without a full directory re-read.
-    /// Same scoping rules as [`insert_file_entry`]; returns `true` if removed.
     #[cfg(test)]
     pub fn remove_file_entry(
         &mut self,
         path: &Path,
         sort_settings: &DirectoryViewSettings,
     ) -> bool {
-        let Some(dir_list) = self.dir_list.as_mut() else {
-            return false;
-        };
-        let Some(parent) = path.parent().map(normalize_path) else {
-            return false;
-        };
-        if normalize_path(Path::new(dir_list.dir.as_ref())) != parent {
-            return false;
-        }
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
-        let mut entries: Vec<DirEntryData> = dir_list.entries.iter().cloned().collect();
-        let before = entries.len();
-        entries.retain(|entry| entry.file_name != file_name);
-        if entries.len() == before {
-            return false;
-        }
-        dir_list.entries = std::sync::Arc::from(entries);
-        self.sort_entries(sort_settings);
-        self.update_visible_entries();
-        true
+        self.apply_listing_changes(
+            &[crate::watcher::ResolvedChange {
+                path: path.to_path_buf(),
+                kind: crate::watcher::ChangeKind::Remove,
+            }],
+            sort_settings,
+        ) == Some(true)
     }
 
     pub fn deep_or_multiple_paths(&self) -> bool {
+        // The Recycle Bin shows where each item was deleted from.
         self.current_path.multiple_paths()
+            || self.current_path.is_trash()
             || self.search.as_ref().map_or(1, |search| search.depth) > 1
             || self
                 .search
                 .as_ref()
-                .is_some_and(|s| !s.extra_dirs.is_empty())
+                .is_some_and(|s| s.extra_dirs().next().is_some())
     }
 }
 
-/// Walk a single root path and return its entries.
-/// Shared helper used by [`read_directory`] for each path in the parallelized
-/// per-root walk.
-fn walk_single_root(
-    root: &PathBuf,
-    depth: usize,
+/// How often a deep walk publishes partial results to the UI.
+const PARTIAL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Shared state of one parallel recursive walk.
+struct Walk<'a> {
+    max_depth: usize,
     show_hidden: bool,
-    cancel: &AtomicBool,
-) -> Vec<DirEntry> {
-    if cancel.load(AtomicOrdering::SeqCst) {
-        return Vec::new();
+    cancel: &'a AtomicBool,
+    /// One listing per visited directory; concatenated at the end.
+    parts: std::sync::Mutex<Vec<Listing>>,
+    entries: std::sync::atomic::AtomicUsize,
+    /// Canonical targets of followed directory symlinks (loop protection).
+    followed: std::sync::Mutex<foldhash::HashSet<PathBuf>>,
+    last_partial: std::sync::Mutex<std::time::Instant>,
+    on_partial: &'a (dyn Fn(Arc<Listing>) + Sync),
+}
+
+impl Walk<'_> {
+    fn cancelled(&self) -> bool {
+        self.cancel.load(AtomicOrdering::Relaxed)
     }
-    if depth > 1 {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!(
-            "lwa_fm::dir_handling::walk_single_root::walkdir",
-            root.to_string_lossy().as_ref()
-        );
-        let walk_entries: Vec<walkdir::DirEntry> = walkdir::WalkDir::new(root)
-            .follow_links(true)
-            .min_depth(1)
-            .max_depth(depth + 1)
-            .into_iter()
-            .filter_entry(|e| {
-                if e.depth() == 0 {
-                    return true;
-                }
-                if show_hidden {
-                    return true;
-                }
-                let name = e.file_name().to_string_lossy();
-                !name.starts_with('.') && !name.starts_with('$')
-            })
-            .filter_map(Result::ok)
-            .take_while(|_| !cancel.load(AtomicOrdering::SeqCst))
-            .collect();
 
-        if cancel.load(AtomicOrdering::SeqCst) {
-            return Vec::new();
+    /// List `dir` (whose entries sit at `depth`) and recurse into its
+    /// sub-directories in parallel. Entry metadata, attributes and link-ness
+    /// all come from the bulk directory read; the only extra syscall is the
+    /// `canonicalize` that guards against symlink loops.
+    fn visit<'scope>(&'scope self, scope: &rayon::Scope<'scope>, dir: &Path, depth: usize) {
+        if self.cancelled() {
+            return;
         }
+        let dir_name: Arc<str> = Arc::from(crate::helper::canonical_string(dir));
+        let mut builder = crate::data::files::ListingBuilder::with_capacity(64);
+        let dir_index = builder.intern_dir(&dir_name);
+        let pushed = std::cell::Cell::new(0usize);
+        let mut sink = |entry: &crate::fs_enum::RawEntry<'_>| {
+            if !self.show_hidden
+                && (entry.is_hidden_attr()
+                    || entry.name.starts_with_ascii(b'.')
+                    || (cfg!(windows) && entry.name.starts_with_ascii(b'$')))
+            {
+                return;
+            }
+            let meta = entry.metadata();
+            if meta.entry_type == EntryType::Directory && depth < self.max_depth {
+                let child = dir.join(entry.name.to_os_string());
+                if self.should_descend(&child, entry.is_symlink()) {
+                    scope.spawn(move |scope| self.visit(scope, &child, depth + 1));
+                }
+            }
+            builder.push_raw(dir_index, &entry.name, meta);
+            pushed.set(pushed.get() + 1);
+        };
+        // Fall back to `read_dir` only when the bulk read produced nothing,
+        // so a mid-way failure never lists a directory twice.
+        if crate::fs_enum::enumerate(dir, &mut sink).is_err()
+            && pushed.get() == 0
+            && crate::fs_enum::enumerate_std(dir, &mut sink).is_err()
+        {
+            return;
+        }
+        drop(sink);
+        let listing = builder.finish();
+        if listing.is_empty() {
+            return;
+        }
+        self.entries
+            .fetch_add(listing.len(), AtomicOrdering::Relaxed);
+        if let Ok(mut parts) = self.parts.lock() {
+            parts.push(listing);
+        }
+        self.maybe_publish();
+    }
 
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!(
-            "lwa_fm::dir_handling::walk_single_root::parallel_convert",
-            walk_entries.len().to_string().as_str()
-        );
-        walk_entries
-            .into_par_iter()
-            .filter_map(|e| e.try_into().ok())
-            .collect()
-    } else {
-        let mut entries = Vec::new();
-        database::read_dir(root, &mut entries);
-        entries
+    fn should_descend(&self, path: &Path, is_symlink: bool) -> bool {
+        if !is_symlink {
+            return true;
+        }
+        let Ok(target) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        self.followed
+            .lock()
+            .is_ok_and(|mut followed| followed.insert(target))
+    }
+
+    fn maybe_publish(&self) {
+        let Ok(mut last) = self.last_partial.try_lock() else {
+            return;
+        };
+        if last.elapsed() < PARTIAL_INTERVAL {
+            return;
+        }
+        *last = std::time::Instant::now();
+        drop(last);
+        let snapshot = self.snapshot();
+        (self.on_partial)(Arc::new(snapshot));
+    }
+
+    fn snapshot(&self) -> Listing {
+        self.parts
+            .lock()
+            .map(|parts| Listing::concat(parts.iter()))
+            .unwrap_or_default()
     }
 }
 
+/// Read every root (one level for `depth <= 1`, recursively otherwise) into a
+/// single listing. A single flat root returns the cached listing itself, with
+/// no copying.
+#[cfg(test)]
 pub fn read_directory(
     paths: &[PathBuf],
     depth: usize,
     show_hidden: bool,
     cancel: &AtomicBool,
-) -> Vec<DirEntry> {
+) -> Arc<Listing> {
+    read_directory_streaming(paths, depth, show_hidden, cancel, &|_| {}).listing
+}
+
+/// [`read_directory`] that also hands partial results of deep walks to
+/// `on_partial` every [`PARTIAL_INTERVAL`], so large searches fill in
+/// progressively.
+pub fn read_directory_streaming(
+    paths: &[PathBuf],
+    depth: usize,
+    show_hidden: bool,
+    cancel: &AtomicBool,
+    on_partial: &(dyn Fn(Arc<Listing>) + Sync),
+) -> WalkResult {
     #[cfg(feature = "profiling")]
     puffin::profile_scope!("lwa_fm::dir_handling::read_directory");
 
-    // Parallel per-root walk for multiple paths.
-    // For a single path the overhead of rayon dispatch is negligible.
-    let lists: Vec<Vec<DirEntry>> = paths
-        .par_iter()
-        .map(|d| walk_single_root(d, depth, show_hidden, cancel))
+    // Normalise each root once; entry paths below it are then derived
+    // lexically instead of paying a `canonicalize` per entry.
+    let mut roots: Vec<PathBuf> = paths.iter().map(|path| normalize_path(path)).collect();
+    roots.sort();
+    roots.dedup();
+
+    if depth <= 1 {
+        let mut parts: Vec<Arc<Listing>> = roots
+            .par_iter()
+            .filter_map(|root| database::read_dir(root))
+            .collect();
+        let listing = match parts.len() {
+            0 => Arc::default(),
+            1 => parts.pop().unwrap_or_default(),
+            _ => Arc::new(Listing::concat(parts.iter().map(AsRef::as_ref))),
+        };
+        return WalkResult {
+            listing,
+            linked_dirs: Vec::new(),
+        };
+    }
+
+    // A root nested inside another root is already covered by its walk.
+    let roots: Vec<PathBuf> = roots
+        .iter()
+        .filter(|root| {
+            !roots
+                .iter()
+                .any(|other| other != *root && root.starts_with(other))
+        })
+        .cloned()
         .collect();
 
-    let mut list: Vec<DirEntry> = lists.into_iter().flatten().collect();
-
-    // Dedup is only needed with multiple roots or recursive walks (symlinks may cause overlap)
-    if paths.len() > 1 || depth > 1 {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!(
-            "lwa_fm::dir_handling::read_directory::dedup",
-            list.len().to_string().as_str()
-        );
-        let mut seen: std::collections::HashSet<String> =
-            std::collections::HashSet::with_capacity(list.len());
-        list.retain(|e| seen.insert(e.full_path_string()));
-    }
-    list
-}
-
-fn sort_dir_entry_data_slice(entries: &mut [DirEntryData], settings: &DirectoryViewSettings) {
-    match settings.sorting {
-        Sort::Modified => {
-            if settings.invert_sort {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
-                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
-                    file_type_cmp.then(b.meta.modified_at.cmp(&a.meta.modified_at))
-                });
-            } else {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
-                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
-                    file_type_cmp.then(a.meta.modified_at.cmp(&b.meta.modified_at))
-                });
-            }
+    let walk = Walk {
+        // `depth` counts levels below the root, matching the former
+        // `walkdir` `max_depth(depth + 1)`.
+        max_depth: depth + 1,
+        show_hidden,
+        cancel,
+        parts: std::sync::Mutex::new(Vec::new()),
+        entries: std::sync::atomic::AtomicUsize::new(0),
+        followed: std::sync::Mutex::new(foldhash::HashSet::default()),
+        last_partial: std::sync::Mutex::new(std::time::Instant::now()),
+        on_partial,
+    };
+    rayon::scope(|scope| {
+        for root in &roots {
+            let walk = &walk;
+            let root = root.clone();
+            scope.spawn(move |scope| walk.visit(scope, &root, 1));
         }
-        Sort::Name => {
-            if settings.invert_sort {
-                entries.par_sort_unstable_by(|a, b| b.sort_key.compare(&a.sort_key));
-            } else {
-                entries.par_sort_unstable_by(|a, b| a.sort_key.compare(&b.sort_key));
-            }
-        }
-        Sort::Created => {
-            if settings.invert_sort {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
-                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
-                    file_type_cmp.then(b.meta.created_at.cmp(&a.meta.created_at))
-                });
-            } else {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
-                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
-                    file_type_cmp.then(a.meta.created_at.cmp(&b.meta.created_at))
-                });
-            }
-        }
-        Sort::Size => {
-            if settings.invert_sort {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
-                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
-                    file_type_cmp.then(b.meta.size.cmp(&a.meta.size))
-                });
-            } else {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = (a.meta.entry_type == crate::data::files::EntryType::File)
-                        .cmp(&(b.meta.entry_type == crate::data::files::EntryType::File));
-                    file_type_cmp.then(a.meta.size.cmp(&b.meta.size))
-                });
-            }
-        }
-        Sort::Random => {
-            use rand::seq::SliceRandom;
-            use rand::thread_rng;
-            let mut rng = thread_rng();
-            entries.shuffle(&mut rng);
-        }
-    }
-}
-
-pub fn sort_entries_vec(entries: &mut [DirEntry], settings: &DirectoryViewSettings) {
-    match settings.sorting {
-        Sort::Modified => {
-            if settings.invert_sort {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = a.is_file().cmp(&b.is_file());
-                    file_type_cmp.then(b.meta.modified_at.cmp(&a.meta.modified_at))
-                });
-            } else {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = a.is_file().cmp(&b.is_file());
-                    file_type_cmp.then(a.meta.modified_at.cmp(&b.meta.modified_at))
-                });
-            }
-        }
-        Sort::Name => {
-            if settings.invert_sort {
-                entries.par_sort_unstable_by(|a, b| b.sort_key.compare(&a.sort_key));
-            } else {
-                entries.par_sort_unstable_by(|a, b| a.sort_key.compare(&b.sort_key));
-            }
-        }
-        Sort::Created => {
-            if settings.invert_sort {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = a.is_file().cmp(&b.is_file());
-                    file_type_cmp.then(b.meta.created_at.cmp(&a.meta.created_at))
-                });
-            } else {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = a.is_file().cmp(&b.is_file());
-                    file_type_cmp.then(a.meta.created_at.cmp(&b.meta.created_at))
-                });
-            }
-        }
-        Sort::Size => {
-            if settings.invert_sort {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = a.is_file().cmp(&b.is_file());
-                    file_type_cmp.then(b.meta.size.cmp(&a.meta.size))
-                });
-            } else {
-                entries.par_sort_unstable_by(|a, b| {
-                    let file_type_cmp = a.is_file().cmp(&b.is_file());
-                    file_type_cmp.then(a.meta.size.cmp(&b.meta.size))
-                });
-            }
-        }
-        Sort::Random => {
-            use rand::seq::SliceRandom;
-            use rand::thread_rng;
-            let mut rng = thread_rng();
-            entries.shuffle(&mut rng);
-        }
-    }
-}
-
-enum CompiledTerm {
-    Plain(String),
-    Glob(glob::Pattern),
-    Regex(regex::Regex),
-}
-
-fn compile_term(
-    pattern: &str,
-    term_type: SearchTermType,
-    case_sensitive: bool,
-) -> Option<CompiledTerm> {
-    match term_type {
-        SearchTermType::Plain => {
-            if case_sensitive {
-                Some(CompiledTerm::Plain(pattern.to_string()))
-            } else {
-                Some(CompiledTerm::Plain(pattern.to_lowercase()))
-            }
-        }
-        SearchTermType::Glob => glob::Pattern::new(pattern).ok().map(CompiledTerm::Glob),
-        SearchTermType::Regex => regex::Regex::new(pattern).ok().map(CompiledTerm::Regex),
-    }
-}
-
-struct CompiledSearch {
-    terms: Vec<CompiledTerm>,
-    mode: MatchMode,
-    has_plain: bool,
-}
-
-impl CompiledSearch {
-    fn matches(
-        &self,
-        name: &str,
-        case_sensitive: bool,
-        collator: Option<&CollatorBorrowed<'_>>,
-    ) -> bool {
-        let matches_one = |term: &CompiledTerm| -> bool {
-            match term {
-                CompiledTerm::Plain(pattern) => {
-                    plain_matches(name, pattern, case_sensitive, collator)
-                }
-                CompiledTerm::Glob(glob) => glob.matches(name),
-                CompiledTerm::Regex(re) => re.is_match(name),
-            }
-        };
-        match self.mode {
-            MatchMode::All => self.terms.iter().all(matches_one),
-            MatchMode::Any => self.terms.iter().any(matches_one),
-        }
-    }
-}
-
-fn contains_ignore_ascii_case(name: &str, pattern: &str) -> bool {
-    let needle = pattern.as_bytes();
-    if needle.is_empty() {
-        return true;
-    }
-    if needle.len() > name.len() {
-        return false;
-    }
-    name.as_bytes()
-        .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle))
-}
-
-fn plain_matches(
-    name: &str,
-    pattern: &str,
-    case_sensitive: bool,
-    collator: Option<&CollatorBorrowed<'_>>,
-) -> bool {
-    if pattern.is_empty() {
-        return true;
-    }
-    if case_sensitive {
-        return name.contains(pattern);
-    }
-    // Very common fast path for large ASCII-heavy directories. This avoids the
-    // per-character ICU collation loop while keeping the collator fallback for
-    // non-ASCII names where locale-aware matching matters.
-    if name.is_ascii() && pattern.is_ascii() {
-        return contains_ignore_ascii_case(name, pattern);
-    }
-
-    let search_len = pattern.len();
-    if search_len > name.len() {
-        return false;
-    }
-    let chars = name.as_bytes();
-    if let Some(collator) = collator {
-        for (j, _) in name.char_indices() {
-            if j + search_len > name.len() {
-                break;
-            }
-            if !name.is_char_boundary(j + search_len) {
-                continue;
-            }
-            if collator.compare_utf8(pattern.as_bytes(), &chars[j..j + search_len])
-                == Ordering::Equal
-            {
-                return true;
-            }
-        }
-    }
-    name.to_lowercase().contains(pattern)
-}
-
-fn compile_search(search: Option<&Search>) -> (bool, Option<CompiledSearch>) {
-    let case_sensitive = search.is_some_and(|s| s.case_sensitive);
-    let compiled_search = search.and_then(|s| {
-        let terms: Vec<CompiledTerm> = if !s.terms.is_empty() {
-            s.terms
-                .iter()
-                .filter_map(|st| compile_term(&st.pattern, st.term_type, case_sensitive))
-                .collect()
-        } else if !s.value.is_empty() {
-            compile_term(&s.value, s.term_type, case_sensitive)
-                .into_iter()
-                .collect()
-        } else {
-            return None;
-        };
-        if terms.is_empty() {
-            return None;
-        }
-        let has_plain = s
-            .terms
-            .iter()
-            .any(|st| st.term_type == SearchTermType::Plain)
-            || (s.terms.is_empty() && s.term_type == SearchTermType::Plain);
-        Some(CompiledSearch {
-            terms,
-            mode: s.match_mode,
-            has_plain,
-        })
     });
-    (case_sensitive, compiled_search)
-}
-
-pub fn filter_visible_entries(
-    entries: &[DirEntry],
-    show_hidden: bool,
-    search: Option<&Search>,
-) -> Vec<usize> {
-    let mut visible = Vec::new();
-    let (case_sensitive, compiled_search) = compile_search(search);
-    let collator = if compiled_search.as_ref().is_some_and(|cs| cs.has_plain) {
-        Some(build_collator(case_sensitive))
-    } else {
-        None
-    };
-    for (i, entry) in entries.iter().enumerate() {
-        let name = entry.get_splitted_path().1;
-        if !show_hidden && (name.starts_with('.') || name.starts_with('$')) {
-            continue;
-        }
-        if let Some(ref cs) = compiled_search
-            && !cs.matches(name, case_sensitive, collator.as_ref())
-        {
-            continue;
-        }
-        visible.push(i);
-    }
-    visible
-}
-
-pub fn filter_visible_dir_list(
-    dir_list: &DirList,
-    show_hidden: bool,
-    search: Option<&Search>,
-) -> Vec<usize> {
-    let mut visible = Vec::new();
-    let (case_sensitive, compiled_search) = compile_search(search);
-    let collator = if compiled_search.as_ref().is_some_and(|cs| cs.has_plain) {
-        Some(build_collator(case_sensitive))
-    } else {
-        None
-    };
-    for (i, entry) in dir_list.entries.iter().enumerate() {
-        let name = entry.file_name.as_str();
-        if !show_hidden && (name.starts_with('.') || name.starts_with('$')) {
-            continue;
-        }
-        if let Some(ref cs) = compiled_search
-            && !cs.matches(name, case_sensitive, collator.as_ref())
-        {
-            continue;
-        }
-        visible.push(i);
-    }
-    visible
-}
-
-fn linked_watch_roots(root: &Path, depth: usize) -> BTreeSet<PathBuf> {
-    let mut linked_roots = BTreeSet::new();
-    for entry in walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .min_depth(1)
-        .max_depth(depth)
-        .into_iter()
-        .flatten()
-    {
-        if !entry.path_is_symlink() {
-            continue;
-        }
-        let Ok(target) = std::fs::canonicalize(entry.path()) else {
-            continue;
+    if walk.cancelled() {
+        return WalkResult {
+            listing: Arc::default(),
+            linked_dirs: Vec::new(),
         };
-        if target.is_dir() {
-            linked_roots.insert(normalize_path(&target));
+    }
+    let listing = Arc::new(walk.snapshot());
+    let mut linked_dirs: Vec<PathBuf> = walk
+        .followed
+        .into_inner()
+        .unwrap_or_default()
+        .iter()
+        .map(|target| canonical_form(target))
+        .collect();
+    linked_dirs.sort();
+    linked_dirs.dedup();
+    WalkResult {
+        listing,
+        linked_dirs,
+    }
+}
+
+/// Compute the display order (indices into `listing`) for `settings`.
+pub fn sort_order(listing: &Listing, settings: &DirectoryViewSettings) -> Vec<u32> {
+    use std::cmp::Reverse;
+    let mut order: Vec<u32> = (0..listing.len() as u32).collect();
+    let is_file = |index: u32| listing.is_file(index as usize);
+    let meta = |index: u32| listing.meta(index as usize);
+    match (settings.sorting, settings.invert_sort) {
+        (Sort::Name, invert) => {
+            let keys = listing.sort_keys();
+            // Folders stay first in both directions; only names reverse.
+            order.par_sort_unstable_by(|a, b| {
+                let names = keys.get(*a as usize).cmp(keys.get(*b as usize));
+                is_file(*a)
+                    .cmp(&is_file(*b))
+                    .then(if invert { names.reverse() } else { names })
+            });
+        }
+        (Sort::Modified, false) => {
+            order.par_sort_unstable_by_key(|&i| (is_file(i), meta(i).modified_at));
+        }
+        (Sort::Modified, true) => {
+            order.par_sort_unstable_by_key(|&i| (is_file(i), Reverse(meta(i).modified_at)));
+        }
+        (Sort::Created, false) => {
+            order.par_sort_unstable_by_key(|&i| (is_file(i), meta(i).created_at));
+        }
+        (Sort::Created, true) => {
+            order.par_sort_unstable_by_key(|&i| (is_file(i), Reverse(meta(i).created_at)));
+        }
+        (Sort::Size, false) => {
+            order.par_sort_unstable_by_key(|&i| (is_file(i), meta(i).size));
+        }
+        (Sort::Size, true) => {
+            order.par_sort_unstable_by_key(|&i| (is_file(i), Reverse(meta(i).size)));
+        }
+        (Sort::Kind, invert) => {
+            // By extension, then name; folders first in both directions.
+            let keys = listing.sort_keys();
+            let kinds: Vec<String> = (0..listing.len())
+                .map(|index| {
+                    crate::app::dock::kind_label(
+                        listing.name(index),
+                        listing.meta(index).entry_type,
+                    )
+                })
+                .collect();
+            order.par_sort_unstable_by(|a, b| {
+                let (a, b) = (*a as usize, *b as usize);
+                let kind = kinds[a].cmp(&kinds[b]);
+                listing.is_file(a).cmp(&listing.is_file(b)).then(
+                    (if invert { kind.reverse() } else { kind })
+                        .then_with(|| keys.get(a).cmp(keys.get(b))),
+                )
+            });
+        }
+        (Sort::Random, _) => {
+            use rand::seq::SliceRandom;
+            order.shuffle(&mut rand::thread_rng());
         }
     }
-    linked_roots
+    order
+}
+
+/// Snapshot of the inputs of the last filter run, used to detect when a new
+/// query only narrows the previous one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterKey {
+    listing: usize,
+    order_generation: u64,
+    show_hidden: bool,
+    case_sensitive: bool,
+    /// Present only for a single plain term (the typing case).
+    plain: Option<String>,
+}
+
+impl FilterKey {
+    fn new(
+        listing: &Arc<Listing>,
+        order_generation: u64,
+        show_hidden: bool,
+        search: Option<&Search>,
+    ) -> Option<Self> {
+        let (case_sensitive, plain) = match search {
+            None => (false, None),
+            Some(s) if s.simple_text().is_some() || !s.has_query() => {
+                let text = s.simple_text().unwrap_or_default();
+                let value = if s.case_sensitive {
+                    text.to_owned()
+                } else {
+                    text.to_lowercase()
+                };
+                (s.case_sensitive, Some(value))
+            }
+            Some(_) => return None,
+        };
+        Some(Self {
+            listing: Arc::as_ptr(listing) as usize,
+            order_generation,
+            show_hidden,
+            case_sensitive,
+            plain,
+        })
+    }
+
+    fn narrows(&self, previous: &Self) -> bool {
+        self.listing == previous.listing
+            && self.order_generation == previous.order_generation
+            && self.show_hidden == previous.show_hidden
+            && self.case_sensitive == previous.case_sensitive
+            && match (&self.plain, &previous.plain) {
+                (Some(next), Some(prev)) => next.len() > prev.len() && next.contains(prev.as_str()),
+                _ => false,
+            }
+    }
+}
+
+const PARALLEL_FILTER_THRESHOLD: usize = 16 * 1024;
+
+/// Indices from `candidates` (in their order) that pass the hidden-file and
+/// search filters.
+pub fn filter_visible(
+    listing: &Listing,
+    candidates: &[u32],
+    show_hidden: bool,
+    search: Option<&Search>,
+) -> Vec<u32> {
+    let compiled = crate::app::search::filter::CompiledQuery::new(search);
+    let folded = compiled
+        .as_ref()
+        .filter(|query| query.needs_folded)
+        .map(|_| listing.folded_names());
+    let keep = |&index: &u32| -> bool {
+        let index = index as usize;
+        let name = listing.name(index);
+        if is_system_clutter(name) || (!show_hidden && is_hidden_entry(name, listing.meta(index))) {
+            return false;
+        }
+        compiled
+            .as_ref()
+            .is_none_or(|cs| cs.matches(listing, folded, index))
+    };
+    if candidates.len() < PARALLEL_FILTER_THRESHOLD {
+        return candidates.iter().copied().filter(|i| keep(i)).collect();
+    }
+    let chunks: Vec<Vec<u32>> = candidates
+        .par_chunks(4096)
+        .map(|chunk| chunk.iter().copied().filter(|i| keep(i)).collect())
+        .collect();
+    chunks.concat()
 }
 
 pub fn get_directories(path: &Path, show_hidden: bool) -> BTreeSet<Cow<'static, str>> {
-    get_directories_recursive(path, show_hidden, 2)
+    // One level: going deeper reads every child folder at once, which on
+    // macOS asks for Desktop, Documents and Downloads access together.
+    get_directories_recursive(path, show_hidden, 1)
 }
 
-pub fn has_subdirectories(path: &Path, show_hidden: bool) -> bool {
-    walkdir::WalkDir::new(path)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(Result::ok)
-        .any(|e| {
-            if !e.file_type().is_dir() {
-                return false;
+/// Immediate sub-directories of `path` as `(name, path)`, sorted by path.
+/// Uses the directory listing's file type only (no per-entry `metadata`).
+pub fn child_directories(path: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
+    type Reader = fn(&Path, &mut dyn FnMut(&crate::fs_enum::RawEntry<'_>)) -> std::io::Result<()>;
+    let collect = |read: Reader| {
+        let mut children: Vec<(String, PathBuf)> = Vec::new();
+        read(path, &mut |entry| {
+            if !entry.is_dir() || entry.is_package() {
+                return;
             }
-            if !show_hidden {
-                let file_name = e.file_name().to_string_lossy();
-                if file_name.starts_with('.') || file_name.starts_with('$') {
-                    return false;
-                }
+            let name = entry.name.to_string_lossy().into_owned();
+            if show_hidden || !is_hidden_entry(&name, &entry.metadata()) {
+                let child = path.join(&name);
+                children.push((name, child));
             }
-            true
         })
+        .map(|()| children)
+    };
+    let mut children = collect(crate::fs_enum::enumerate)
+        .or_else(|_| collect(crate::fs_enum::enumerate_std))
+        .unwrap_or_default();
+    children.sort_by(|a, b| a.1.cmp(&b.1));
+    children
 }
 
 pub fn get_directories_recursive(
@@ -926,6 +830,10 @@ pub fn get_directories_recursive(
     walkdir::WalkDir::new(path)
         .max_depth(depth)
         .into_iter()
+        // Packages are single items: neither suggested nor walked into.
+        .filter_entry(|e| {
+            e.depth() == 0 || !e.file_type().is_dir() || !crate::fs_enum::is_package(e.path())
+        })
         .filter_map(Result::ok)
         .filter(|e| {
             if !e.file_type().is_dir() {
@@ -934,15 +842,14 @@ pub fn get_directories_recursive(
             if show_hidden {
                 return true;
             }
-            let s = e.file_name().to_string_lossy();
-            if s.starts_with('.') || s.starts_with('$') {
+            if is_hidden_name(&e.file_name().to_string_lossy()) {
                 return false;
             }
             let mut current_path: Option<&Path> = e.path().parent();
 
             while let Some(parent) = current_path {
                 if let Some(parent_name) = parent.file_name().and_then(|name| name.to_str())
-                    && (parent_name.starts_with('.') || parent_name.starts_with('$'))
+                    && is_hidden_name(parent_name)
                     && !parent.eq(path)
                 {
                     return false;
@@ -957,117 +864,169 @@ pub fn get_directories_recursive(
 
 #[cfg(test)]
 mod tests {
-    use rayon::slice::ParallelSliceMut;
-
     use crate::app::dock::TabData;
-    use crate::data::files::{DirEntry, DirList};
+    use crate::data::files::{DirEntry, Listing};
 
-    use super::{Search, filter_visible_dir_list, filter_visible_entries};
+    use super::{Search, filter_visible, sort_order};
+
+    fn identity(listing: &Listing) -> Vec<u32> {
+        (0..listing.len() as u32).collect()
+    }
 
     #[test]
-    fn filter_visible_entries_includes_all_entries_uniformly() {
-        let entries = vec![
+    fn filter_visible_includes_all_entries_uniformly() {
+        let listing = Listing::from_entries(&[
             DirEntry::test_new("/fav/file_report.txt"),
             DirEntry::test_new("/fav/subdir/report.txt"),
             DirEntry::test_new("/fav/notes.txt"),
             DirEntry::test_new("/fav/subdir/deep/report.txt"),
-        ];
-        let show_hidden = true;
+        ]);
+        let all = identity(&listing);
 
-        // No search: all entries pass
-        let visible = filter_visible_entries(&entries, show_hidden, None);
+        let visible = filter_visible(&listing, &all, true, None);
         assert_eq!(visible.len(), 4, "no search should include all entries");
 
-        // Search for "report": root-level + subdirectory entries should match
         let search = Search {
             value: "report".to_string(),
             depth: 2,
-            case_sensitive: false,
             ..Default::default()
         };
-        let visible = filter_visible_entries(&entries, show_hidden, Some(&search));
-        assert!(
-            visible.contains(&0),
-            "root-level file_report.txt should match"
+        assert_eq!(
+            filter_visible(&listing, &all, true, Some(&search)),
+            [0, 1, 3]
         );
-        assert!(visible.contains(&1), "subdir/report.txt should match");
-        assert!(visible.contains(&3), "subdir/deep/report.txt should match");
-        assert_eq!(visible.len(), 3);
 
-        // Search for "notes": only root-level
         let search = Search {
             value: "notes".to_string(),
             depth: 2,
-            case_sensitive: false,
             ..Default::default()
         };
-        let visible = filter_visible_entries(&entries, show_hidden, Some(&search));
-        assert_eq!(
-            visible.len(),
-            1,
-            "search 'notes' should match only root-level notes.txt"
-        );
-        assert!(visible.contains(&2), "root-level notes.txt should match");
+        assert_eq!(filter_visible(&listing, &all, true, Some(&search)), [2]);
     }
 
     #[test]
-    fn filter_visible_entries_hides_hidden_files() {
-        let entries = vec![
+    fn filter_visible_hides_hidden_files() {
+        let listing = Listing::from_entries(&[
             DirEntry::test_new("/fav/.hidden.txt"),
             DirEntry::test_new("/fav/visible.txt"),
             DirEntry::test_new("/fav/subdir/.hidden.txt"),
-        ];
-        let show_hidden = false;
-        let visible = filter_visible_entries(&entries, show_hidden, None);
+        ]);
         assert_eq!(
-            visible.len(),
-            1,
-            "only visible.txt should pass with show_hidden=false"
+            filter_visible(&listing, &identity(&listing), false, None),
+            [1]
         );
-        assert!(visible.contains(&1));
     }
 
     #[test]
-    fn filter_visible_dir_list_matches_eager_entries() {
-        let entries = vec![
+    fn filter_visible_hides_attribute_hidden_entries() {
+        let mut hidden = DirEntry::test_new("/fav/desktop.ini");
+        hidden.meta.flags = crate::data::files::EntryFlags::SYSTEM;
+        let listing = Listing::from_entries(&[hidden, DirEntry::test_new("/fav/normal.txt")]);
+        let all = identity(&listing);
+        assert_eq!(filter_visible(&listing, &all, false, None), [1]);
+        assert_eq!(filter_visible(&listing, &all, true, None), [0, 1]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deep_walk_and_children_skip_attribute_hidden_dirs() {
+        let root = unique_test_dir("attr_hidden");
+        std::fs::create_dir_all(root.join("secret/inner")).expect("create tree");
+        std::fs::create_dir_all(root.join("open")).expect("create open dir");
+        std::fs::write(root.join("secret/inner/x.txt"), b"x").expect("write");
+        let status = std::process::Command::new("attrib")
+            .arg("+h")
+            .arg(root.join("secret"))
+            .status()
+            .expect("attrib");
+        assert!(status.success());
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let names = |hidden: bool| {
+            let listing = super::read_directory(std::slice::from_ref(&root), 4, hidden, &cancel);
+            let mut names: Vec<String> = listing
+                .iter()
+                .map(|entry| entry.file_name.to_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(false), ["open"]);
+        assert_eq!(names(true), ["inner", "open", "secret", "x.txt"]);
+        let children: Vec<String> = super::child_directories(&root, false)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(children, ["open"]);
+        assert_eq!(super::child_directories(&root, true).len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn filter_is_case_insensitive_including_unicode() {
+        let listing = Listing::from_entries(&[
             DirEntry::test_new("/fav/file_report.txt"),
             DirEntry::test_new("/fav/.hidden_report.txt"),
             DirEntry::test_new("/fav/notes.txt"),
             DirEntry::test_new("/fav/REPORT_final.txt"),
-        ];
-        let search = Search {
-            value: "report".to_string(),
-            case_sensitive: false,
+            DirEntry::test_new("/fav/ŻÓŁW.txt"),
+        ]);
+        let all = identity(&listing);
+        let search = |value: &str| Search {
+            value: value.to_string(),
             ..Default::default()
         };
-        let eager = filter_visible_entries(&entries, false, Some(&search));
-        let lazy = DirList::from_owned_list(entries).expect("non-empty dir list");
-        let lazy_visible = filter_visible_dir_list(&lazy, false, Some(&search));
-
         assert_eq!(
-            lazy_visible, eager,
-            "lazy DirList filtering should preserve eager search behavior"
+            filter_visible(&listing, &all, false, Some(&search("report"))),
+            [0, 3]
         );
-        assert_eq!(lazy_visible, vec![0, 3]);
+        assert_eq!(
+            filter_visible(&listing, &all, false, Some(&search("żółw"))),
+            [4]
+        );
+        let sensitive = Search {
+            case_sensitive: true,
+            ..search("REPORT")
+        };
+        assert_eq!(filter_visible(&listing, &all, false, Some(&sensitive)), [3]);
     }
 
     #[test]
-    fn dedup_removes_all_duplicates_regardless_of_order() {
-        let entries = [
-            DirEntry::test_new("/fav/subdir/file.txt"),
-            DirEntry::test_new("/fav/file.txt"),
-            DirEntry::test_new("/fav/subdir/file.txt"),
-            DirEntry::test_new("/fav/file.txt"),
-        ];
-        let mut list: Vec<DirEntry> = entries.to_vec();
-        list.par_sort_unstable_by(|a, b| {
-            a.dir
-                .as_ref()
-                .cmp(b.dir.as_ref())
-                .then(a.file_name.cmp(&b.file_name))
+    fn filter_preserves_candidate_order_in_parallel_path() {
+        let entries: Vec<DirEntry> = (0..40_000)
+            .map(|index| DirEntry::test_new(&format!("/d/{}_{index}", index % 3)))
+            .collect();
+        let listing = Listing::from_entries(&entries);
+        let reversed: Vec<u32> = identity(&listing).into_iter().rev().collect();
+        let search = Search {
+            value: "1_".to_string(),
+            ..Default::default()
+        };
+        let visible = filter_visible(&listing, &reversed, false, Some(&search));
+        assert_eq!(visible.len(), 13_333);
+        assert!(visible.windows(2).all(|pair| pair[0] > pair[1]));
+    }
+
+    #[test]
+    fn narrowing_search_reuses_previous_matches() {
+        let mut tab = TabData::from_path(std::path::Path::new("/virtual"));
+        tab.set_entries(&[
+            DirEntry::test_new("/v/report_a.txt"),
+            DirEntry::test_new("/v/notes.txt"),
+            DirEntry::test_new("/v/report_b.txt"),
+        ]);
+        tab.search = Some(Search {
+            value: "rep".to_string(),
+            ..Default::default()
         });
-        list.dedup_by(|a, b| a.dir == b.dir && a.file_name == b.file_name);
-        assert_eq!(list.len(), 2, "should have 2 unique entries");
+        tab.update_visible_entries();
+        assert_eq!(tab.visible_entries, [0, 2]);
+        tab.search.as_mut().expect("search").value = "report_b".to_string();
+        tab.update_visible_entries();
+        assert_eq!(tab.visible_entries, [2]);
+        // Widening must re-scan the full order, not the narrowed subset.
+        tab.search.as_mut().expect("search").value = "o".to_string();
+        tab.update_visible_entries();
+        assert_eq!(tab.visible_entries, [0, 1, 2]);
     }
 
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
@@ -1080,49 +1039,28 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("create temp test dir");
-        dir
+        crate::helper::normalize_path(&dir)
     }
 
     #[test]
-    fn update_file_metadata_updates_eager_entry_without_refresh() {
-        let dir = unique_test_dir("eager_meta");
-        let file = dir.join("hot.log");
-        std::fs::write(&file, b"abc").expect("write temp file");
-
-        let mut tab = TabData::from_path(&dir);
-        tab.list = vec![DirEntry::test_new(&file.to_string_lossy())];
-        tab.visible_entries = vec![0];
-
-        let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
-        assert!(tab.update_file_metadata(&file, &settings));
-        assert_eq!(tab.list[0].meta.size, 3);
-        assert_eq!(tab.visible_entries, vec![0]);
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn update_file_metadata_updates_lazy_dir_list_without_refresh() {
+    fn update_file_metadata_updates_entry_without_refresh() {
         let dir = unique_test_dir("lazy_meta");
         let file = dir.join("hot.log");
         std::fs::write(&file, b"abcdef").expect("write temp file");
 
         let mut tab = TabData::from_path(&dir);
-        let entry = DirEntry::test_new(&file.to_string_lossy());
-        tab.dir_list = DirList::from_owned_list(vec![entry]);
-        tab.visible_entries = vec![0];
+        tab.set_entries(&[DirEntry::test_new(&file.to_string_lossy())]);
 
         let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
         assert!(tab.update_file_metadata(&file, &settings));
-        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
-        assert_eq!(dir_list.entries[0].meta.size, 6);
-        assert_eq!(tab.visible_entries, vec![0]);
+        assert_eq!(tab.listing.meta(0).size, 6);
+        assert_eq!(tab.visible_entries, [0]);
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn insert_file_entry_adds_new_entry_to_lazy_dir_list() {
+    fn insert_file_entry_adds_new_entry() {
         let dir = unique_test_dir("insert_new");
         let existing = dir.join("a.txt");
         std::fs::write(&existing, b"a").expect("write existing file");
@@ -1130,26 +1068,19 @@ mod tests {
         std::fs::write(&new_file, b"hello").expect("write new file");
 
         let mut tab = TabData::from_path(&dir);
-        tab.dir_list =
-            DirList::from_owned_list(vec![DirEntry::test_new(&existing.to_string_lossy())]);
-        tab.visible_entries = vec![0];
+        tab.set_entries(&[DirEntry::test_new(&existing.to_string_lossy())]);
 
         let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
         assert!(tab.insert_file_entry(&new_file, &settings));
 
-        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
-        assert_eq!(dir_list.entries.len(), 2, "entry should be inserted");
-        let inserted = dir_list
-            .entries
+        assert_eq!(tab.listing.len(), 2, "entry should be inserted");
+        let inserted = tab
+            .listing
             .iter()
             .find(|e| e.file_name == "b.txt")
             .expect("inserted entry present");
         assert_eq!(inserted.meta.size, 5);
-        assert_eq!(
-            tab.visible_entries.len(),
-            2,
-            "visible indices should cover both entries"
-        );
+        assert_eq!(tab.visible_entries.len(), 2);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1161,18 +1092,13 @@ mod tests {
         std::fs::write(&file, b"old").expect("write initial file");
 
         let mut tab = TabData::from_path(&dir);
-        tab.dir_list = DirList::from_owned_list(vec![DirEntry::test_new(&file.to_string_lossy())]);
-        tab.visible_entries = vec![0];
-
-        // Simulate a rewrite of the same name: rewrite disk content first.
+        tab.set_entries(&[DirEntry::test_new(&file.to_string_lossy())]);
         std::fs::write(&file, b"new-contents").expect("rewrite file");
 
         let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
         assert!(tab.insert_file_entry(&file, &settings));
-
-        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
-        assert_eq!(dir_list.entries.len(), 1, "no duplicate created");
-        assert_eq!(dir_list.entries[0].meta.size, 12, "metadata refreshed");
+        assert_eq!(tab.listing.len(), 1, "no duplicate created");
+        assert_eq!(tab.listing.meta(0).size, 12, "metadata refreshed");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1185,10 +1111,7 @@ mod tests {
         std::fs::write(&file, b"x").expect("write file");
 
         let mut tab = TabData::from_path(&dir);
-        tab.dir_list = DirList::from_owned_list(vec![DirEntry::test_new(
-            &dir.join("a.txt").to_string_lossy(),
-        )]);
-        tab.visible_entries = vec![0];
+        tab.set_entries(&[DirEntry::test_new(&dir.join("a.txt").to_string_lossy())]);
 
         let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
         assert!(
@@ -1201,52 +1124,145 @@ mod tests {
     }
 
     #[test]
-    fn remove_file_entry_drops_entry_from_lazy_dir_list() {
+    fn remove_file_entry_drops_entry() {
         let dir = unique_test_dir("remove_entry");
         let keep = dir.join("keep.txt");
         let gone = dir.join("gone.txt");
-        std::fs::write(&keep, b"k").expect("write keep");
-        std::fs::write(&gone, b"g").expect("write gone");
 
         let mut tab = TabData::from_path(&dir);
-        tab.dir_list = DirList::from_owned_list(vec![
+        tab.set_entries(&[
             DirEntry::test_new(&keep.to_string_lossy()),
             DirEntry::test_new(&gone.to_string_lossy()),
         ]);
-        tab.visible_entries = vec![0, 1];
 
         let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
         assert!(tab.remove_file_entry(&gone, &settings));
-
-        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
-        assert_eq!(dir_list.entries.len(), 1, "entry removed");
-        assert_eq!(dir_list.entries[0].file_name, "keep.txt");
+        assert_eq!(tab.listing.len(), 1, "entry removed");
+        assert_eq!(tab.listing.name(0), "keep.txt");
         assert_eq!(tab.visible_entries.len(), 1);
+
+        assert!(
+            !tab.remove_file_entry(&dir.join("nope.txt"), &settings),
+            "absent entry should not apply"
+        );
+        assert_eq!(tab.listing.len(), 1, "listing unchanged");
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn remove_file_entry_returns_false_when_not_found() {
-        let dir = unique_test_dir("remove_missing");
-        std::fs::write(dir.join("a.txt"), b"a").expect("write a");
-        let missing = dir.join("nope.txt");
-
-        let mut tab = TabData::from_path(&dir);
-        tab.dir_list = DirList::from_owned_list(vec![DirEntry::test_new(
-            &dir.join("a.txt").to_string_lossy(),
-        )]);
-        tab.visible_entries = vec![0];
-
-        let settings = super::super::directory_view_settings::DirectoryViewSettings::default();
-        assert!(
-            !tab.remove_file_entry(&missing, &settings),
-            "absent entry should not apply"
+    fn deep_walk_respects_depth_hidden_and_nested_roots() {
+        let root = unique_test_dir("deep_walk");
+        std::fs::create_dir_all(root.join("a/b/c")).expect("create tree");
+        std::fs::create_dir_all(root.join(".hidden")).expect("create hidden dir");
+        for file in [
+            "top.txt",
+            "a/one.txt",
+            "a/b/two.txt",
+            "a/b/c/three.txt",
+            ".hidden/x.txt",
+        ] {
+            std::fs::write(root.join(file), b"x").expect("write tree file");
+        }
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let names = |depth: usize, hidden: bool, roots: &[std::path::PathBuf]| {
+            let listing = super::read_directory(roots, depth, hidden, &cancel);
+            let mut names: Vec<String> = listing
+                .iter()
+                .map(|entry| entry.file_name.to_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let roots = [root.clone()];
+        // depth 2 lists three levels below the root (as `walkdir` did).
+        assert_eq!(
+            names(2, false, &roots),
+            ["a", "b", "c", "one.txt", "top.txt", "two.txt"]
         );
-        let dir_list = tab.dir_list.as_ref().expect("lazy dir list");
-        assert_eq!(dir_list.entries.len(), 1, "listing unchanged");
+        assert!(names(3, true, &roots).contains(&"x.txt".to_owned()));
+        // A nested root adds nothing (and no duplicates).
+        let nested = [root.clone(), root.join("a")];
+        assert_eq!(names(2, false, &nested), names(2, false, &roots));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
-        let _ = std::fs::remove_dir_all(dir);
+    #[test]
+    fn linked_watch_roots_apply_only_to_the_view_that_produced_them() {
+        let root = std::path::PathBuf::from("/virtual/root");
+        let linked = std::path::PathBuf::from("/virtual/elsewhere");
+        let mut tab = TabData::from_path(&root);
+        tab.current_path = crate::app::dock::CurrentPath::One(root);
+        tab.search = Some(Search {
+            depth: 3,
+            value: "query".to_owned(),
+            ..Default::default()
+        });
+        assert!(tab.set_linked_watch_roots(vec![linked.clone()]));
+        assert!(!tab.set_linked_watch_roots(vec![linked.clone()]));
+        let specs = tab.watcher_specs();
+        assert!(specs.contains(&(linked.clone(), notify::RecursiveMode::Recursive)));
+        assert!(specs.iter().any(
+            |(path, mode)| path.ends_with("root") && *mode == notify::RecursiveMode::Recursive
+        ));
+        // A different depth (or root) ignores links recorded for another view.
+        tab.search = Some(Search {
+            depth: 2,
+            value: "query".to_owned(),
+            ..Default::default()
+        });
+        assert!(!tab.watcher_specs().iter().any(|(path, _)| path == &linked));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deep_walk_reports_followed_junctions_once_and_survives_loops() {
+        let root = unique_test_dir("junctions");
+        let outside = unique_test_dir("junction_target");
+        std::fs::write(outside.join("far.txt"), b"x").expect("write target file");
+        std::fs::create_dir_all(root.join("sub")).expect("create sub");
+        let mklink = |link: &std::path::Path, target: &std::path::Path| {
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("mklink");
+            assert!(out.status.success(), "{out:?}");
+        };
+        mklink(&root.join("to_outside"), &outside);
+        mklink(&root.join("sub").join("again"), &outside);
+        // A loop back to the root must terminate.
+        mklink(&root.join("sub").join("loop"), &root);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let result = super::read_directory_streaming(
+            std::slice::from_ref(&root),
+            6,
+            false,
+            &cancel,
+            &|_| {},
+        );
+        let outside = crate::helper::normalize_path(&outside);
+        let root_norm = crate::helper::normalize_path(&root);
+        assert_eq!(
+            result
+                .linked_dirs
+                .iter()
+                .filter(|dir| **dir == outside)
+                .count(),
+            1,
+            "{:?}",
+            result.linked_dirs
+        );
+        assert!(result.linked_dirs.contains(&root_norm));
+        assert!(
+            result
+                .listing
+                .iter()
+                .any(|entry| entry.file_name == "far.txt")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -1256,6 +1272,16 @@ mod tests {
         for (depth, expected) in [(0, 1), (1, 1), (3, 3)] {
             tab.search = Some(Search {
                 depth,
+                ..Default::default()
+            });
+            assert_eq!(
+                tab.search_depth(),
+                1,
+                "an empty query only lists the folder"
+            );
+            tab.search = Some(Search {
+                depth,
+                value: "query".to_owned(),
                 ..Default::default()
             });
             assert_eq!(tab.search_depth(), expected, "unexpected depth for {depth}");
@@ -1278,84 +1304,86 @@ mod tests {
         entry
     }
 
-    fn names_of(entries: &[DirEntry]) -> Vec<String> {
-        entries.iter().map(|e| e.file_name.clone()).collect()
-    }
-
-    fn settings(
+    fn sorted_names(
+        entries: &[DirEntry],
         sorting: super::super::Sort,
         invert: bool,
-    ) -> super::super::directory_view_settings::DirectoryViewSettings {
-        super::super::directory_view_settings::DirectoryViewSettings {
+    ) -> Vec<String> {
+        let listing = Listing::from_entries(entries);
+        let settings = super::super::directory_view_settings::DirectoryViewSettings {
             sorting,
             display_type: super::super::DisplayType::default(),
             invert_sort: invert,
-        }
+        };
+        sort_order(&listing, &settings)
+            .into_iter()
+            .map(|index| listing.name(index as usize).to_owned())
+            .collect()
     }
 
     #[test]
     fn sort_by_name_alphabetical_and_inverted() {
-        let mut entries = vec![
+        let entries = [
             entry_with("c.txt", 0, 0, 0),
             entry_with("a.txt", 0, 0, 0),
             entry_with("b.txt", 0, 0, 0),
         ];
-        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Name, false));
         assert_eq!(
-            names_of(&entries),
-            vec!["a.txt", "b.txt", "c.txt"],
-            "name sort should be alphabetical"
+            sorted_names(&entries, super::super::Sort::Name, false),
+            ["a.txt", "b.txt", "c.txt"]
         );
-
-        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Name, true));
         assert_eq!(
-            names_of(&entries),
-            vec!["c.txt", "b.txt", "a.txt"],
-            "inverted name sort should reverse"
+            sorted_names(&entries, super::super::Sort::Name, true),
+            ["c.txt", "b.txt", "a.txt"]
+        );
+    }
+
+    #[test]
+    fn sort_keeps_directories_first() {
+        let mut dir = entry_with("zeta", 0, 0, 0);
+        dir.meta.entry_type = crate::data::files::EntryType::Directory;
+        let entries = [entry_with("alpha", 9, 0, 0), dir];
+        assert_eq!(
+            sorted_names(&entries, super::super::Sort::Name, false),
+            ["zeta", "alpha"]
+        );
+        assert_eq!(
+            sorted_names(&entries, super::super::Sort::Size, true),
+            ["zeta", "alpha"]
         );
     }
 
     #[test]
     fn sort_by_size_ascending_and_inverted() {
-        let mut entries = vec![
+        let entries = [
             entry_with("big", 300, 0, 0),
             entry_with("small", 100, 0, 0),
             entry_with("mid", 200, 0, 0),
         ];
-        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Size, false));
         assert_eq!(
-            names_of(&entries),
-            vec!["small", "mid", "big"],
-            "size sort should be ascending"
+            sorted_names(&entries, super::super::Sort::Size, false),
+            ["small", "mid", "big"]
         );
-
-        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Size, true));
         assert_eq!(
-            names_of(&entries),
-            vec!["big", "mid", "small"],
-            "inverted size sort should be descending"
+            sorted_names(&entries, super::super::Sort::Size, true),
+            ["big", "mid", "small"]
         );
     }
 
     #[test]
     fn sort_by_modified_ascending_and_inverted() {
-        let mut entries = vec![
+        let entries = [
             entry_with("newest", 0, 30, 0),
             entry_with("oldest", 0, 10, 0),
             entry_with("middle", 0, 20, 0),
         ];
-        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Modified, false));
         assert_eq!(
-            names_of(&entries),
-            vec!["oldest", "middle", "newest"],
-            "modified sort should be ascending by mtime"
+            sorted_names(&entries, super::super::Sort::Modified, false),
+            ["oldest", "middle", "newest"]
         );
-
-        super::sort_entries_vec(&mut entries, &settings(super::super::Sort::Modified, true));
         assert_eq!(
-            names_of(&entries),
-            vec!["newest", "middle", "oldest"],
-            "inverted modified sort should be descending"
+            sorted_names(&entries, super::super::Sort::Modified, true),
+            ["newest", "middle", "oldest"]
         );
     }
 }

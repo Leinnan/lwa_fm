@@ -81,6 +81,7 @@ impl AccentShades {
     /// The system accent shades: read from the registry on Windows, the
     /// Windows default blue elsewhere or when the value is unavailable.
     #[must_use]
+    #[cfg_attr(not(windows), allow(clippy::missing_const_for_fn))]
     pub fn system() -> Self {
         #[cfg(windows)]
         if let Some(shades) = super::win32::system_accent() {

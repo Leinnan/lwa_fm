@@ -12,6 +12,16 @@ pub enum Appearance {
 }
 
 impl Appearance {
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::System => "Use system setting",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
     pub fn apply(self, ctx: &Context) {
         ctx.set_theme(match self {
             Self::System => egui::ThemePreference::System,
@@ -64,6 +74,7 @@ impl Palette {
     pub fn of(ui: &Ui) -> Self {
         Self::for_context(ui.ctx(), ui.visuals().dark_mode)
     }
+    #[cfg_attr(not(any(windows, test)), allow(clippy::missing_const_for_fn))]
     pub fn for_context(ctx: &Context, dark: bool) -> Self {
         #[cfg(any(windows, test))]
         if super::theme::config(ctx).fluent {
@@ -76,7 +87,7 @@ impl Palette {
                 card_border: p.card_stroke,
                 border: p.border,
                 text: p.text,
-                secondary: p.hint_text,
+                secondary: p.text_weak,
                 accent: p.accent,
             };
         }
@@ -164,14 +175,27 @@ pub fn glyph(icon: Icon) -> RichText {
         .size(16.0)
 }
 pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, active: bool) -> Response {
-    let response = ui.add(
+    icon_button_named(ui, icon, label, label, active)
+}
+/// An icon button with an accessible `name` and a separate `tooltip`, so a
+/// shortcut can be shown without being read out as part of the name. It
+/// keeps one size whether or not it is active.
+pub fn icon_button_named(
+    ui: &mut Ui,
+    icon: Icon,
+    name: &str,
+    tooltip: &str,
+    active: bool,
+) -> Response {
+    let side = control_height(ui);
+    let response = ui.add_sized(
+        [side, side],
         egui::Button::new(glyph(icon))
             .selected(active)
-            .frame(active)
-            .min_size(Vec2::splat(control_height(ui))),
+            .frame(active),
     );
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, label)
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, name)
     });
     if response.has_focus() {
         ui.painter().rect_stroke(
@@ -181,7 +205,18 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, active: bool) -> Respon
             egui::StrokeKind::Inside,
         );
     }
-    response.on_hover_text(label)
+    response.on_hover_text(tooltip)
+}
+/// An icon button that opens a menu, drawn like the other icon buttons.
+pub fn icon_menu_button(
+    ui: &mut Ui,
+    icon: Icon,
+    name: &str,
+    add_contents: impl FnOnce(&mut Ui),
+) -> Response {
+    let response = icon_button_named(ui, icon, name, name, false);
+    egui::Popup::menu(&response).show(add_contents);
+    response
 }
 pub fn card(ui: &Ui) -> Frame {
     Frame::new()
@@ -200,6 +235,52 @@ pub fn section(ui: &mut Ui, title: &str) {
     );
     ui.add_space(4.0);
 }
+/// A [`section`] heading that can be clicked to collapse the rows below it
+/// and dragged to reorder; the chevron shows whether it is collapsed.
+pub fn section_header(ui: &mut Ui, title: &str, collapsed: bool) -> Response {
+    ui.add_space(8.0);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), 22.0),
+        egui::Sense::click_and_drag(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, !collapsed, title)
+    });
+    if response.hovered() || response.has_focus() {
+        ui.painter()
+            .rect_filled(rect, control_radius(ui), navigation_fill(ui, false));
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            control_radius(ui),
+            Stroke::new(1.0_f32, Palette::of(ui).accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let color = Palette::of(ui).secondary;
+    ui.painter().text(
+        rect.left_center() + Vec2::new(4.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title.to_uppercase(),
+        TextStyle::Small.resolve(ui.style()),
+        color,
+    );
+    let chevron = if collapsed {
+        Icon::ChevronRight
+    } else {
+        Icon::ChevronDown
+    };
+    ui.painter().text(
+        rect.right_center() - Vec2::new(10.0, 0.0),
+        egui::Align2::CENTER_CENTER,
+        char::from(chevron),
+        FontId::new(12.0, egui::FontFamily::Name("lucide".into())),
+        color,
+    );
+    ui.add_space(2.0);
+    response
+}
 pub fn badge(ui: &mut Ui, text: &str) {
     Frame::new()
         .fill(Palette::of(ui).card)
@@ -208,15 +289,6 @@ pub fn badge(ui: &mut Ui, text: &str) {
         .show(ui, |ui| {
             ui.label(RichText::new(text).small());
         });
-}
-pub fn form_row(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [110.0, ui.spacing().interact_size.y],
-            egui::Label::new(label),
-        );
-        content(ui);
-    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,23 +306,276 @@ impl PanelLayout {
         }
     }
 }
-pub fn segmented_icons(ui: &mut Ui, choices: &[(Icon, &str)], selected: usize) -> Option<usize> {
+/// A segmented choice (a radio group) of text labels: one of `choices`
+/// (label, enabled, tooltip) is on. Returns the newly clicked one.
+pub fn segmented_text(
+    ui: &mut Ui,
+    choices: &[(&str, bool, &str)],
+    selected: usize,
+) -> Option<usize> {
     let mut next = None;
+    // In a right-aligned row the buttons are laid out right to left, so add
+    // them last first to keep them reading left to right.
+    let mut order: Vec<usize> = (0..choices.len()).collect();
+    if ui.layout().prefer_right_to_left() {
+        order.reverse();
+    }
     Frame::new()
         .fill(Palette::of(ui).card)
         .corner_radius(control_radius(ui))
         .inner_margin(2)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                for (index, (icon, label)) in choices.iter().enumerate() {
-                    if icon_button(ui, *icon, label, index == selected).clicked() {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for index in order {
+                    let (label, enabled, tip) = choices[index];
+                    let on = index == selected;
+                    let mut response = ui.add_enabled(enabled, egui::Button::selectable(on, label));
+                    if !tip.is_empty() {
+                        response = response.on_hover_text(tip).on_disabled_hover_text(tip);
+                    }
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::RadioButton,
+                            enabled,
+                            on,
+                            label,
+                        )
+                    });
+                    if response.clicked() && !on {
                         next = Some(index);
                     }
                 }
             });
         });
     next
+}
+
+/// An on/off switch, as Windows and macOS settings use for options that
+/// apply at once. `label` names it for screen readers and tests.
+pub fn toggle_switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(40.0, 20.0), egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let checked = *on;
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), checked, label)
+    });
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool_responsive(response.id, checked);
+        let palette = Palette::of(ui);
+        let dim = |color: Color32| {
+            if ui.is_enabled() {
+                color
+            } else {
+                color.gamma_multiply(0.45)
+            }
+        };
+        let hovered = response.hovered() && ui.is_enabled();
+        let (fill, stroke, knob) = if checked {
+            let accent = if hovered {
+                palette.accent.lerp_to_gamma(palette.text, 0.12)
+            } else {
+                palette.accent
+            };
+            (dim(accent), Stroke::NONE, dim(Color32::WHITE))
+        } else {
+            let fill = if hovered {
+                palette.text.gamma_multiply(0.08)
+            } else {
+                Color32::TRANSPARENT
+            };
+            (
+                fill,
+                Stroke::new(1.0_f32, dim(palette.secondary)),
+                dim(palette.secondary),
+            )
+        };
+        let painter = ui.painter();
+        let radius = rect.height() / 2.0;
+        painter.rect(rect, radius, fill, stroke, egui::StrokeKind::Inside);
+        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
+        let knob_radius = if hovered { 6.0 } else { 5.0 };
+        painter.circle_filled(egui::pos2(x, rect.center().y), knob_radius, knob);
+        if response.has_focus() {
+            painter.rect_stroke(
+                rect.expand(2.0),
+                radius + 2.0,
+                Stroke::new(1.5_f32, palette.accent),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+    response
+}
+
+/// One group of settings: a heading and a full-width card whose rows are
+/// separated by thin lines. Add rows with [`SettingsGroup::row`].
+pub fn settings_group<R>(
+    ui: &mut Ui,
+    title: &str,
+    rows: impl FnOnce(&mut SettingsGroup<'_>) -> R,
+) -> R {
+    ui.add_space(14.0);
+    ui.label(
+        RichText::new(title)
+            .strong()
+            .color(Palette::of(ui).secondary),
+    );
+    ui.add_space(6.0);
+    let palette = Palette::of(ui);
+    Frame::new()
+        .fill(palette.card)
+        .stroke(Stroke::new(1.0_f32, palette.card_border))
+        .corner_radius(card_radius(ui))
+        .inner_margin(egui::Margin::symmetric(16, 0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            rows(&mut SettingsGroup { ui, rows: 0 })
+        })
+        .inner
+}
+
+/// The rows of a [`settings_group`].
+pub struct SettingsGroup<'a> {
+    pub ui: &'a mut Ui,
+    rows: usize,
+}
+
+impl SettingsGroup<'_> {
+    /// A setting: its title and an optional description on the left, its
+    /// control (built by `control`, laid out right to left) on the right.
+    pub fn row<R>(
+        &mut self,
+        title: &str,
+        description: Option<&str>,
+        control: impl FnOnce(&mut Ui) -> R,
+    ) -> R {
+        if self.rows > 0 {
+            let x = self.ui.max_rect().x_range();
+            let y = self.ui.cursor().top();
+            self.ui.painter().hline(
+                x.min - 16.0..=x.max + 16.0,
+                y,
+                Stroke::new(1.0_f32, Palette::of(self.ui).card_border),
+            );
+        }
+        self.rows += 1;
+        setting_row(self.ui, title, description, control)
+    }
+
+    /// A row of explanatory text with no control.
+    pub fn note(&mut self, text: &str) {
+        self.row("", Some(text), |_| {});
+    }
+}
+
+/// The height of a settings row with no description.
+fn setting_row_height(ui: &Ui) -> f32 {
+    if is_fluent(ui.ctx()) { 48.0 } else { 44.0 }
+}
+
+fn setting_row<R>(
+    ui: &mut Ui,
+    title: &str,
+    description: Option<&str>,
+    control: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let palette = Palette::of(ui);
+    let width = ui.available_width();
+    let top_left = ui.cursor().min;
+    let min_height = setting_row_height(ui);
+    // The control goes first, right-aligned, so the text can wrap in the
+    // space it leaves.
+    let control_area = egui::Rect::from_min_size(
+        egui::pos2(width.mul_add(0.4, top_left.x), top_left.y),
+        Vec2::new(width * 0.6, min_height),
+    );
+    let mut control_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(control_area)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    let inner = control(&mut control_ui);
+    let used = control_ui.min_rect();
+    let control_width = if used.width() > 0.0 {
+        used.width() + 16.0
+    } else {
+        0.0
+    };
+    let text_width = (width - control_width).max(80.0);
+
+    let title_galley = ui.painter().layout(
+        title.to_owned(),
+        TextStyle::Body.resolve(ui.style()),
+        palette.text,
+        text_width,
+    );
+    let description_galley = description.map(|text| {
+        ui.painter().layout(
+            text.to_owned(),
+            TextStyle::Small.resolve(ui.style()),
+            palette.secondary,
+            text_width,
+        )
+    });
+    // A note has no title, only its (description) text.
+    let title_height = if title.is_empty() {
+        0.0
+    } else {
+        title_galley.size().y + 2.0
+    };
+    let text_height = title_height
+        + description_galley
+            .as_ref()
+            .map_or(0.0, |galley| galley.size().y);
+    let height = min_height.max(text_height + 16.0);
+    let rect = egui::Rect::from_min_size(top_left, Vec2::new(width, height));
+    ui.allocate_rect(rect, egui::Sense::hover());
+    let mut y = rect.center().y - text_height / 2.0;
+    if !title.is_empty() {
+        ui.painter()
+            .galley(egui::pos2(rect.left(), y), title_galley, palette.text);
+    }
+    y += title_height;
+    if let Some(galley) = description_galley {
+        ui.painter()
+            .galley(egui::pos2(rect.left(), y), galley, palette.secondary);
+    }
+    inner
+}
+
+/// Key combinations drawn as key caps, e.g. "Ctrl+F", "F3". In a right
+/// to left row, pass them last first.
+pub fn key_caps(ui: &mut Ui, combinations: &[String]) {
+    let palette = Palette::of(ui);
+    let font = FontId::monospace(12.0);
+    for keys in combinations {
+        let galley = ui
+            .painter()
+            .layout_no_wrap(keys.clone(), font.clone(), palette.text);
+        let size = galley.size() + Vec2::new(12.0, 6.0);
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, keys));
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            4,
+            palette.card,
+            Stroke::new(1.0_f32, palette.card_border),
+            egui::StrokeKind::Inside,
+        );
+        // A slightly heavier bottom edge, like a key.
+        painter.hline(
+            rect.x_range().shrink(2.0),
+            rect.bottom() - 0.5,
+            Stroke::new(1.0_f32, palette.secondary.gamma_multiply(0.5)),
+        );
+        painter.galley(rect.min + Vec2::new(6.0, 3.0), galley, palette.text);
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +588,7 @@ pub fn snapshot_options() -> egui_kittest::SnapshotOptions {
     }
 }
 
+#[cfg_attr(not(any(windows, test)), allow(clippy::missing_const_for_fn))]
 pub fn is_fluent(ctx: &Context) -> bool {
     #[cfg(any(windows, test))]
     {
@@ -291,6 +617,7 @@ pub fn text_edit_align(ui: &Ui) -> egui::Align {
         egui::Align::Min
     }
 }
+#[cfg_attr(not(any(windows, test)), allow(clippy::missing_const_for_fn))]
 pub fn control_radius(ui: &Ui) -> u8 {
     #[cfg(any(windows, test))]
     if is_fluent(ui.ctx()) {
@@ -299,6 +626,7 @@ pub fn control_radius(ui: &Ui) -> u8 {
     let _ = ui;
     6
 }
+#[cfg_attr(not(any(windows, test)), allow(clippy::missing_const_for_fn))]
 pub fn card_radius(ui: &Ui) -> u8 {
     #[cfg(any(windows, test))]
     if is_fluent(ui.ctx()) {
@@ -307,6 +635,67 @@ pub fn card_radius(ui: &Ui) -> u8 {
     let _ = ui;
     10
 }
+/// A sidebar row: icon and one line of text, with hover, selection and
+/// focus states. Used by every sidebar section so they look the same.
+pub fn nav_row(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    selected: bool,
+    sense: egui::Sense,
+) -> Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), nav_row_height(ui)), sense);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
+    });
+    if selected || response.hovered() || response.has_focus() {
+        ui.painter()
+            .rect_filled(rect, control_radius(ui), navigation_fill(ui, selected));
+    }
+    if selected && is_fluent(ui.ctx()) {
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 3.0, rect.center().y),
+                Vec2::new(3.0, 16.0),
+            ),
+            2,
+            Palette::of(ui).accent,
+        );
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            control_radius(ui),
+            Stroke::new(1.0_f32, Palette::of(ui).accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter().text(
+        rect.left_center() + Vec2::new(16.0, 0.0),
+        egui::Align2::CENTER_CENTER,
+        char::from(icon),
+        FontId::new(14.0, egui::FontFamily::Name("lucide".into())),
+        Palette::of(ui).secondary,
+    );
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        label.to_owned(),
+        TextStyle::Body.resolve(ui.style()),
+        Palette::of(ui).text,
+    );
+    job.wrap.max_width = (rect.width() - 42.0).max(0.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    ui.painter().galley(
+        rect.left_center() + Vec2::new(32.0, -galley.size().y / 2.0),
+        galley,
+        Palette::of(ui).text,
+    );
+    response
+}
+
+#[cfg_attr(not(any(windows, test)), allow(clippy::missing_const_for_fn))]
 pub fn nav_row_height(ui: &Ui) -> f32 {
     #[cfg(any(windows, test))]
     if is_fluent(ui.ctx()) {

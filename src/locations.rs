@@ -1,8 +1,11 @@
 use std::{borrow::Cow, path::PathBuf, str::FromStr};
 
-use egui::{Ui, Vec2};
+use egui::Ui;
 
-use crate::{app::commands::ActionToPerform, helper::KeyWithCommandPressed};
+use crate::{
+    app::commands::ActionToPerform,
+    helper::{DataHolder, KeyWithCommandPressed},
+};
 
 #[derive(serde::Deserialize, serde::Serialize, Default, Debug, Clone)]
 #[serde(default)]
@@ -20,101 +23,43 @@ impl Locations {
 }
 
 impl Locations {
-    pub fn draw_source_list(
-        &self,
-        title: &str,
-        ui: &mut Ui,
-        removable: bool,
-        active: Option<&std::path::Path>,
-    ) {
-        use crate::app::ui::{self, Palette};
-        if self.locations.is_empty() {
-            return;
-        }
-        ui::section(ui, title);
+    /// Draws one row per location; the caller draws the section heading.
+    pub fn draw_source_list(&self, ui: &mut Ui, removable: bool, active: Option<&std::path::Path>) {
+        use crate::app::ui;
         for location in &self.locations {
             let selected =
                 active.is_some_and(|path| path == std::path::Path::new(location.path.as_ref()));
-            let (rect, response) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), ui::nav_row_height(ui)),
-                egui::Sense::click(),
-            );
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(
-                    egui::WidgetType::SelectableLabel,
-                    true,
-                    selected,
-                    location.name.as_ref(),
-                )
-            });
-            if selected || response.hovered() || response.has_focus() {
-                ui.painter().rect_filled(
-                    rect,
-                    ui::control_radius(ui),
-                    ui::navigation_fill(ui, selected),
-                );
-            }
-            if selected && ui::is_fluent(ui.ctx()) {
-                ui.painter().rect_filled(
-                    egui::Rect::from_center_size(
-                        egui::pos2(rect.left() + 3.0, rect.center().y),
-                        Vec2::new(3.0, 16.0),
-                    ),
-                    2,
-                    Palette::of(ui).accent,
-                );
-            }
-            if response.has_focus() {
-                ui.painter().rect_stroke(
-                    rect,
-                    ui::control_radius(ui),
-                    egui::Stroke::new(1.0_f32, Palette::of(ui).accent),
-                    egui::StrokeKind::Inside,
-                );
-            }
             let icon = if removable {
                 lucide_icons::Icon::Star
             } else {
                 lucide_icons::Icon::Folder
             };
-            ui.painter().text(
-                rect.left_center() + Vec2::new(16.0, 0.0),
-                egui::Align2::CENTER_CENTER,
-                char::from(icon),
-                egui::FontId::new(14.0, egui::FontFamily::Name("lucide".into())),
-                Palette::of(ui).secondary,
-            );
-            let job = egui::text::LayoutJob::simple_singleline(
-                location.name.to_string(),
-                egui::TextStyle::Body.resolve(ui.style()),
-                Palette::of(ui).text,
-            );
-            let mut job = job;
-            job.wrap.max_width = (rect.width() - 42.0).max(0.0);
-            job.wrap.max_rows = 1;
-            job.wrap.break_anywhere = true;
-            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
-            ui.painter().galley(
-                rect.left_center() + Vec2::new(32.0, -galley.size().y / 2.0),
-                galley,
-                Palette::of(ui).text,
-            );
+            let response = ui::nav_row(ui, icon, &location.name, selected, egui::Sense::click());
             let response = response.on_hover_text(location.path.as_ref());
-            if response.clicked()
-                && let Some(action) =
-                    ActionToPerform::path_from_str(&location.path, ui.command_pressed())
+            // Ctrl+click or middle-click opens in a new tab, as in a browser.
+            let new_tab = response.middle_clicked() || (response.clicked() && ui.command_pressed());
+            if (response.clicked() || new_tab)
+                && let Some(action) = ActionToPerform::path_from_str(&location.path, new_tab)
             {
                 action.schedule();
             }
+            crate::app::file_ops::folder_drop_target(
+                ui,
+                &response,
+                std::path::Path::new(location.path.as_ref()),
+            );
             response.context_menu(|ui| {
-                if ui.button("Open in new tab").clicked() {
-                    ActionToPerform::NewTab(PathBuf::from(location.path.as_ref())).schedule();
-                    ui.close();
-                }
-                if removable && ui.button("Remove from favorites").clicked() {
-                    ActionToPerform::RemoveFromFavorites(location.path.clone()).schedule();
-                    ui.close();
-                }
+                let favorites = if removable {
+                    self.clone()
+                } else {
+                    ui.data_get_persisted::<Self>().unwrap_or_default()
+                };
+                crate::app::menus::folder_actions(
+                    ui,
+                    std::path::Path::new(location.path.as_ref()),
+                    &favorites,
+                    true,
+                );
             });
         }
     }
@@ -139,27 +84,6 @@ impl Location {
 }
 
 impl Locations {
-    #[cfg(not(target_os = "macos"))]
-    pub fn get_drives() -> Self {
-        let mut drives = sysinfo::Disks::new_with_refreshed_list();
-        drives.sort_by(|a, b| a.mount_point().cmp(b.mount_point()));
-        let locations = drives
-            .iter()
-            .map(|drive| {
-                Location::from_path(
-                    drive.mount_point(),
-                    format!(
-                        "{} ({})",
-                        drive.name().to_str().unwrap_or(""),
-                        drive.mount_point().display()
-                    ),
-                )
-            })
-            .collect();
-
-        Self { locations }
-    }
-
     pub fn get_user_dirs() -> Self {
         let locations: Vec<Location> =
             directories::UserDirs::new().map_or_else(Vec::new, |user_dirs| {

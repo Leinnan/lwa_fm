@@ -124,13 +124,35 @@ impl ElapsedTime {
 
 impl Display for ElapsedTime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
+        let ago = |f: &mut std::fmt::Formatter<'_>, count: u32, unit: &str| {
+            let plural = if count == 1 { "" } else { "s" };
+            write!(f, "{count} {unit}{plural} ago")
+        };
+        match *self {
             Self::None => write!(f, "Future"),
             Self::Seconds(_) => write!(f, "Just now"),
             Self::Minutes(m) => write!(f, "{m} min ago"),
-            Self::Hours(h) => write!(f, "{h} hours ago"),
-            Self::Days(d) => write!(f, "{d} days ago"),
-            Self::Years(y) => write!(f, "{y} years ago"),
+            Self::Hours(h) => ago(f, h, "hour"),
+            // Day counts stop being useful after a couple of weeks.
+            Self::Days(d) if d >= 60 => ago(f, d / 30, "month"),
+            Self::Days(d) if d >= 14 => ago(f, d / 7, "week"),
+            Self::Days(d) => ago(f, d, "day"),
+            Self::Years(y) => ago(f, y, "year"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ElapsedTime;
+
+    #[test]
+    fn elapsed_time_reads_naturally() {
+        assert_eq!(ElapsedTime::Days(1).to_string(), "1 day ago");
+        assert_eq!(ElapsedTime::Days(3).to_string(), "3 days ago");
+        assert_eq!(ElapsedTime::Days(20).to_string(), "2 weeks ago");
+        assert_eq!(ElapsedTime::Days(200).to_string(), "6 months ago");
+        assert_eq!(ElapsedTime::Hours(1).to_string(), "1 hour ago");
+        assert_eq!(ElapsedTime::Years(1).to_string(), "1 year ago");
     }
 }
