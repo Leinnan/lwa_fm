@@ -696,10 +696,12 @@ impl App {
         match &outcome.undo {
             Some(crate::fileops::Undo::Rename { from, to }) => {
                 crate::app::open_history::rename(from, to);
+                crate::app::thumbnail_choice::rename(from, to);
             }
             Some(crate::fileops::Undo::Moves(pairs)) => {
                 for (now, was) in pairs {
                     crate::app::open_history::rename(was, now);
+                    crate::app::thumbnail_choice::rename(was, now);
                 }
             }
             _ => {}

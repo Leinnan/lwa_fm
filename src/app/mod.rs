@@ -52,6 +52,8 @@ mod settings;
 mod side_panel;
 #[cfg(any(windows, test))]
 mod theme;
+pub mod thumbnail_choice;
+mod thumbnail_picker;
 mod top_bottom;
 mod trash_view;
 pub mod ui;
@@ -161,6 +163,8 @@ pub struct App {
     saved_editor: Option<saved_searches::SavedSearchEditor>,
     #[serde(skip)]
     batch_rename: Option<file_ops::BatchRename>,
+    #[serde(skip)]
+    thumbnail_picker: Option<thumbnail_picker::ThumbnailPicker>,
     /// Lua plugins: their workers, jobs, form and bar contents.
     #[serde(skip)]
     plugins: crate::plugins::PluginHost,
@@ -177,6 +181,13 @@ pub struct App {
 
 impl App {
     fn render_modal(&mut self, ctx: &egui::Context) {
+        // Another dialog replaced the thumbnail picker: free its frames.
+        if self.thumbnail_picker.is_some()
+            && self.display_modal != Some(ModalWindow::SelectThumbnail)
+        {
+            self.thumbnail_picker = None;
+            self.assets.close_overview_frames();
+        }
         if let Some(modal) = &self.display_modal {
             match modal {
                 ModalWindow::Settings => {
@@ -203,6 +214,7 @@ impl App {
                         ActionToPerform::CloseActiveModalWindow.schedule();
                     }
                 }
+                ModalWindow::SelectThumbnail => self.select_thumbnail_ui(ctx),
             }
         }
     }
@@ -591,6 +603,7 @@ impl Default for App {
             choose_folder: None,
             saved_editor: None,
             batch_rename: None,
+            thumbnail_picker: None,
             plugins: crate::plugins::PluginHost::default(),
             #[cfg(feature = "profiling")]
             profiler_visible: true,
@@ -1225,6 +1238,8 @@ impl App {
                 self.run_plugin_action(&action, context);
             }
             ActionToPerform::Plugin(message) => self.handle_plugin_message(ctx, *message),
+            ActionToPerform::SelectThumbnail(entry) => self.open_thumbnail_picker(*entry),
+            ActionToPerform::ResetThumbnail(path) => self.set_thumbnail_choice(&path, None),
         }
     }
 }

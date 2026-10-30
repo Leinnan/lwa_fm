@@ -67,6 +67,8 @@ pub enum ModalWindow {
     ConfirmEject,
     /// A plugin action's form.
     PluginForm,
+    /// Choose which overview frame is a video's thumbnail.
+    SelectThumbnail,
 }
 impl Display for ModalWindow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,6 +85,7 @@ impl Display for ModalWindow {
             Self::ChooseFolder => write!(f, "Choose folder"),
             Self::EditSavedSearch => write!(f, "Saved search"),
             Self::BatchRename => write!(f, "Rename items"),
+            Self::SelectThumbnail => write!(f, "Select thumbnail"),
         }
     }
 }
@@ -252,6 +255,10 @@ pub enum ActionToPerform {
     },
     /// A message from a plugin's thread.
     Plugin(Box<crate::plugins::PluginMsg>),
+    /// Open the dialog choosing a video's thumbnail from its overview frames.
+    SelectThumbnail(Box<crate::data::files::DirEntry>),
+    /// Go back to the default thumbnail of a video.
+    ResetThumbnail(PathBuf),
 }
 
 impl ActionToPerform {
@@ -336,6 +343,8 @@ impl From<&ActionToPerform> for Cow<'static, str> {
                 )
             }
             ActionToPerform::Plugin(_) => Cow::Borrowed("Plugin message"),
+            ActionToPerform::SelectThumbnail(_) => Cow::Borrowed("Select thumbnail…"),
+            ActionToPerform::ResetThumbnail(_) => Cow::Borrowed("Reset thumbnail"),
         }
     }
 }

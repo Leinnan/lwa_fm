@@ -458,6 +458,70 @@ fn real_disk_poster_reuse_preserves_timestamp_and_avoids_first_decode() {
     );
 }
 
+#[test]
+#[ignore = "requires FFmpeg; run with --ignored --test-threads=1"]
+fn real_chosen_thumbnail_comes_from_the_overview_without_ffmpeg() {
+    let fixture = Fixture::new();
+    let source = fixture.video("chosen.mp4", "testsrc2=size=320x180:rate=30", "20");
+    let (animation, _) = generate(source.clone(), PreviewSpec::new(240));
+    flush_cache();
+    let at = animation.source_timestamps[7];
+    crate::app::thumbnail_choice::set(&source.path, source.revision, source.size, at);
+    CHOSEN.lock().expect("chosen poster cache").clear();
+    let before = process::PROCESS_COUNT.load(Ordering::Relaxed);
+    let poster = super::super::load_or_generate_thumbnail(
+        &source.path,
+        super::super::ThumbnailKind::Video,
+        160,
+        source.revision,
+        source.size,
+        &AtomicBool::new(false),
+    )
+    .expect("chosen poster");
+    assert_eq!(
+        process::PROCESS_COUNT.load(Ordering::Relaxed),
+        before,
+        "cut from the cached overview"
+    );
+    let distance = |frame: &DecodedImage| {
+        let expected = fit_frame(frame, 160).expect("scaled frame");
+        assert_eq!(
+            (expected.width, expected.height),
+            (poster.width, poster.height)
+        );
+        expected
+            .rgba
+            .iter()
+            .zip(poster.rgba.iter())
+            .map(|(a, b)| u64::from(a.abs_diff(*b)))
+            .sum::<u64>()
+    };
+    assert!(distance(&animation.frames[7]) < distance(&animation.frames[0]));
+    // Its own cache file serves it after a restart, without the overview.
+    flush_cache();
+    CHOSEN.lock().expect("chosen poster cache").clear();
+    fs::remove_file(preview_cache_path(
+        &source,
+        PreviewSpec::new(240),
+        AnimatedSourceKind::Video,
+    ))
+    .expect("remove overview");
+    let path = cache::chosen_poster_cache_path(
+        &source.path,
+        160,
+        source.revision,
+        source.size,
+        at.as_millis() as u64,
+    );
+    let reloaded = cached_chosen_poster(&source, 160, at, &path, &AtomicBool::new(false))
+        .expect("chosen poster from disk");
+    assert_eq!(
+        (reloaded.width, reloaded.height),
+        (poster.width, poster.height)
+    );
+    assert!(crate::app::thumbnail_choice::clear(&source.path));
+}
+
 fn save_overview_sheet(animation: &DecodedAnimation) {
     if let Ok(directory) = std::env::var("LWA_THUMBNAIL_ARTIFACT_DIR") {
         let mut sheet = image::RgbaImage::new(640, 270);

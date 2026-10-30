@@ -255,6 +255,23 @@ pub(super) fn thumbnail_cache_path(
     ensure_shard(&prefix).join(format!("{prefix}_{hash}_v7.jpg"))
 }
 
+/// Where a video poster at the user's chosen frame (`at_ms`) is cached: next
+/// to the default poster, in the same eviction group.
+pub(super) fn chosen_poster_cache_path(
+    path: &Path,
+    target_edge: u32,
+    source_revision: u128,
+    source_size: u64,
+    at_ms: u64,
+) -> PathBuf {
+    let default = thumbnail_cache_path(path, target_edge, source_revision, source_size);
+    let stem = default
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    default.with_file_name(format!("{stem}_t{at_ms}.jpg"))
+}
+
 /// The cached thumbnail file for a path from [`thumbnail_cache_path`], in
 /// whichever format it was saved.
 pub(super) fn cached_variant(path: &Path) -> Option<PathBuf> {

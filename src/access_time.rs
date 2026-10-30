@@ -129,12 +129,16 @@ mod tests {
             .open(&path)
             .and_then(|file| file.set_times(std::fs::FileTimes::new().set_accessed(past)))
             .expect("set atime");
-        let before = std::fs::metadata(&path).and_then(|m| m.accessed()).expect("atime");
+        let before = std::fs::metadata(&path)
+            .and_then(|m| m.accessed())
+            .expect("atime");
         {
             let _guard = PreserveAccessTime::new(&path);
             let _ = std::fs::read(&path).expect("read");
         }
-        let after = std::fs::metadata(&path).and_then(|m| m.accessed()).expect("atime");
+        let after = std::fs::metadata(&path)
+            .and_then(|m| m.accessed())
+            .expect("atime");
         assert_eq!(before, after);
         let _ = std::fs::remove_dir_all(dir);
     }

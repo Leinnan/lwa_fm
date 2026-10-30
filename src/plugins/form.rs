@@ -94,7 +94,9 @@ pub struct Condition {
 impl Condition {
     fn holds(&self, values: &Values) -> bool {
         let value = values.get(&self.field).unwrap_or(&Value::Null);
-        self.equals.as_ref().is_none_or(|expected| same(value, expected))
+        self.equals
+            .as_ref()
+            .is_none_or(|expected| same(value, expected))
             && self
                 .not_equals
                 .as_ref()
@@ -158,7 +160,10 @@ impl FieldDef {
     }
 
     fn label(&self) -> &str {
-        self.label.as_deref().or(self.id.as_deref()).unwrap_or_default()
+        self.label
+            .as_deref()
+            .or(self.id.as_deref())
+            .unwrap_or_default()
     }
 
     pub fn visible(&self, values: &Values) -> bool {
@@ -180,9 +185,7 @@ impl FieldDef {
         match self.kind {
             FieldType::Bool => Value::Bool(false),
             FieldType::Int => Value::from(self.min.map_or(0, |min| min.ceil() as i64).max(0)),
-            FieldType::Float | FieldType::Time => {
-                Value::from(self.min.unwrap_or(0.0).max(0.0))
-            }
+            FieldType::Float | FieldType::Time => Value::from(self.min.unwrap_or(0.0).max(0.0)),
             FieldType::Choice | FieldType::Radio => self
                 .options
                 .first()
@@ -195,14 +198,20 @@ impl FieldDef {
     /// `value` converted to this field's type and range, or why it can't be.
     fn conform(&self, value: &Value) -> Result<Value, String> {
         match self.kind {
-            FieldType::Bool => value.as_bool().map(Value::Bool).ok_or_else(|| "must be true or false".into()),
+            FieldType::Bool => value
+                .as_bool()
+                .map(Value::Bool)
+                .ok_or_else(|| "must be true or false".into()),
             FieldType::Int => {
                 let number = value.as_f64().ok_or("must be a whole number")?;
                 let clamped = self.clamp(number.round());
                 Ok(Value::from(clamped as i64))
             }
             FieldType::Float | FieldType::Time => {
-                let number = value.as_f64().filter(|n| n.is_finite()).ok_or("must be a number")?;
+                let number = value
+                    .as_f64()
+                    .filter(|n| n.is_finite())
+                    .ok_or("must be a number")?;
                 Ok(Value::from(self.clamp(number)))
             }
             FieldType::Choice | FieldType::Radio => {
@@ -256,9 +265,13 @@ impl Form {
         let mut ids: Vec<&str> = Vec::new();
         for field in &fields {
             if field.kind.is_input() {
-                let id = field.id.as_deref().filter(|id| !id.is_empty()).ok_or_else(|| {
-                    format!("a {:?} field needs an id", field.kind).to_lowercase()
-                })?;
+                let id = field
+                    .id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| {
+                        format!("a {:?} field needs an id", field.kind).to_lowercase()
+                    })?;
                 if ids.contains(&id) {
                     return Err(format!("field id \"{id}\" is used twice"));
                 }
@@ -270,7 +283,8 @@ impl Form {
             if field.kind != FieldType::Group && !field.fields.is_empty() {
                 return Err(format!("field \"{}\": only groups have fields", field.id()));
             }
-            if matches!(field.kind, FieldType::Choice | FieldType::Radio) && field.options.is_empty()
+            if matches!(field.kind, FieldType::Choice | FieldType::Radio)
+                && field.options.is_empty()
             {
                 return Err(format!("field \"{}\" needs options", field.id()));
             }
@@ -335,11 +349,16 @@ impl Form {
                 continue;
             }
             let id = field.id().to_owned();
-            let value = values.get(&id).cloned().unwrap_or_else(|| field.empty_value());
+            let value = values
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| field.empty_value());
             match field.conform(&value) {
                 Ok(value) => {
                     let active = field.visible(values) && field.enabled(values);
-                    if active && field.required && value.as_str().is_some_and(|s| s.trim().is_empty())
+                    if active
+                        && field.required
+                        && value.as_str().is_some_and(|s| s.trim().is_empty())
                     {
                         errors.insert(id.clone(), "Required".into());
                     }
@@ -350,7 +369,11 @@ impl Form {
                 }
             }
         }
-        if errors.is_empty() { Ok(out) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(out)
+        } else {
+            Err(errors)
+        }
     }
 }
 
@@ -432,7 +455,11 @@ impl FormState {
     /// Draws the dialog's fields and buttons.
     pub fn ui(&mut self, ui: &mut egui::Ui, default_title: &str) -> Outcome {
         let mut outcome = Outcome::Open;
-        let title = self.form.title.clone().unwrap_or_else(|| default_title.to_owned());
+        let title = self
+            .form
+            .title
+            .clone()
+            .unwrap_or_else(|| default_title.to_owned());
         ui.heading(title);
         ui.add_space(6.0);
         let fields = std::mem::take(&mut self.form.fields);
@@ -540,7 +567,9 @@ impl FormState {
             }
             FieldType::Bool => {
                 let mut on = value.as_bool().unwrap_or(false);
-                ui.checkbox(&mut on, "").changed().then_some(Value::Bool(on))
+                ui.checkbox(&mut on, "")
+                    .changed()
+                    .then_some(Value::Bool(on))
             }
             FieldType::Int => {
                 let mut number = value.as_i64().unwrap_or(0);
@@ -685,11 +714,18 @@ mod tests {
         convert_form().check().expect("valid");
         let missing_id = form(json!({ "fields": [{ "type": "text" }] }));
         assert!(missing_id.check().is_err());
-        let bad_default = form(json!({ "fields": [{ "id": "a", "type": "choice", "options": ["x"], "default": "y" }] }));
+        let bad_default = form(
+            json!({ "fields": [{ "id": "a", "type": "choice", "options": ["x"], "default": "y" }] }),
+        );
         assert!(bad_default.check().is_err());
-        let unknown_dep = form(json!({ "fields": [{ "id": "a", "type": "bool", "visible_if": { "field": "b", "equals": true } }] }));
+        let unknown_dep = form(
+            json!({ "fields": [{ "id": "a", "type": "bool", "visible_if": { "field": "b", "equals": true } }] }),
+        );
         assert!(unknown_dep.check().is_err());
-        assert!(serde_json::from_value::<Form>(json!({ "fields": [{ "type": "text", "colour": 1 }] })).is_err());
+        assert!(
+            serde_json::from_value::<Form>(json!({ "fields": [{ "type": "text", "colour": 1 }] }))
+                .is_err()
+        );
     }
 
     #[test]

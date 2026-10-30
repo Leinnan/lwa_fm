@@ -64,7 +64,10 @@ fn video_args_fragment_scale_and_no_audio() {
         "{ format = 'mkv', quality = 'high', scale = '720', audio = false, start = 1.5, finish = 4, overwrite = true }",
     )
     .join(" ");
-    assert!(args.starts_with("-ss 1.500 -to 4.000 -i /v/in.mov"), "{args}");
+    assert!(
+        args.starts_with("-ss 1.500 -to 4.000 -i /v/in.mov"),
+        "{args}"
+    );
     assert!(args.contains("-crf 18 -preset slow"), "{args}");
     assert!(args.contains("-vf scale=-2:720 -an"), "{args}");
     assert!(!args.contains("faststart"), "{args}");
@@ -77,7 +80,10 @@ fn video_args_other_formats() {
     assert!(webm.contains("-c:v libvpx-vp9 -b:v 0 -crf 38"), "{webm}");
     assert!(webm.contains("-c:a libopus"), "{webm}");
     let gif = ffmpeg_args("{ format = 'gif', scale = '480' }").join(" ");
-    assert!(gif.contains("palettegen") && gif.contains("scale=-2:480") && gif.contains("-an"), "{gif}");
+    assert!(
+        gif.contains("palettegen") && gif.contains("scale=-2:480") && gif.contains("-an"),
+        "{gif}"
+    );
     let mp3 = ffmpeg_args("{ format = 'mp3' }").join(" ");
     assert!(mp3.contains("-vn -c:a libmp3lame -q:a 2"), "{mp3}");
 }
@@ -115,10 +121,13 @@ fn git_bar_and_inspector_in_a_repository() {
         dir: Some(dir.clone()),
         ..Default::default()
     };
-    let bar: Vec<super::BarSegment> = mlua::LuaSerdeExt::from_value(&vm.lua, call(&vm, &["bar"], &context))
-        .expect("segments");
+    let bar: Vec<super::BarSegment> =
+        mlua::LuaSerdeExt::from_value(&vm.lua, call(&vm, &["bar"], &context)).expect("segments");
     assert_eq!(bar[0].text.as_deref(), Some("trunk"));
-    assert!(bar.iter().any(|s| s.badge.as_deref() == Some("1 changed")), "{bar:?}");
+    assert!(
+        bar.iter().any(|s| s.badge.as_deref() == Some("1 changed")),
+        "{bar:?}"
+    );
     assert!(bar.iter().any(|s| s.action.as_deref() == Some("commit")));
 
     let inspector = CallContext {
@@ -127,7 +136,8 @@ fn git_bar_and_inspector_in_a_repository() {
         ..Default::default()
     };
     let rows: Vec<super::InspectorRow> =
-        mlua::LuaSerdeExt::from_value(&vm.lua, call(&vm, &["inspector"], &inspector)).expect("rows");
+        mlua::LuaSerdeExt::from_value(&vm.lua, call(&vm, &["inspector"], &inspector))
+            .expect("rows");
     assert_eq!(
         rows[0],
         super::InspectorRow::Pair("Status".into(), "Untracked".into())
@@ -148,9 +158,12 @@ fn git_bar_and_inspector_in_a_repository() {
         .expect("values");
     let result: Value = vm.call(&run, (ctx, values), None).expect("commits");
     assert!(result.is_nil(), "{result:?}");
-    let bar: Vec<super::BarSegment> = mlua::LuaSerdeExt::from_value(&vm.lua, call(&vm, &["bar"], &context))
-        .expect("segments");
-    assert!(bar.iter().any(|s| s.text.as_deref() == Some("clean")), "{bar:?}");
+    let bar: Vec<super::BarSegment> =
+        mlua::LuaSerdeExt::from_value(&vm.lua, call(&vm, &["bar"], &context)).expect("segments");
+    assert!(
+        bar.iter().any(|s| s.text.as_deref() == Some("clean")),
+        "{bar:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -158,7 +171,10 @@ fn git_bar_and_inspector_in_a_repository() {
 fn bar_is_not_shown_outside_repositories() {
     let dir = temp_dir("not_git");
     let code = bundled("io.github.leinnan.git");
-    if dir.ancestors().any(|ancestor| ancestor.join(".git").exists()) {
+    if dir
+        .ancestors()
+        .any(|ancestor| ancestor.join(".git").exists())
+    {
         return;
     }
     assert!(!code.manifest.activation.matches(&dir));
@@ -176,9 +192,22 @@ fn real_ffmpeg_converts_mov_to_mp4() {
     let source = dir.join("clip.mov");
     let made = Command::new(&ffmpeg)
         .args([
-            "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-            "testsrc=duration=2:size=320x240:rate=25", "-f", "lavfi", "-i",
-            "sine=duration=2", "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=duration=2",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
         ])
         .arg(&source)
         .status()
@@ -194,9 +223,17 @@ fn real_ffmpeg_converts_mov_to_mp4() {
         ..Default::default()
     };
     let ctx = vm.context(&context).expect("ctx");
-    let first: Table = ctx.get::<Table>("targets").expect("targets").get(1).expect("item");
-    let run_item = vm.handler(&["actions", "to_mp4", "run_item"]).expect("run_item");
-    let result: Value = vm.call(&run_item, (ctx.clone(), first.clone()), None).expect("converts");
+    let first: Table = ctx
+        .get::<Table>("targets")
+        .expect("targets")
+        .get(1)
+        .expect("item");
+    let run_item = vm
+        .handler(&["actions", "to_mp4", "run_item"])
+        .expect("run_item");
+    let result: Value = vm
+        .call(&run_item, (ctx.clone(), first.clone()), None)
+        .expect("converts");
     assert!(result.is_nil(), "{result:?}");
     let output = dir.join("clip.mp4");
     assert!(output.is_file());
@@ -220,8 +257,12 @@ fn real_ffmpeg_converts_mov_to_mp4() {
     values.insert("start".into(), 0.5.into());
     values.insert("finish".into(), 1.5.into());
     let values = mlua::LuaSerdeExt::to_value(&vm.lua, &values).expect("values");
-    let convert = vm.handler(&["actions", "convert", "run_item"]).expect("run_item");
-    let result: Value = vm.call(&convert, (ctx, first, values), None).expect("converts");
+    let convert = vm
+        .handler(&["actions", "convert", "run_item"])
+        .expect("run_item");
+    let result: Value = vm
+        .call(&convert, (ctx, first, values), None)
+        .expect("converts");
     assert!(result.is_nil(), "{result:?}");
     let fragment = dir.join("clip (2).mp4");
     let probe = vm
@@ -236,13 +277,19 @@ fn real_ffmpeg_converts_mov_to_mp4() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn snapshot_harness<'a>(size: egui::Vec2, mut draw: impl FnMut(&mut egui::Ui) + 'a) -> egui_kittest::Harness<'a> {
+fn snapshot_harness<'a>(
+    size: egui::Vec2,
+    mut draw: impl FnMut(&mut egui::Ui) + 'a,
+) -> egui_kittest::Harness<'a> {
     egui_kittest::Harness::builder()
         .with_options(crate::app::ui::snapshot_options())
         .with_size(size)
         .build_ui(move |ui| {
             let ctx = ui.ctx().clone();
-            if !ctx.data(|data| data.get_temp::<bool>(egui::Id::new("fonts_set")).unwrap_or(false)) {
+            if !ctx.data(|data| {
+                data.get_temp::<bool>(egui::Id::new("fonts_set"))
+                    .unwrap_or(false)
+            }) {
                 let mut fonts = egui::FontDefinitions::default();
                 crate::app::ui::register_icons(&mut fonts);
                 ctx.set_fonts(fonts);
@@ -274,12 +321,16 @@ fn plugin_ui_snapshots() {
     };
     let mut state = super::host::BarState::default();
     state.segments = vec![
-            segment(serde_json::json!({ "text": "main", "icon": "git-branch" })),
-            segment(serde_json::json!({ "text": "2", "icon": "arrow-up" })),
-            segment(serde_json::json!({ "badge": "3 changed", "tone": "warn" })),
-            segment(serde_json::json!({ "button": "Pull", "action": "pull", "icon": "arrow-down-to-line" })),
-            segment(serde_json::json!({ "button": "Push", "action": "push", "icon": "arrow-up-from-line" })),
-            segment(serde_json::json!({ "button": "Commit…", "action": "commit" })),
+        segment(serde_json::json!({ "text": "main", "icon": "git-branch" })),
+        segment(serde_json::json!({ "text": "2", "icon": "arrow-up" })),
+        segment(serde_json::json!({ "badge": "3 changed", "tone": "warn" })),
+        segment(
+            serde_json::json!({ "button": "Pull", "action": "pull", "icon": "arrow-down-to-line" }),
+        ),
+        segment(
+            serde_json::json!({ "button": "Push", "action": "push", "icon": "arrow-up-from-line" }),
+        ),
+        segment(serde_json::json!({ "button": "Commit…", "action": "commit" })),
     ];
     let views = [super::host::BarView {
         plugin: "io.github.leinnan.git",
@@ -307,7 +358,9 @@ fn plugin_ui_snapshots() {
         }],
         ..Default::default()
     };
-    let form: Value = vm.call(&form, vm.context(&context).expect("ctx"), None).expect("form");
+    let form: Value = vm
+        .call(&form, vm.context(&context).expect("ctx"), None)
+        .expect("form");
     let form: super::form::Form = mlua::LuaSerdeExt::from_value(&vm.lua, form).expect("form");
     let mut state = super::form::FormState::new(form, None);
     state.values.insert("range".into(), "part".into());

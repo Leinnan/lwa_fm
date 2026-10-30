@@ -23,8 +23,8 @@ mod sandbox;
 mod tests;
 pub mod ui;
 
-pub use host::targets_from_entries as host_targets;
 pub use host::PluginHost;
+pub use host::targets_from_entries as host_targets;
 pub use manifest::TargetInfo;
 
 use crate::app::commands::ActionToPerform;
@@ -206,7 +206,11 @@ pub struct ActionEntry {
 
 /// Whether an action applies to these items in `dir`. Folder actions
 /// (`current_dir`) also need the plugin's activation to match the folder.
-pub fn applies(action: &ActionEntry, targets: &[TargetInfo], dir: Option<&std::path::Path>) -> bool {
+pub fn applies(
+    action: &ActionEntry,
+    targets: &[TargetInfo],
+    dir: Option<&std::path::Path>,
+) -> bool {
     action.def.targets.matches(targets, dir.is_some())
         && (action.def.targets.kind != manifest::TargetKind::CurrentDir
             || dir.is_some_and(|dir| action.activation.matches(dir)))
@@ -236,7 +240,12 @@ fn publish(registry: Registry) {
 
 /// Draws the menu entries of the plugin actions that apply to `targets`,
 /// for the entry menu (`entry`) or the folder's background menu.
-pub fn menu_items(ui: &mut egui::Ui, targets: &[TargetInfo], dir: Option<&std::path::Path>, entry: bool) {
+pub fn menu_items(
+    ui: &mut egui::Ui,
+    targets: &[TargetInfo],
+    dir: Option<&std::path::Path>,
+    entry: bool,
+) {
     let registry = registry();
     let actions: Vec<&ActionEntry> = registry
         .actions

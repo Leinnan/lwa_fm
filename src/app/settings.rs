@@ -702,6 +702,16 @@ impl ApplicationSettings {
                     );
                 },
             );
+            group.row(
+                "Chosen video thumbnails",
+                Some("Frames picked with \"Select thumbnail…\""),
+                |ui| {
+                    if ui.button("Reset all").clicked() {
+                        crate::app::thumbnail_choice::clear_all();
+                        crate::toast!(Info, "Video thumbnails reset");
+                    }
+                },
+            );
         });
     }
 

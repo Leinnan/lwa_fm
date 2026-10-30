@@ -80,6 +80,22 @@ impl MyTabViewer<'_> {
                     crate::app::open_history::opened(&val.get_path());
                     ui.close();
                 }
+                if single
+                    && !is_dir
+                    && crate::app::assets::kinds::media_kind(Path::new(val.file_name))
+                        == Some(crate::app::assets::kinds::MediaKind::Video)
+                {
+                    if ui.button("Select thumbnail…").clicked() {
+                        ActionToPerform::SelectThumbnail(Box::new(val.to_entry())).schedule();
+                        ui.close();
+                    }
+                    if crate::app::thumbnail_choice::has(&val.get_path())
+                        && ui.button("Reset thumbnail").clicked()
+                    {
+                        ActionToPerform::ResetThumbnail(val.get_path()).schedule();
+                        ui.close();
+                    }
+                }
                 if paths
                     .iter()
                     .any(|path| crate::app::open_history::get(path).is_some())

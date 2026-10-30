@@ -142,9 +142,7 @@ fn path_table(lua: &Lua) -> mlua::Result<Table> {
     )?;
     table.set(
         "parent",
-        lua.create_function(|_, path: String| {
-            Ok(Path::new(&path).parent().map(to_string))
-        })?,
+        lua.create_function(|_, path: String| Ok(Path::new(&path).parent().map(to_string)))?,
     )?;
     table.set(
         "name",
@@ -409,35 +407,39 @@ fn ops_table(lua: &Lua) -> mlua::Result<Table> {
     let write = |lua: &Lua| require(lua, &Permission::FsWrite);
     table.set(
         "copy",
-        lua.create_function(move |lua, (srcs, dst, conflict): (Value, String, Option<String>)| {
-            write(lua)?;
-            send(PluginMsg::App(AppRequest::FileOp(FileOp::Copy {
-                srcs: paths_arg(srcs)?,
-                dst: absolute(&dst)?,
-                policy: policy(conflict.as_deref())?,
-            })));
-            Ok(())
-        })?,
+        lua.create_function(
+            move |lua, (srcs, dst, conflict): (Value, String, Option<String>)| {
+                write(lua)?;
+                send(PluginMsg::App(AppRequest::FileOp(FileOp::Copy {
+                    srcs: paths_arg(srcs)?,
+                    dst: absolute(&dst)?,
+                    policy: policy(conflict.as_deref())?,
+                })));
+                Ok(())
+            },
+        )?,
     )?;
     table.set(
         "move",
-        lua.create_function(move |lua, (srcs, dst, conflict): (Value, String, Option<String>)| {
-            write(lua)?;
-            send(PluginMsg::App(AppRequest::FileOp(FileOp::Move {
-                srcs: paths_arg(srcs)?,
-                dst: absolute(&dst)?,
-                policy: policy(conflict.as_deref())?,
-            })));
-            Ok(())
-        })?,
+        lua.create_function(
+            move |lua, (srcs, dst, conflict): (Value, String, Option<String>)| {
+                write(lua)?;
+                send(PluginMsg::App(AppRequest::FileOp(FileOp::Move {
+                    srcs: paths_arg(srcs)?,
+                    dst: absolute(&dst)?,
+                    policy: policy(conflict.as_deref())?,
+                })));
+                Ok(())
+            },
+        )?,
     )?;
     table.set(
         "trash",
         lua.create_function(move |lua, paths: Value| {
             write(lua)?;
-            send(PluginMsg::App(AppRequest::FileOp(FileOp::Trash(paths_arg(
-                paths,
-            )?))));
+            send(PluginMsg::App(AppRequest::FileOp(FileOp::Trash(
+                paths_arg(paths)?,
+            ))));
             Ok(())
         })?,
     )?;
@@ -456,7 +458,10 @@ fn ops_table(lua: &Lua) -> mlua::Result<Table> {
             } else {
                 from.with_file_name(to)
             };
-            send(PluginMsg::App(AppRequest::FileOp(FileOp::Rename { from, to })));
+            send(PluginMsg::App(AppRequest::FileOp(FileOp::Rename {
+                from,
+                to,
+            })));
             Ok(())
         })?,
     )?;
@@ -500,7 +505,10 @@ fn process_options(table: &Table) -> mlua::Result<ProcessOptions> {
         .transpose()?;
     let env = table
         .get::<Option<Table>>("env")?
-        .map(|env| env.pairs::<String, String>().collect::<mlua::Result<Vec<_>>>())
+        .map(|env| {
+            env.pairs::<String, String>()
+                .collect::<mlua::Result<Vec<_>>>()
+        })
         .transpose()?
         .unwrap_or_default();
     let timeout = table
@@ -626,7 +634,10 @@ fn ffmpeg_tools(lua: &Lua) -> mlua::Result<(PathBuf, PathBuf)> {
     }
     let (in_job, cancel) = {
         let services = services(lua)?;
-        (services.job.is_some(), std::sync::Arc::clone(&services.cancel))
+        (
+            services.job.is_some(),
+            std::sync::Arc::clone(&services.cancel),
+        )
     };
     if !in_job {
         return Ok((ffmpeg, ffprobe));
@@ -781,7 +792,9 @@ fn ffmpeg_table(lua: &Lua) -> mlua::Result<Table> {
                         },
                     )
                 })?;
-                let names = output.map(|output| parse_encoders(&output.stdout)).unwrap_or_default();
+                let names = output
+                    .map(|output| parse_encoders(&output.stdout))
+                    .unwrap_or_default();
                 if let Ok(mut cache) = ENCODERS.lock()
                     && !names.is_empty()
                 {
@@ -835,7 +848,9 @@ pub fn parse_probe(json: &str) -> Option<MediaInfo> {
         stream["codec_type"] == "video"
             && stream["disposition"]["attached_pic"].as_u64().unwrap_or(0) == 0
     });
-    let audio = streams.iter().find(|stream| stream["codec_type"] == "audio");
+    let audio = streams
+        .iter()
+        .find(|stream| stream["codec_type"] == "audio");
     let number = |value: &serde_json::Value| -> Option<f64> {
         value
             .as_f64()
@@ -939,8 +954,8 @@ fn media_table(lua: &Lua) -> mlua::Result<Table> {
 /// Extensions `app.system_open` refuses: they would run a program, which
 /// needs a `process:` permission instead.
 const RUNNABLE: &[&str] = &[
-    "exe", "bat", "cmd", "com", "msi", "ps1", "vbs", "js", "jse", "wsf", "scr", "lnk", "sh",
-    "app", "command",
+    "exe", "bat", "cmd", "com", "msi", "ps1", "vbs", "js", "jse", "wsf", "scr", "lnk", "sh", "app",
+    "command",
 ];
 
 fn app_table(lua: &Lua) -> mlua::Result<Table> {
@@ -1021,10 +1036,7 @@ fn log_table(lua: &Lua) -> mlua::Result<Table> {
         table.set(
             level,
             lua.create_function(move |lua, values: Variadic<Value>| {
-                let text: Vec<String> = values
-                    .iter()
-                    .map(super::sandbox::display_value)
-                    .collect();
+                let text: Vec<String> = values.iter().map(super::sandbox::display_value).collect();
                 let text = text.join(" ");
                 let id = plugin_id(lua)?;
                 match level {
@@ -1143,7 +1155,8 @@ mod tests {
         let vm = vm("return {}", &[]);
         let error = run(&vm, "return dirfleet.fs.exists('C:/')").expect_err("needs fs.read");
         assert!(error.contains("fs.read"), "{error}");
-        let error = run(&vm, "return dirfleet.process.run{ cmd = 'git' }").expect_err("needs process");
+        let error =
+            run(&vm, "return dirfleet.process.run{ cmd = 'git' }").expect_err("needs process");
         assert!(error.contains("process:git"), "{error}");
         let error = run(&vm, "return dirfleet.ffmpeg.available()").expect_err("needs ffmpeg");
         assert!(error.contains("ffmpeg"), "{error}");
@@ -1180,10 +1193,7 @@ mod tests {
     fn fs_reads_with_permission_and_rejects_relative_paths() {
         let vm = vm("return {}", &["fs.read"]);
         let dir = std::env::temp_dir();
-        let code = format!(
-            "return dirfleet.fs.is_dir([[{}]])",
-            dir.to_string_lossy()
-        );
+        let code = format!("return dirfleet.fs.is_dir([[{}]])", dir.to_string_lossy());
         assert_eq!(run(&vm, &code).expect("runs"), Value::Boolean(true));
         let error = run(&vm, "return dirfleet.fs.exists('relative')").expect_err("relative");
         assert!(error.contains("absolute"), "{error}");

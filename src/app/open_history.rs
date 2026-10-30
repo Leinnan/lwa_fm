@@ -71,7 +71,13 @@ impl OpenHistory {
         let Some((dir, name)) = Self::split(path) else {
             return;
         };
-        if self.by_dir.entry(dir).or_default().insert(name, record).is_none() {
+        if self
+            .by_dir
+            .entry(dir)
+            .or_default()
+            .insert(name, record)
+            .is_none()
+        {
             self.len += 1;
         }
     }
@@ -88,7 +94,10 @@ impl OpenHistory {
     }
 
     fn key(path: &Path) -> Vec<u8> {
-        canonical_form(path).to_string_lossy().into_owned().into_bytes()
+        canonical_form(path)
+            .to_string_lossy()
+            .into_owned()
+            .into_bytes()
     }
 
     fn put(&mut self, path: &Path, record: OpenRecord) {
@@ -152,7 +161,9 @@ impl OpenHistory {
 
 static HISTORY: LazyLock<RwLock<OpenHistory>> = LazyLock::new(|| {
     #[cfg(not(test))]
-    let tree = crate::app::database::SLED_DIRS.open_tree("open_history").ok();
+    let tree = crate::app::database::SLED_DIRS
+        .open_tree("open_history")
+        .ok();
     // Tests never touch the real history.
     #[cfg(test)]
     let tree = sled::Config::new()

@@ -99,10 +99,18 @@ pub fn bar_ui(ui: &mut Ui, views: &[BarView<'_>]) -> Option<String> {
             if index > 0 {
                 ui.separator();
             }
-            ui.label(RichText::new(view.name).small().color(Palette::of(ui).secondary));
+            ui.label(
+                RichText::new(view.name)
+                    .small()
+                    .color(Palette::of(ui).secondary),
+            );
             if let Some(error) = &view.state.error {
-                ui.label(app_ui::glyph(Icon::TriangleAlert).size(13.0).color(ui.visuals().warn_fg_color))
-                    .on_hover_text(error);
+                ui.label(
+                    app_ui::glyph(Icon::TriangleAlert)
+                        .size(13.0)
+                        .color(ui.visuals().warn_fg_color),
+                )
+                .on_hover_text(error);
             }
             for segment in &view.state.segments {
                 if let Some(action) = segment_ui(ui, view.plugin, segment) {
@@ -135,7 +143,11 @@ pub fn inspector_ui(ui: &mut Ui, views: &[InspectorView<'_>]) {
                         (label, value)
                     }
                 };
-                ui.label(RichText::new(label).small().color(Palette::of(ui).secondary));
+                ui.label(
+                    RichText::new(label)
+                        .small()
+                        .color(Palette::of(ui).secondary),
+                );
                 ui.add(egui::Label::new(value).wrap());
                 ui.add_space(4.0);
             }
@@ -226,7 +238,10 @@ pub fn settings_page(ui: &mut Ui, host: &mut PluginHost, settings: &mut Settings
             "Your plugins",
             Some(
                 dir.as_ref()
-                    .map_or_else(|| "No folder available".to_owned(), |dir| dir.display().to_string())
+                    .map_or_else(
+                        || "No folder available".to_owned(),
+                        |dir| dir.display().to_string(),
+                    )
                     .as_str(),
             ),
             |ui| {
@@ -243,7 +258,9 @@ pub fn settings_page(ui: &mut Ui, host: &mut PluginHost, settings: &mut Settings
                 }
             },
         );
-        group.note("Each plugin is a folder with plugin.toml and main.lua. Changes load as you save them.");
+        group.note(
+            "Each plugin is a folder with plugin.toml and main.lua. Changes load as you save them.",
+        );
     });
     let mut retry = None;
     let mut approve: Option<(String, u64)> = None;
@@ -260,7 +277,11 @@ pub fn settings_page(ui: &mut Ui, host: &mut PluginHost, settings: &mut Settings
             let description = format!(
                 "{}{}Version {} by {} · {source}",
                 manifest.description,
-                if manifest.description.is_empty() { "" } else { "\n" },
+                if manifest.description.is_empty() {
+                    ""
+                } else {
+                    "\n"
+                },
                 manifest.version,
                 manifest.author,
             );
@@ -280,21 +301,20 @@ pub fn settings_page(ui: &mut Ui, host: &mut PluginHost, settings: &mut Settings
             });
             let permissions = plugin.permissions();
             if !permissions.is_empty() {
-                let list: Vec<String> = permissions.iter().map(super::permissions::Permission::describe).collect();
+                let list: Vec<String> = permissions
+                    .iter()
+                    .map(super::permissions::Permission::describe)
+                    .collect();
                 let waiting = enabled && !approved;
-                group.row(
-                    "Permissions",
-                    Some(&list.join("\n")),
-                    |ui| {
-                        if waiting {
-                            if ui.button("Allow").clicked() {
-                                approve = Some((id.clone(), permissions.fingerprint()));
-                            }
-                        } else if approved && !plugin.is_bundled() {
-                            ui.label(RichText::new("Allowed").small());
+                group.row("Permissions", Some(&list.join("\n")), |ui| {
+                    if waiting {
+                        if ui.button("Allow").clicked() {
+                            approve = Some((id.clone(), permissions.fingerprint()));
                         }
-                    },
-                );
+                    } else if approved && !plugin.is_bundled() {
+                        ui.label(RichText::new("Allowed").small());
+                    }
+                });
                 if permissions.contains(&super::permissions::Permission::Ffmpeg) {
                     let (ffmpeg, _) = crate::app::assets::ffmpeg_tool_paths();
                     let found = ffmpeg.is_file();
@@ -314,7 +334,11 @@ pub fn settings_page(ui: &mut Ui, host: &mut PluginHost, settings: &mut Settings
                     );
                 }
             }
-            for action in manifest.actions.iter().filter(|action| action.palette || action.shortcut.is_some()) {
+            for action in manifest
+                .actions
+                .iter()
+                .filter(|action| action.palette || action.shortcut.is_some())
+            {
                 let full_id = format!("{id}.{}", action.id);
                 let entry = settings.entry(id.clone()).or_default();
                 let mut text = entry
@@ -347,7 +371,13 @@ pub fn settings_page(ui: &mut Ui, host: &mut PluginHost, settings: &mut Settings
                 );
             }
             if !plugin.errors.is_empty() {
-                let errors: Vec<&str> = plugin.errors.iter().rev().take(5).map(String::as_str).collect();
+                let errors: Vec<&str> = plugin
+                    .errors
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .map(String::as_str)
+                    .collect();
                 group.row("Recent errors", Some(&errors.join("\n")), |ui| {
                     if ui.button("Copy").clicked() {
                         ui.ctx().copy_text(errors.join("\n"));

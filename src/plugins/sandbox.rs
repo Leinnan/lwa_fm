@@ -4,9 +4,7 @@
 
 use super::permissions::PermissionSet;
 use super::{CallContext, PluginCode};
-use mlua::{
-    HookTriggers, Lua, LuaOptions, LuaSerdeExt as _, StdLib, Table, Value, VmState,
-};
+use mlua::{HookTriggers, Lua, LuaOptions, LuaSerdeExt as _, StdLib, Table, Value, VmState};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -27,7 +25,8 @@ pub struct Budget {
 
 impl Budget {
     pub fn start(&self, budget: Option<Duration>) {
-        self.deadline.set(budget.map(|budget| Instant::now() + budget));
+        self.deadline
+            .set(budget.map(|budget| Instant::now() + budget));
     }
 
     /// Runs `f` (which waits on something outside Lua) without spending the
@@ -118,9 +117,12 @@ pub struct Vm {
 /// Lua module names map to files: `lib.args` is `lib/args.lua`.
 fn module_file(name: &str) -> Option<String> {
     let valid = !name.is_empty()
-        && name
-            .split('.')
-            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        && name.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        });
     valid.then(|| format!("{}.lua", name.replace('.', "/")))
 }
 
@@ -224,7 +226,10 @@ fn restrict_globals(lua: &Lua, code: &Arc<PluginCode>) -> mlua::Result<()> {
                 .into_function()
             {
                 Ok(function) => Ok((Value::Function(function), Value::Nil)),
-                Err(error) => Ok((Value::Nil, Value::String(lua.create_string(error.to_string())?))),
+                Err(error) => Ok((
+                    Value::Nil,
+                    Value::String(lua.create_string(error.to_string())?),
+                )),
             }
         })?,
     )?;
@@ -259,7 +264,11 @@ fn restrict_globals(lua: &Lua, code: &Arc<PluginCode>) -> mlua::Result<()> {
                 .set_name(format!("@{file}"))
                 .set_mode(mlua::ChunkMode::Text)
                 .call::<Value>(name.as_str())?;
-            let value = if value.is_nil() { Value::Boolean(true) } else { value };
+            let value = if value.is_nil() {
+                Value::Boolean(true)
+            } else {
+                value
+            };
             loaded.raw_set(name.as_str(), value.clone())?;
             Ok(value)
         })?,
@@ -293,7 +302,9 @@ fn restrict_globals(lua: &Lua, code: &Arc<PluginCode>) -> mlua::Result<()> {
             let items: Vec<chrono::format::Item<'_>> =
                 chrono::format::StrftimeItems::new(&format).collect();
             if items.contains(&chrono::format::Item::Error) {
-                return Err(mlua::Error::runtime(format!("bad date format \"{format}\"")));
+                return Err(mlua::Error::runtime(format!(
+                    "bad date format \"{format}\""
+                )));
             }
             Ok(date.format_with_items(items.into_iter()).to_string())
         })?,
@@ -333,7 +344,12 @@ pub fn describe(error: &mlua::Error) -> String {
         }
         mlua::Error::MemoryError(_) => "ran out of memory (the limit is 64 MB)".into(),
         mlua::Error::WithContext { context, cause } => format!("{context}: {}", describe(cause)),
-        other => other.to_string().lines().next().unwrap_or_default().to_owned(),
+        other => other
+            .to_string()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
     }
 }
 
@@ -344,12 +360,7 @@ impl Vm {
         let table = lua.create_table()?;
         if let Some(dir) = &context.dir {
             table.set("dir", dir.to_string_lossy().as_ref())?;
-            let root = self
-                .services()
-                .code
-                .manifest
-                .activation
-                .root_for(dir);
+            let root = self.services().code.manifest.activation.root_for(dir);
             table.set("root", root.to_string_lossy().as_ref())?;
         }
         let targets = lua.create_table()?;
@@ -405,7 +416,12 @@ impl Vm {
     }
 
     /// Calls a handler within `budget`, turning errors into messages.
-    pub fn call<A, R>(&self, function: &mlua::Function, args: A, budget: Option<Duration>) -> Result<R, String>
+    pub fn call<A, R>(
+        &self,
+        function: &mlua::Function,
+        args: A,
+        budget: Option<Duration>,
+    ) -> Result<R, String>
     where
         A: mlua::IntoLuaMulti,
         R: mlua::FromLuaMulti,
@@ -484,10 +500,7 @@ pub mod tests {
     }
 
     fn eval(vm: &Vm, expression: &str) -> Value {
-        vm.lua
-            .load(expression)
-            .eval::<Value>()
-            .expect("evaluates")
+        vm.lua.load(expression).eval::<Value>().expect("evaluates")
     }
 
     #[test]
@@ -541,7 +554,9 @@ pub mod tests {
             &[],
         );
         let grow = vm.handler(&["grow"]).expect("handler");
-        let error = vm.call::<_, ()>(&grow, (), None).expect_err("out of memory");
+        let error = vm
+            .call::<_, ()>(&grow, (), None)
+            .expect_err("out of memory");
         assert!(error.contains("memory"), "{error}");
     }
 

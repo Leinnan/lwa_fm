@@ -171,7 +171,9 @@ fn handle(vm: &Vm, code: &PluginCode, request: Request) {
                 let value: Value = vm.call(&function, (ctx, values), Some(QUICK_BUDGET))?;
                 match value {
                     Value::Nil | Value::Boolean(true) => Ok(BTreeMap::new()),
-                    Value::String(text) => Ok(BTreeMap::from([(String::new(), text.to_string_lossy())])),
+                    Value::String(text) => {
+                        Ok(BTreeMap::from([(String::new(), text.to_string_lossy())]))
+                    }
                     Value::Table(_) => vm
                         .lua
                         .from_value::<BTreeMap<String, String>>(value)

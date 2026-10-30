@@ -71,11 +71,7 @@ impl Activation {
         {
             return true;
         }
-        if self
-            .contains_any
-            .iter()
-            .any(|name| dir.join(name).exists())
-        {
+        if self.contains_any.iter().any(|name| dir.join(name).exists()) {
             return true;
         }
         if dir.ancestors().any(|ancestor| {
@@ -410,7 +406,10 @@ fn validate(manifest: &Manifest) -> Result<(), String> {
         if let (Some(min), Some(max)) = (action.targets.min, action.targets.max)
             && min > max
         {
-            return Err(format!("action \"{}\": targets.min > targets.max", action.id));
+            return Err(format!(
+                "action \"{}\": targets.min > targets.max",
+                action.id
+            ));
         }
         match action.form {
             FormMode::Static if action.fields.is_empty() => {
@@ -531,7 +530,12 @@ author = "Me"
         let duplicate = format!(
             "{MINIMAL}[[action]]\nid = \"a\"\ntitle = \"A\"\n[[action]]\nid = \"a\"\ntitle = \"B\"\n"
         );
-        assert!(parse(&duplicate).expect_err("dup").message.contains("twice"));
+        assert!(
+            parse(&duplicate)
+                .expect_err("dup")
+                .message
+                .contains("twice")
+        );
         let per_item = format!("{MINIMAL}[[action]]\nid = \"a\"\ntitle = \"A\"\nper_item = true\n");
         assert!(parse(&per_item).is_err());
         let shortcut =

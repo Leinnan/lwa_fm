@@ -18,12 +18,14 @@ use rayon::{
 
 use crate::{
     app::{
-        Data, Search, Sort, database, open_history,
+        Data, Search, Sort, database,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
+        open_history,
     },
     data::files::{
-        DirEntryMetaData, EntryType, Listing, ListingChange, is_hidden_entry, is_hidden_name, is_system_clutter,
+        DirEntryMetaData, EntryType, Listing, ListingChange, is_hidden_entry, is_hidden_name,
+        is_system_clutter,
     },
     helper::{DataHolder, canonical_form, normalize_path},
 };

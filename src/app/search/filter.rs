@@ -319,8 +319,10 @@ impl CompiledQuery {
             Predicate::ModifiedSince(since) => u64::from(*meta.modified_at) >= *since,
             Predicate::OpenedSince(since) => {
                 let record = crate::app::open_history::of_entry(&listing.entry(index));
-                u64::from(*crate::app::open_history::last_opened(record, meta.accessed_at))
-                    >= *since
+                u64::from(*crate::app::open_history::last_opened(
+                    record,
+                    meta.accessed_at,
+                )) >= *since
             }
         })
     }

@@ -95,12 +95,17 @@ pub fn bundled() -> Vec<Arc<PluginCode>> {
         .collect()
 }
 
-fn from_files(mut files: BTreeMap<String, String>, source: Source) -> Result<PluginCode, Diagnostic> {
-    let manifest_text = files.remove(manifest::MANIFEST_FILE).ok_or_else(|| Diagnostic {
-        file: manifest::MANIFEST_FILE.into(),
-        line: None,
-        message: "missing".into(),
-    })?;
+fn from_files(
+    mut files: BTreeMap<String, String>,
+    source: Source,
+) -> Result<PluginCode, Diagnostic> {
+    let manifest_text = files
+        .remove(manifest::MANIFEST_FILE)
+        .ok_or_else(|| Diagnostic {
+            file: manifest::MANIFEST_FILE.into(),
+            line: None,
+            message: "missing".into(),
+        })?;
     let manifest = manifest::parse(&manifest_text)?;
     if !files.contains_key(manifest::MAIN_FILE) {
         return Err(Diagnostic {
@@ -220,8 +225,9 @@ mod tests {
         let plugins = bundled();
         assert_eq!(plugins.len(), BUNDLED.len(), "a bundled manifest is broken");
         for code in plugins {
-            let permissions =
-                crate::plugins::permissions::PermissionSet::from_manifest(&code.manifest.permissions);
+            let permissions = crate::plugins::permissions::PermissionSet::from_manifest(
+                &code.manifest.permissions,
+            );
             crate::plugins::sandbox::create(&code, permissions, Arc::default(), None)
                 .unwrap_or_else(|error| panic!("{} failed to load: {error}", code.id()));
         }

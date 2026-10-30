@@ -159,6 +159,7 @@ fn apply_backend(resolved: BackendIdentity) {
         drop(backend);
         PROBES.lock().expect("probe cache").clear();
         POSTERS.lock().expect("poster cache").clear();
+        CHOSEN.lock().expect("chosen poster cache").clear();
         *HDR_CAPABILITIES.lock().expect("HDR capabilities") = None;
         BACKEND_EPOCH.fetch_add(1, Ordering::Release);
     }
@@ -206,6 +207,16 @@ pub(super) fn invalidate_sources(paths: &[PathBuf], directories: bool) {
         posters.pop(&key);
     }
     drop(posters);
+    let mut chosen = CHOSEN.lock().expect("chosen poster cache");
+    let keys: Vec<_> = chosen
+        .iter()
+        .filter(|((source, _, _), _)| matches(source))
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in keys {
+        chosen.pop(&key);
+    }
+    drop(chosen);
     // Disk entries are keyed by source revision and size, so they can never
     // be served stale; space is reclaimed by `cache::maintain`'s LRU sweep
     // rather than by scanning the cache on the UI thread here.
@@ -243,6 +254,9 @@ fn remember_poster(source: &SourceKey, edge: u32, sample: &Sample) {
 
 fn disk_poster(source: &SourceKey, edge: u32) -> Option<Sample> {
     let path = cache::thumbnail_cache_path(&source.path, edge, source.revision, source.size);
+    disk_poster_at(&path, source, edge)
+}
+fn disk_poster_at(path: &Path, source: &SourceKey, edge: u32) -> Option<Sample> {
     let metadata = cache::read_bounded(&path.with_extension("poster"), 52).ok()?;
     let mut reader = Cursor::new(metadata.as_slice());
     if &read_array::<8>(&mut reader).ok()? != b"DFPS0002"
@@ -254,7 +268,7 @@ fn disk_poster(source: &SourceKey, edge: u32) -> Option<Sample> {
     }
     let timestamp = Duration::from_millis(u64::from_le_bytes(read_array(&mut reader).ok()?));
     let hash = u64::from_le_bytes(read_array(&mut reader).ok()?);
-    let bytes = cache::read_bounded(&path, MAX_ENTRY).ok()?;
+    let bytes = cache::read_bounded(path, MAX_ENTRY).ok()?;
     if checksum(&bytes) != hash {
         return None;
     }
@@ -305,17 +319,10 @@ fn cached_poster(source: &SourceKey, edge: u32, cancel: &AtomicBool) -> Option<S
         });
         if let Some(mut sample) = sample {
             if tier != edge {
-                let Some(image) = image::RgbaImage::from_raw(
-                    sample.frame.width as u32,
-                    sample.frame.height as u32,
-                    sample.frame.rgba.to_vec(),
-                ) else {
+                let Some(frame) = fit_frame(&sample.frame, edge) else {
                     continue;
                 };
-                sample.frame = decoded_from_dynamic(
-                    &image::DynamicImage::ImageRgba8(image).thumbnail(edge, edge),
-                    "overview-poster".into(),
-                );
+                sample.frame = frame;
             }
             remember_poster(source, edge, &sample);
             return Some(sample);
@@ -329,6 +336,157 @@ pub(super) fn cached_poster_image(
     cancel: &AtomicBool,
 ) -> Option<DecodedImage> {
     cached_poster(source, edge, cancel).map(|sample| sample.frame)
+}
+
+/// `frame` scaled down to fit in `edge`.
+fn fit_frame(frame: &DecodedImage, edge: u32) -> Option<DecodedImage> {
+    let image =
+        image::RgbaImage::from_raw(frame.width as u32, frame.height as u32, frame.rgba.to_vec())?;
+    Some(decoded_from_dynamic(
+        &image::DynamicImage::ImageRgba8(image).thumbnail(edge, edge),
+        "overview-poster".into(),
+    ))
+}
+
+/// Source, edge and chosen position in milliseconds.
+type ChosenKey = (SourceKey, u32, u64);
+// Posters at a frame the user picked (`thumbnail_choice`), kept apart from
+// the default first-sample posters above.
+static CHOSEN: LazyLock<Mutex<LruCache<ChosenKey, DecodedImage>>> =
+    LazyLock::new(|| Mutex::new(LruCache::new(std::num::NonZero::new(8).expect("capacity"))));
+
+/// Choices are stored in milliseconds; overview timestamps are compared at
+/// that precision.
+const fn millis(at: Duration) -> u64 {
+    at.as_millis() as u64
+}
+
+pub(super) fn remember_chosen(source: &SourceKey, edge: u32, at: Duration, frame: &DecodedImage) {
+    CHOSEN
+        .lock()
+        .expect("chosen poster cache")
+        .push((source.clone(), edge, millis(at)), frame.clone());
+}
+
+/// The overview frame at `at`, from an overview cached at `edge` or larger.
+fn chosen_from_bundles(
+    source: &SourceKey,
+    edge: u32,
+    at: Duration,
+    cancel: &AtomicBool,
+) -> Option<DecodedImage> {
+    for tier in [160, 240, 360, MAX_EDGE] {
+        if tier < edge || cancel.load(Ordering::Acquire) {
+            continue;
+        }
+        let spec = PreviewSpec::new(tier);
+        let path = preview_cache_path(source, spec, AnimatedSourceKind::Video);
+        let Ok(bytes) = cache::read_bounded(&path, MAX_ENTRY) else {
+            continue;
+        };
+        let Ok(animation) = decode_bundle(&bytes, source, spec, cancel) else {
+            continue;
+        };
+        let Some(index) = animation
+            .source_timestamps
+            .iter()
+            .position(|timestamp| millis(*timestamp) == millis(at))
+        else {
+            continue;
+        };
+        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        let frame = &animation.frames[index];
+        return if tier == edge {
+            Some(frame.clone())
+        } else {
+            fit_frame(frame, edge)
+        };
+    }
+    None
+}
+
+/// A poster at the chosen frame `at` that needs no `FFmpeg`: from memory,
+/// from its own cache file `cache_path`, or cut from a cached overview.
+pub(super) fn cached_chosen_poster(
+    source: &SourceKey,
+    edge: u32,
+    at: Duration,
+    cache_path: &Path,
+    cancel: &AtomicBool,
+) -> Option<DecodedImage> {
+    // The smallest remembered frame that is at least as large.
+    let memory = CHOSEN
+        .lock()
+        .expect("chosen poster cache")
+        .iter()
+        .filter(|((key, tier, ms), _)| key == source && *tier >= edge && *ms == millis(at))
+        .min_by_key(|((_, tier, _), _)| *tier)
+        .map(|((_, tier, _), frame)| (*tier, frame.clone()));
+    if let Some((tier, frame)) = memory {
+        if tier == edge {
+            return Some(frame);
+        }
+        if let Some(frame) = fit_frame(&frame, edge) {
+            remember_chosen(source, edge, at, &frame);
+            return Some(frame);
+        }
+    }
+    let frame = disk_poster_at(cache_path, source, edge)
+        .filter(|sample| millis(sample.timestamp) == millis(at))
+        .map(|sample| sample.frame)
+        .or_else(|| chosen_from_bundles(source, edge, at, cancel))?;
+    remember_chosen(source, edge, at, &frame);
+    Some(frame)
+}
+
+/// Like [`poster_cached_to`], at the chosen frame `at` instead of the first
+/// overview moment.
+pub(super) fn chosen_poster(
+    source: &SourceKey,
+    edge: u32,
+    at: Duration,
+    cache_path: Option<PathBuf>,
+    cancel: &AtomicBool,
+) -> Result<DecodedImage, MediaError> {
+    let deadline = Instant::now() + super::THUMBNAIL_DEADLINE;
+    process::check(cancel, deadline)?;
+    // Recorded at the chosen position, so a disk hit matches the choice.
+    let save = |path: PathBuf, frame: &DecodedImage| {
+        WRITER.enqueue(CacheWrite {
+            source: source.clone(),
+            path,
+            payload: CachePayload::Poster(
+                edge,
+                Sample {
+                    timestamp: at,
+                    frame: frame.clone(),
+                },
+            ),
+        });
+    };
+    if let Some(path) = &cache_path
+        && let Some(frame) = cached_chosen_poster(source, edge, at, path, cancel)
+    {
+        // Frames cut from an overview or kept in memory: save them once.
+        if !path.is_file() {
+            save(path.clone(), &frame);
+        }
+        return Ok(frame);
+    }
+    let info = probe(source, cancel, deadline)?;
+    let timestamp = info.duration.map_or(at, |duration| {
+        at.min(Duration::from_secs_f64((duration - 0.001).max(0.0)))
+    });
+    let sample = match sample_at(source, &info, timestamp, edge, cancel, deadline)? {
+        Some(sample) => sample,
+        None => sample_at(source, &info, Duration::ZERO, edge, cancel, deadline)?
+            .ok_or_else(|| MediaError::new(ErrorKind::InvalidMedia, "No video frames"))?,
+    };
+    remember_chosen(source, edge, at, &sample.frame);
+    if let Some(path) = cache_path {
+        save(path, &sample.frame);
+    }
+    Ok(sample.frame)
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -1153,6 +1311,23 @@ impl VideoTask {
                 frame: animation.frames[0].clone(),
             },
         );
+        // A chosen thumbnail frame is one of these; keep it for posters.
+        if let Some(at) = crate::app::thumbnail_choice::get(
+            &self.source.path,
+            self.source.revision,
+            self.source.size,
+        ) && let Some(index) = animation
+            .source_timestamps
+            .iter()
+            .position(|timestamp| millis(*timestamp) == millis(at))
+        {
+            remember_chosen(
+                &self.source,
+                self.spec.max_edge,
+                at,
+                &animation.frames[index],
+            );
+        }
         schedule_cache(self.source.clone(), self.spec, self.kind, animation.clone());
         Ok(PreviewStep::Complete(animation))
     }
@@ -1904,6 +2079,63 @@ mod tests {
                 .frames
                 .len(),
             1
+        );
+        let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn chosen_poster_is_cut_from_the_cached_overview_and_scaled() {
+        let source = SourceKey::new(Path::new("chosen.mp4"), 1, 10);
+        let spec = PreviewSpec::new(160);
+        let solid = |shade: u8| {
+            decoded_from_dynamic(
+                &image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                    8,
+                    8,
+                    image::Rgba([shade, shade, shade, 255]),
+                )),
+                "fixture".into(),
+            )
+        };
+        let animation = DecodedAnimation {
+            frames: vec![solid(0), solid(255)],
+            frame_delays: vec![VIDEO_PREVIEW_FRAME_DELAY; 2],
+            source_timestamps: vec![Duration::ZERO, Duration::from_millis(4_500)],
+        };
+        let cancel = AtomicBool::new(false);
+        let bytes = encode_bundle(
+            &animation,
+            &source,
+            spec,
+            AnimatedSourceKind::Video,
+            &cancel,
+        )
+        .expect("asset fixture operation");
+        let path = preview_cache_path(&source, spec, AnimatedSourceKind::Video);
+        assert!(cache::atomic_save_bytes(&bytes, &path));
+        let missing = cache::chosen_poster_cache_path(&source.path, 4, 1, 10, 4_500);
+        let frame =
+            cached_chosen_poster(&source, 4, Duration::from_millis(4_500), &missing, &cancel)
+                .expect("frame from the overview");
+        assert_eq!((frame.width, frame.height), (4, 4));
+        assert!(frame.rgba[0] > 200, "the chosen, white frame");
+        assert!(
+            cached_chosen_poster(&source, 4, Duration::from_millis(9_000), &missing, &cancel)
+                .is_none()
+        );
+        // A smaller request reuses the remembered frame.
+        assert!(
+            CHOSEN
+                .lock()
+                .expect("chosen poster cache")
+                .contains(&(source.clone(), 4, 4_500))
+        );
+        invalidate_sources(std::slice::from_ref(&source.path), false);
+        assert!(
+            CHOSEN
+                .lock()
+                .expect("chosen poster cache")
+                .iter()
+                .all(|((key, ..), _)| key.path != source.path)
         );
         let _ = fs::remove_file(path);
     }

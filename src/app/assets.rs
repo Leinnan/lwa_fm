@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 #[cfg(target_os = "macos")]
 use std::collections::hash_map::DefaultHasher;
+use std::fmt::Write as _;
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::hash::{Hash, Hasher};
@@ -22,6 +23,7 @@ use image::codecs::gif::{GifEncoder, Repeat};
 use image::{Delay, Frame, RgbaImage};
 use lru::LruCache;
 
+use crate::app::thumbnail_choice;
 #[cfg(test)]
 use crate::data::files::DirEntry;
 use crate::data::files::EntryRef;
@@ -169,6 +171,8 @@ impl DecodedAnimation {
 struct AnimatedPreview {
     frames: Vec<DecodedImage>,
     frame_delays: Vec<Duration>,
+    /// Where in the source each frame is, for the thumbnail picker.
+    source_timestamps: Vec<Duration>,
     started_at: Instant,
     last_used: Instant,
     byte_len: usize,
@@ -184,6 +188,7 @@ impl AnimatedPreview {
         Self {
             frames: decoded.frames,
             frame_delays: decoded.frame_delays,
+            source_timestamps: decoded.source_timestamps,
             started_at: now,
             last_used: now,
             byte_len,
@@ -755,6 +760,24 @@ pub struct AssetManager {
     frame_uploads: usize,
     upload_time: Duration,
     last_asset_activity: Instant,
+    /// Every frame of the overview shown by the thumbnail picker, as
+    /// textures, with the overview's key, how many frames it had and
+    /// whether it was complete when they were uploaded.
+    picker_frames: Option<(String, usize, bool, Vec<OverviewFrame>)>,
+}
+
+/// One frame of a video's overview, offered as its thumbnail.
+#[derive(Clone)]
+pub struct OverviewFrame {
+    pub texture: TextureHandle,
+    pub timestamp: Duration,
+}
+
+pub enum OverviewFrames {
+    /// Still extracting; holds the frames found so far.
+    Pending(Vec<OverviewFrame>),
+    Ready(Vec<OverviewFrame>),
+    Unavailable(String),
 }
 
 /// Memory a texture takes on the GPU (RGBA8).
@@ -859,6 +882,7 @@ impl AssetManager {
             workers,
             shutdown,
             last_asset_activity: Instant::now(),
+            picker_frames: None,
         }
     }
 
@@ -1211,13 +1235,20 @@ impl AssetManager {
         if entry.is_file()
             && let Some(kind) = thumbnail_kind(&path)
         {
-            let key = format!(
+            let mut key = format!(
                 "{}#{}:{}#thumb_px{}",
                 entry.full_path_string(),
                 entry.meta.source_revision,
                 entry.meta.size,
                 edge
             );
+            // A chosen frame is a different thumbnail than the default one.
+            if kind == ThumbnailKind::Video
+                && let Some(at) =
+                    thumbnail_choice::get(&path, entry.meta.source_revision, entry.meta.size)
+            {
+                let _ = write!(key, "_t{}", at.as_millis());
+            }
             self.desired_assets.insert(key.clone());
             if let Some(texture) = self.textures.get(&key) {
                 return Some((texture.clone(), true));
@@ -1302,6 +1333,115 @@ impl AssetManager {
                 self.request_animated_preview(ctx, entry, intent, AnimatedSourceKind::Video, spec)
             }
             None => Preview::Fallback,
+        }
+    }
+
+    /// Every frame of a video's overview, for choosing its thumbnail. Call
+    /// each frame while the picker shows; [`Self::close_overview_frames`]
+    /// releases the textures.
+    pub fn request_overview_frames(
+        &mut self,
+        ctx: &Context,
+        entry: &EntryRef<'_>,
+    ) -> OverviewFrames {
+        const PICKER_EDGE: u32 = 240;
+        let spec = PreviewSpec::new(PICKER_EDGE);
+        let key = format!(
+            "{}#{}:{}#overview_v7_px{}",
+            entry.full_path_string(),
+            entry.meta.source_revision,
+            entry.meta.size,
+            spec.max_edge
+        );
+        // Starts or keeps the overview job alive, like a focused preview.
+        self.dwell.entry(key.clone()).or_insert_with(|| {
+            Instant::now()
+                .checked_sub(PREVIEW_DWELL)
+                .unwrap_or_else(Instant::now)
+        });
+        if let Preview::Unavailable { reason, .. } = self.request_animated_preview(
+            ctx,
+            entry,
+            PreviewIntent::Focused,
+            AnimatedSourceKind::Video,
+            spec,
+        ) && !self.animations.contains(&key)
+        {
+            return OverviewFrames::Unavailable(reason);
+        }
+        let current = self.picker_frames.as_ref().filter(|(old, ..)| *old == key);
+        let Some(animation) = self.animations.peek(&key) else {
+            // Evicted from the preview cache: the uploaded frames remain.
+            return match current {
+                Some((_, _, true, frames)) => OverviewFrames::Ready(frames.clone()),
+                Some((_, _, false, frames)) => OverviewFrames::Pending(frames.clone()),
+                None => OverviewFrames::Pending(Vec::new()),
+            };
+        };
+        let complete = animation.complete;
+        let count = animation.frames.len();
+        if current.is_none_or(|(_, old_count, old_complete, _)| {
+            *old_count != count || *old_complete != complete
+        }) {
+            let frames = animation
+                .frames
+                .iter()
+                .zip(&animation.source_timestamps)
+                .enumerate()
+                .map(|(index, (frame, timestamp))| OverviewFrame {
+                    texture: ctx.load_texture(
+                        format!("{key}#picker{index}"),
+                        ColorImage::from_rgba_unmultiplied(
+                            [frame.width, frame.height],
+                            &frame.rgba,
+                        ),
+                        TextureOptions::LINEAR,
+                    ),
+                    timestamp: *timestamp,
+                })
+                .collect();
+            self.picker_frames = Some((key, count, complete, frames));
+        }
+        let frames = self
+            .picker_frames
+            .as_ref()
+            .map(|(.., frames)| frames.clone())
+            .unwrap_or_default();
+        if complete {
+            OverviewFrames::Ready(frames)
+        } else {
+            OverviewFrames::Pending(frames)
+        }
+    }
+
+    pub fn close_overview_frames(&mut self) {
+        self.picker_frames = None;
+    }
+
+    /// The thumbnail frame of `path` changed to `at` (`None`: the default).
+    /// Drops the old thumbnails, and hands the chosen frame from the picker's
+    /// overview to the poster cache so it shows without extracting it again.
+    pub fn thumbnail_choice_changed(
+        &mut self,
+        path: &Path,
+        revision: u128,
+        size: u64,
+        at: Option<Duration>,
+    ) {
+        let chosen = at.and_then(|at| {
+            let (key, ..) = self.picker_frames.as_ref()?;
+            let animation = self.animations.peek(key)?;
+            let index = animation
+                .source_timestamps
+                .iter()
+                .position(|timestamp| timestamp.as_millis() == at.as_millis())?;
+            Some((at, animation.frames.get(index)?.clone()))
+        });
+        self.invalidate_files([path.to_path_buf()]);
+        if let Some((at, frame)) = chosen {
+            let source = SourceKey::new(path, revision, size);
+            let edge = frame.width.max(frame.height) as u32;
+            media::remember_chosen(&source, edge, at, &frame);
         }
     }
 
@@ -1883,6 +2023,16 @@ fn cached_video_poster(
     target_edge: u32,
     cancel: &AtomicBool,
 ) -> Option<DecodedImage> {
+    if let Some(at) = thumbnail_choice::get(source_path, source.revision, source.size) {
+        let cache_path = cache::chosen_poster_cache_path(
+            source_path,
+            target_edge,
+            source.revision,
+            source.size,
+            at.as_millis() as u64,
+        );
+        return media::cached_chosen_poster(source, target_edge, at, &cache_path, cancel);
+    }
     let cache_path = thumbnail_cache_path(source_path, target_edge, source.revision, source.size);
     media::cached_poster_image(source, target_edge, cancel)
         .or_else(|| cached_shell_poster(&cache_path, source_path))
@@ -2123,6 +2273,22 @@ fn load_or_generate_thumbnail(
     let cacheable = source_revision != 0;
     let path = thumbnail_cache_path(source_path, target_edge, source_revision, source_size);
     let source = SourceKey::new(source_path, source_revision, source_size);
+    if kind == ThumbnailKind::Video
+        && let Some(at) = thumbnail_choice::get(source_path, source_revision, source_size)
+    {
+        // The shell's poster can't show the chosen frame, so it is skipped.
+        let _access_time = crate::access_time::PreserveAccessTime::new(source_path);
+        let path = cacheable.then(|| {
+            cache::chosen_poster_cache_path(
+                source_path,
+                target_edge,
+                source_revision,
+                source_size,
+                at.as_millis() as u64,
+            )
+        });
+        return media::chosen_poster(&source, target_edge, at, path, cancel);
+    }
     if kind == ThumbnailKind::Video {
         if let Some(image) = media::cached_poster_image(&source, target_edge, cancel) {
             // Posters made while building an overview live only in memory;
@@ -2574,6 +2740,11 @@ mod tests {
         assert!(!asset_key_matches_file(
             "/media/clip.mp4-extra_m#1:20#px240",
             "/media/clip.mp4"
+        ));
+        // A poster at a chosen frame.
+        assert!(asset_key_matches_file(
+            "/media/clip#scene.mp4#1:20#thumb_px240_t4500",
+            "/media/clip#scene.mp4"
         ));
     }
 

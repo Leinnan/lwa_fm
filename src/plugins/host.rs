@@ -242,11 +242,7 @@ impl PluginHost {
         self.bars.clear();
         self.inspector.clear();
         self.activation.clear();
-        let (user, broken) = self
-            .dir
-            .as_deref()
-            .map(discovery::scan)
-            .unwrap_or_default();
+        let (user, broken) = self.dir.as_deref().map(discovery::scan).unwrap_or_default();
         self.broken = broken;
         for code in user {
             if self.plugins.iter().any(|plugin| plugin.id() == code.id()) {
@@ -278,9 +274,10 @@ impl PluginHost {
 
     /// Reloads one plugin folder after it changed.
     fn reload_folder(&mut self, folder: &Path) {
-        let existing = self.plugins.iter().position(
-            |plugin| matches!(&plugin.code.source, Source::User(dir) if dir == folder),
-        );
+        let existing = self
+            .plugins
+            .iter()
+            .position(|plugin| matches!(&plugin.code.source, Source::User(dir) if dir == folder));
         self.broken.retain(|broken| broken.folder != folder);
         if !folder.join(super::manifest::MANIFEST_FILE).is_file() {
             // Removed: fall back to the bundled plugin of that id, if any.
@@ -320,7 +317,10 @@ impl PluginHost {
                 let message = diagnostic.to_string();
                 if let Some(index) = existing {
                     let id = self.plugins[index].id().to_owned();
-                    self.report_error(&id, &format!("reload failed, still running the last version: {message}"));
+                    self.report_error(
+                        &id,
+                        &format!("reload failed, still running the last version: {message}"),
+                    );
                 } else {
                     crate::toast!(Error, "Plugin in {} is broken: {message}", folder.display());
                 }
@@ -361,7 +361,10 @@ impl PluginHost {
             let approved = plugin.approved(settings);
             let wanted = enabled && approved;
             if wanted {
-                if plugin.worker.is_none() && plugin.loading.is_none() && !matches!(plugin.status, Status::Failed(_)) {
+                if plugin.worker.is_none()
+                    && plugin.loading.is_none()
+                    && !matches!(plugin.status, Status::Failed(_))
+                {
                     plugin.status = Status::Loading;
                     let id = plugin.id().to_owned();
                     self.restart(&id);
@@ -463,12 +466,16 @@ impl PluginHost {
                 let shortcut = text.and_then(|text| match keymap::parse_shortcut(&text) {
                     Ok(shortcut) => {
                         if let Some(command) = keymap::conflict_with_app(shortcut) {
-                            self.shortcut_notes
-                                .insert(full_id.clone(), format!("{text} is used by \u{201c}{command}\u{201d}"));
+                            self.shortcut_notes.insert(
+                                full_id.clone(),
+                                format!("{text} is used by \u{201c}{command}\u{201d}"),
+                            );
                             None
                         } else if registry.bindings.iter().any(|b| b.shortcut == shortcut) {
-                            self.shortcut_notes
-                                .insert(full_id.clone(), format!("{text} is used by another plugin action"));
+                            self.shortcut_notes.insert(
+                                full_id.clone(),
+                                format!("{text} is used by another plugin action"),
+                            );
                             None
                         } else {
                             Some(shortcut)
@@ -538,7 +545,12 @@ impl PluginHost {
 
     /// Starts an action: shows its form, or runs it. Returns whether the
     /// form dialog should open.
-    pub fn start_action(&mut self, full_id: &str, context: CallContext, settings: &SettingsMap) -> bool {
+    pub fn start_action(
+        &mut self,
+        full_id: &str,
+        context: CallContext,
+        settings: &SettingsMap,
+    ) -> bool {
         let Some((plugin_id, action_id)) = Self::split_action(full_id) else {
             return false;
         };
@@ -555,8 +567,15 @@ impl PluginHost {
         let Some(action) = plugin.code.action(action_id).cloned() else {
             return false;
         };
-        if !action.targets.matches(&context.targets, context.dir.is_some()) {
-            crate::toast!(Info, "\u{201c}{}\u{201d} doesn't apply to the selection", action.title);
+        if !action
+            .targets
+            .matches(&context.targets, context.dir.is_some())
+        {
+            crate::toast!(
+                Info,
+                "\u{201c}{}\u{201d} doesn't apply to the selection",
+                action.title
+            );
             return false;
         }
         let mut form = OpenForm {
@@ -593,11 +612,13 @@ impl PluginHost {
                     let confirm = super::form::Form {
                         title: Some(action.title.clone()),
                         submit: Some("Continue".into()),
-                        fields: vec![serde_json::from_value(serde_json::json!({
-                            "type": "info",
-                            "text": text,
-                        }))
-                        .expect("an info field")],
+                        fields: vec![
+                            serde_json::from_value(serde_json::json!({
+                                "type": "info",
+                                "text": text,
+                            }))
+                            .expect("an info field"),
+                        ],
                         ..Default::default()
                     };
                     form.state = Some(FormState::new(confirm, None));
@@ -752,7 +773,11 @@ impl PluginHost {
                     }
                 }
             }
-            PluginMsg::Inspector { plugin, key, result } => {
+            PluginMsg::Inspector {
+                plugin,
+                key,
+                result,
+            } => {
                 let state = self.inspector.entry(plugin.clone()).or_default();
                 if state.key != key {
                     return;
@@ -840,7 +865,10 @@ impl PluginHost {
                 plugin.loading = None;
                 if plugin.worker.is_some() {
                     plugin.status = Status::Running;
-                    self.report_error(id, &format!("reload failed, still running the last version: {error}"));
+                    self.report_error(
+                        id,
+                        &format!("reload failed, still running the last version: {error}"),
+                    );
                 } else {
                     plugin.status = Status::Failed(error.clone());
                     self.report_error(id, &error);
@@ -1079,7 +1107,10 @@ impl PluginHost {
             return;
         }
         for ((_, dir), state) in &mut self.bars {
-            if dirs.iter().any(|changed| dir.starts_with(changed) || changed.starts_with(dir)) {
+            if dirs
+                .iter()
+                .any(|changed| dir.starts_with(changed) || changed.starts_with(dir))
+            {
                 state.stale = true;
             }
         }
@@ -1164,7 +1195,10 @@ impl PluginHost {
             else {
                 continue;
             };
-            if !section.targets.matches(&context.targets, context.dir.is_some()) {
+            if !section
+                .targets
+                .matches(&context.targets, context.dir.is_some())
+            {
                 continue;
             }
             // Search results span folders; the plugin checks those itself.
@@ -1198,9 +1232,10 @@ impl PluginHost {
             let Some(plugin) = self.plugins.iter().find(|plugin| plugin.id() == id) else {
                 continue;
             };
-            let (Some(section), Some(state)) =
-                (plugin.code.manifest.inspector.as_ref(), self.inspector.get(&id))
-            else {
+            let (Some(section), Some(state)) = (
+                plugin.code.manifest.inspector.as_ref(),
+                self.inspector.get(&id),
+            ) else {
                 continue;
             };
             views.push(InspectorView {
@@ -1221,7 +1256,13 @@ impl PluginHost {
     }
 }
 
-fn job_summary(job: &Job, done: usize, skipped: usize, failures: &[String], cancelled: bool) -> String {
+fn job_summary(
+    job: &Job,
+    done: usize,
+    skipped: usize,
+    failures: &[String],
+    cancelled: bool,
+) -> String {
     if cancelled {
         return format!("{}: cancelled", job.title);
     }
@@ -1271,14 +1312,20 @@ mod tests {
             per_item: true,
             waiting: false,
         };
-        assert_eq!(job_summary(&job, 3, 1, &["x: bad".into()], false), "Convert: 3 done, 1 skipped, 1 failed");
+        assert_eq!(
+            job_summary(&job, 3, 1, &["x: bad".into()], false),
+            "Convert: 3 done, 1 skipped, 1 failed"
+        );
         assert_eq!(job_summary(&job, 0, 0, &[], true), "Convert: cancelled");
     }
 
     #[test]
     fn selection_settles_after_a_pause() {
         let mut host = PluginHost::default();
-        assert!(!host.selection_settled(1), "startup selection isn't a change");
+        assert!(
+            !host.selection_settled(1),
+            "startup selection isn't a change"
+        );
         assert!(!host.selection_settled(2));
         if let Some((_, since, _)) = host.selection.as_mut() {
             *since -= Duration::from_secs(1);

@@ -33,9 +33,7 @@ fn item_result(value: &Value) -> ItemResult {
     match value {
         Value::Boolean(false) => ItemResult::Skipped,
         Value::String(text) if text.to_string_lossy().starts_with("skip") => ItemResult::Skipped,
-        Value::Table(table) if table.get::<bool>("skipped").unwrap_or(false) => {
-            ItemResult::Skipped
-        }
+        Value::Table(table) if table.get::<bool>("skipped").unwrap_or(false) => ItemResult::Skipped,
         Value::Table(table) => match table.get::<Option<String>>("error") {
             Ok(Some(error)) => ItemResult::Failed(error),
             _ => ItemResult::Done,
@@ -85,7 +83,12 @@ fn run(spec: JobSpec) {
             },
         });
     };
-    let vm = match sandbox::create(&code, permissions, Arc::clone(&cancel), Some(JobLink::new(id))) {
+    let vm = match sandbox::create(
+        &code,
+        permissions,
+        Arc::clone(&cancel),
+        Some(JobLink::new(id)),
+    ) {
         Ok(vm) => vm,
         Err(error) => {
             finish(0, 0, vec![error]);
@@ -114,7 +117,11 @@ fn run(spec: JobSpec) {
     };
     if !per_item {
         let Some(function) = vm.handler(&["actions", &action, "run"]) else {
-            finish(0, 0, vec![format!("no function M.actions.{action} (or .run)")]);
+            finish(
+                0,
+                0,
+                vec![format!("no function M.actions.{action} (or .run)")],
+            );
             return;
         };
         if let Some(job) = &link().job {
@@ -134,7 +141,9 @@ fn run(spec: JobSpec) {
         finish(
             0,
             0,
-            vec![format!("per_item needs a function M.actions.{action}.run_item")],
+            vec![format!(
+                "per_item needs a function M.actions.{action}.run_item"
+            )],
         );
         return;
     };
@@ -187,9 +196,20 @@ mod tests {
         let vm = vm("return {}", &[]);
         let eval = |code: &str| vm.lua.load(code).eval::<Value>().expect("value");
         assert!(matches!(item_result(&eval("return nil")), ItemResult::Done));
-        assert!(matches!(item_result(&eval("return false")), ItemResult::Skipped));
-        assert!(matches!(item_result(&eval("return 'skipped: exists'")), ItemResult::Skipped));
-        assert!(matches!(item_result(&eval("return { skipped = true }")), ItemResult::Skipped));
-        assert!(matches!(item_result(&eval("return { error = 'bad' }")), ItemResult::Failed(e) if e == "bad"));
+        assert!(matches!(
+            item_result(&eval("return false")),
+            ItemResult::Skipped
+        ));
+        assert!(matches!(
+            item_result(&eval("return 'skipped: exists'")),
+            ItemResult::Skipped
+        ));
+        assert!(matches!(
+            item_result(&eval("return { skipped = true }")),
+            ItemResult::Skipped
+        ));
+        assert!(
+            matches!(item_result(&eval("return { error = 'bad' }")), ItemResult::Failed(e) if e == "bad")
+        );
     }
 }

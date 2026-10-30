@@ -27,6 +27,20 @@ The implementation lives in `src/app/assets.rs` and `src/app/assets/`: `media.rs
 - Every media process runs in a Windows Job Object with kill-on-close. Cancelling terminates the job (the whole tree, including launchers) without spawning `taskkill`, and children die with the app even if it aborts. If a job can't be created, `taskkill /T` is the fallback. Pipe readers get one second after the child exits; a grandchild holding the pipe is left behind and logged instead of blocking the worker. The last 64 KiB of stderr is kept, so `showinfo` timestamps survive warning spam.
 - Only a missing executable counts as "FFmpeg unavailable"; other spawn errors (an antivirus block, for example) are reported as unsupported and don't trigger a download.
 
+## Choosing a video's thumbnail
+
+You can right-click a single video and choose **Select thumbnail…**. A dialog then shows the frames of the video's 240 px overview, and the frame you pick replaces the default poster at 5% of the video. **Reset thumbnail** in the same menu, and **Use default** in the dialog, go back to the default. The animated overview stays the same either way.
+
+- **Where choices are saved.** `thumbnail_choice.rs` stores each pick in the `thumbnail_choice` sled tree. A pick is keyed by canonical path, along with the timestamp in milliseconds and the file's revision and size. Renames and moves made in the app take the pick with them. If the file's revision or size changes, the pick is ignored and the default poster comes back. The **Reset all** button under Settings → Previews clears every pick.
+- **How the thumbnail is made.** When a video has a pick, the Windows Shell poster is skipped, because it can't show a chosen frame. `media::chosen_poster` then tries these sources in order:
+  1. A small memory cache.
+  2. The pick's own poster file, `…_v7_t{ms}.jpg`, which has the same `DFPS0002` sidecar as other posters, with the timestamp recorded.
+  3. A cached overview of the same size or larger, at the matching timestamp.
+  4. A single FFmpeg seek, as a last resort.
+
+  A frame cut from an overview is saved to its own poster file once.
+- **Updating thumbnails after a change.** The texture key for a video with a pick ends in `_t{ms}`, so changing the pick never shows the old texture. After the dialog applies a pick, the frame that's already decoded is handed to the poster cache, so the new thumbnail appears without running FFmpeg.
+
 ## Getting FFmpeg
 
 `find_tool` looks for each tool next to the executable, then in the app's data folder (`ffmpeg_install::managed_dir`, e.g. `%LOCALAPPDATA%\leinnan\dirfleet\data\ffmpeg`), then on `PATH`. When FFmpeg is missing, it is downloaded once per session into the data folder, with a toast while it runs. The Windows build (gyan.dev) publishes a SHA-256 next to the archive; a mismatch discards the download. Other providers publish no SHA-256, so those downloads are installed unverified (and logged).
