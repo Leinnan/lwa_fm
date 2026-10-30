@@ -154,6 +154,7 @@ struct Fields {
     size: u64,
     created: i64,
     modified: i64,
+    accessed: i64,
     name_len_bytes: usize,
     file_id: u64,
     name_offset: usize,
@@ -173,6 +174,7 @@ fn extd_fields(record: &FILE_ID_EXTD_DIR_INFORMATION) -> Fields {
         size: record.EndOfFile.max(0) as u64,
         created: record.CreationTime,
         modified: record.LastWriteTime,
+        accessed: record.LastAccessTime,
         name_len_bytes: record.FileNameLength as usize,
         file_id: u64::from_le_bytes(id),
         name_offset: offset_of!(FILE_ID_EXTD_DIR_INFORMATION, FileName),
@@ -192,6 +194,7 @@ fn both_fields(record: &FILE_ID_BOTH_DIR_INFORMATION) -> Fields {
         size: record.EndOfFile.max(0) as u64,
         created: record.CreationTime,
         modified: record.LastWriteTime,
+        accessed: record.LastAccessTime,
         name_len_bytes: record.FileNameLength as usize,
         file_id: record.FileId as u64,
         name_offset: offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName),
@@ -252,6 +255,7 @@ unsafe fn record<T: Copy>(
             size: fields.size,
             created: filetime(fields.created),
             modified: filetime(fields.modified),
+            accessed: filetime(fields.accessed),
             file_id: fields.file_id,
         };
         sink(&entry);

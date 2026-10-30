@@ -1743,3 +1743,65 @@ fn breadcrumbs_keep_their_size_when_hovered() {
     }
     while COMMANDS_QUEUE.pop().is_some() {}
 }
+
+/// Items dropped onto a folder wait for confirmation, and Esc leaves them
+/// where they were. The delete dialog uses the same button row.
+#[test]
+fn dropping_items_on_a_folder_asks_first() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let mut snapshots = egui_kittest::SnapshotResults::new();
+    let mut harness = Harness::builder()
+        .with_options(ui::snapshot_options())
+        .with_size(egui::vec2(1100.0, 720.0))
+        .build_ui_state(draw_fluent, fixture(Appearance::Dark, false, false));
+    harness.run_steps(12);
+    let ctx = harness.ctx.clone();
+    harness.state_mut().drop_transfer(
+        &ctx,
+        vec![PathBuf::from("/virtual/Projects/DirFleet/Design notes.txt")],
+        PathBuf::from("/virtual/Documents"),
+        true,
+    );
+    harness.run_steps(4);
+    assert_eq!(
+        harness.state().display_modal,
+        Some(ModalWindow::ConfirmDrop)
+    );
+    let _ = harness.get_by_label("Move");
+    let _ = harness.get_by_label("Copy");
+    #[cfg(windows)]
+    snapshots.add(harness.try_snapshot("fluent_confirm_drop"));
+    while COMMANDS_QUEUE.pop().is_some() {}
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    assert!(harness.state().pending_drop.is_none());
+    let queued: Vec<_> = std::iter::from_fn(|| COMMANDS_QUEUE.pop()).collect();
+    assert!(
+        queued
+            .iter()
+            .any(|action| matches!(action, ActionToPerform::CloseActiveModalWindow))
+    );
+    assert!(
+        !queued.iter().any(|action| matches!(
+            action,
+            ActionToPerform::FileOp(_) | ActionToPerform::FileOpEvent(_)
+        )),
+        "nothing was moved: {queued:?}"
+    );
+
+    harness.state_mut().pending_delete = file_ops::PendingDelete {
+        paths: vec![PathBuf::from("/virtual/Projects/DirFleet/Design notes.txt")],
+        permanent: true,
+        ..Default::default()
+    };
+    harness.state_mut().display_modal = Some(ModalWindow::ConfirmDelete);
+    harness.run_steps(4);
+    let _ = harness.get_by_label("Delete");
+    #[cfg(windows)]
+    snapshots.add(harness.try_snapshot("fluent_confirm_delete"));
+    while COMMANDS_QUEUE.pop().is_some() {}
+    snapshots.unwrap();
+}

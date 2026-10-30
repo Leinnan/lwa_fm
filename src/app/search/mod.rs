@@ -169,6 +169,8 @@ pub enum Chip {
         bytes: u64,
     },
     Modified(Age),
+    /// Opened (in the app, or as the filesystem tracks it) this recently.
+    Opened(Age),
     /// An extra folder to search in.
     In(PathBuf),
 }
@@ -196,7 +198,7 @@ impl Chip {
             Self::Ext(exts) => exts.is_empty(),
             Self::Kind(kinds) => kinds.is_empty(),
             Self::In(path) => path.as_os_str().is_empty(),
-            Self::Size { .. } | Self::Modified(_) => false,
+            Self::Size { .. } | Self::Modified(_) | Self::Opened(_) => false,
         }
     }
 }
@@ -269,7 +271,8 @@ impl Search {
         let existing = self.chips.iter_mut().find(|old| match (&**old, &chip) {
             (Chip::Kind(_), Chip::Kind(_))
             | (Chip::Ext(_), Chip::Ext(_))
-            | (Chip::Modified(_), Chip::Modified(_)) => true,
+            | (Chip::Modified(_), Chip::Modified(_))
+            | (Chip::Opened(_), Chip::Opened(_)) => true,
             (Chip::Size { cmp: a, .. }, Chip::Size { cmp: b, .. }) => same_bound(*a, *b),
             (old, new) => old == new,
         });

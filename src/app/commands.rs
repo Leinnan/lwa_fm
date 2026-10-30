@@ -58,6 +58,8 @@ pub enum ModalWindow {
     Rename,
     Shortcuts,
     ConfirmDelete,
+    /// Items were dropped onto a folder: move or copy them?
+    ConfirmDrop,
     Conflict,
     ChooseFolder,
     EditSavedSearch,
@@ -74,6 +76,7 @@ impl Display for ModalWindow {
             Self::Rename => write!(f, "Rename"),
             Self::Shortcuts => write!(f, "Keyboard shortcuts"),
             Self::ConfirmDelete => write!(f, "Delete permanently"),
+            Self::ConfirmDrop => write!(f, "Move or copy"),
             Self::Conflict => write!(f, "Replace or skip"),
             Self::ConfirmEject => write!(f, "Eject drive"),
             Self::PluginForm => write!(f, "Plugin"),
@@ -199,6 +202,15 @@ pub enum ActionToPerform {
         dst: PathBuf,
         moving: bool,
     },
+    /// Items dragged onto a folder: like `Transfer`, but asks first when
+    /// the setting says so, since a drag can end over the wrong folder.
+    DropTransfer {
+        srcs: Vec<PathBuf>,
+        dst: PathBuf,
+        moving: bool,
+    },
+    /// Items dragged onto the Recycle Bin.
+    DropToTrash(Vec<PathBuf>),
     /// Open the rename dialog for an item.
     BeginRename(PathBuf),
     /// Paste the clipboard's files into a folder.
@@ -275,7 +287,9 @@ impl From<&ActionToPerform> for Cow<'static, str> {
             ActionToPerform::RemoveFromFavorites(_) => Cow::Borrowed("Remove from favorites"),
             ActionToPerform::NewTab(_) => Cow::Borrowed("Open in new tab"),
             ActionToPerform::NewWindow(_) => Cow::Borrowed("Open in new window"),
-            ActionToPerform::OpenTrash { .. } => Cow::Borrowed(crate::fileops::trash_bin::LABEL),
+            ActionToPerform::OpenTrash { .. } | ActionToPerform::DropToTrash(_) => {
+                Cow::Borrowed(crate::fileops::trash_bin::LABEL)
+            }
             ActionToPerform::ConfirmEmptyTrash => Cow::Borrowed("Empty the Recycle Bin"),
             ActionToPerform::RestoreTrashSelection => Cow::Borrowed("Restore"),
             ActionToPerform::OpenInTerminal(_) => Cow::Borrowed("Open in terminal"),
@@ -295,7 +309,8 @@ impl From<&ActionToPerform> for Cow<'static, str> {
             ActionToPerform::RunCommand(command) => Cow::Borrowed(command.label()),
             ActionToPerform::FileOp(op) => Cow::Owned(op.describe()),
             ActionToPerform::FileOpEvent(_) => Cow::Borrowed("File operation progress"),
-            ActionToPerform::Transfer { moving, .. } => {
+            ActionToPerform::Transfer { moving, .. }
+            | ActionToPerform::DropTransfer { moving, .. } => {
                 Cow::Borrowed(if *moving { "Move" } else { "Copy" })
             }
             ActionToPerform::BeginRename(_) => Cow::Borrowed("Rename"),

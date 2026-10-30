@@ -43,6 +43,7 @@ pub mod search_state;
 pub mod undo;
 pub use search::{MatchMode, SavedSearch, SavedSearches, Search, SearchTermType};
 pub mod menus;
+pub mod open_history;
 #[cfg(test)]
 mod perf_tests;
 mod plugins_ui;
@@ -120,6 +121,10 @@ pub struct App {
     /// Recently opened folders, newest first.
     #[serde(default)]
     recent_folders: Vec<PathBuf>,
+    /// [`open_history::generation`] the views were last sorted for.
+    open_history_generation: u64,
+    /// Whether the window had focus last frame.
+    window_focused: bool,
     pub settings: ApplicationSettings,
     #[serde(skip)]
     display_modal: Option<ModalWindow>,
@@ -146,6 +151,8 @@ pub struct App {
     rename: Option<file_ops::RenameState>,
     #[serde(skip)]
     pending_delete: file_ops::PendingDelete,
+    #[serde(skip)]
+    pending_drop: Option<file_ops::PendingDrop>,
     #[serde(skip)]
     pending_transfer: Option<file_ops::PendingTransfer>,
     #[serde(skip)]
@@ -185,6 +192,7 @@ impl App {
                 }
                 ModalWindow::Rename => self.rename_ui(ctx),
                 ModalWindow::ConfirmDelete => self.confirm_delete_ui(ctx),
+                ModalWindow::ConfirmDrop => self.confirm_drop_ui(ctx),
                 ModalWindow::Conflict => self.conflict_ui(ctx),
                 ModalWindow::ChooseFolder => self.choose_folder_ui(ctx),
                 ModalWindow::EditSavedSearch => self.saved_search_editor_ui(ctx),
@@ -377,6 +385,41 @@ impl App {
         }
     }
 
+    /// Re-sorts views ordered by opening when the open history changes, and
+    /// re-reads their folders when the window regains focus, as files may
+    /// have been opened in other apps meanwhile.
+    fn sync_open_history(&mut self, ctx: &egui::Context) {
+        open_history::set_tracking(self.settings.track_open_history);
+        let by_opening = |sorting: Sort| matches!(sorting, Sort::Accessed | Sort::MostOpened);
+        let generation = open_history::generation();
+        if generation != self.open_history_generation {
+            self.open_history_generation = generation;
+            for tab_id in self.tabs.get_tab_ids() {
+                let Some(tab) = self.tabs.get_tab_by_id(tab_id) else {
+                    continue;
+                };
+                let settings =
+                    ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
+                if by_opening(settings.data.sorting) || tab.filters_by_opening() {
+                    tab.sort_entries(&settings.data);
+                    tab.update_visible_entries();
+                }
+            }
+            ctx.request_repaint();
+        }
+        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+        if focused && !self.window_focused {
+            for tab in self.tabs.tabs() {
+                let settings =
+                    ctx.data_get_path_or_persisted::<DirectoryViewSettings>(&tab.current_path);
+                if settings.data.sorting == Sort::Accessed || tab.filters_by_opening() {
+                    TabAction::ForceRefresh.schedule_tab(tab.id);
+                }
+            }
+        }
+        self.window_focused = focused;
+    }
+
     /// Runs queued actions, each in the window it came from.
     fn drain_command_queue(&mut self, ctx: &egui::Context) {
         let current = self.tabs.current_window();
@@ -415,16 +458,20 @@ pub enum Sort {
     Name,
     Modified,
     Created,
+    Accessed,
+    MostOpened,
     Size,
     Kind,
     Random,
 }
 
 impl Sort {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Name,
         Self::Modified,
         Self::Created,
+        Self::Accessed,
+        Self::MostOpened,
         Self::Size,
         Self::Kind,
         Self::Random,
@@ -435,6 +482,8 @@ impl Sort {
             Self::Name => "Name",
             Self::Modified => "Date modified",
             Self::Created => "Date created",
+            Self::Accessed => "Date opened",
+            Self::MostOpened => "Times opened",
             Self::Size => "Size",
             Self::Kind => "Kind",
             Self::Random => "Random",
@@ -523,6 +572,8 @@ impl Default for App {
             open_tabs: Vec::new(),
             windows: Vec::new(),
             recent_folders: Vec::new(),
+            open_history_generation: open_history::generation(),
+            window_focused: true,
             settings: ApplicationSettings::default(),
             display_modal: None,
             modal_window: None,
@@ -534,6 +585,7 @@ impl Default for App {
             file_ops: file_ops::FileOps::default(),
             rename: None,
             pending_delete: file_ops::PendingDelete::default(),
+            pending_drop: None,
             pending_transfer: None,
             cut_sequence: 0,
             choose_folder: None,
@@ -1139,6 +1191,8 @@ impl App {
             ActionToPerform::SystemOpen(cow) => {
                 if open::that_detached(cow.as_str()).is_err() {
                     toast!(Error, "Could not open {cow}");
+                } else {
+                    open_history::opened(Path::new(cow.as_str()));
                 }
             }
             ActionToPerform::RunCommand(command) => self.run_command(ctx, command),
@@ -1149,6 +1203,10 @@ impl App {
             ActionToPerform::Transfer { srcs, dst, moving } => {
                 self.transfer(ctx, srcs, dst, moving);
             }
+            ActionToPerform::DropTransfer { srcs, dst, moving } => {
+                self.drop_transfer(ctx, srcs, dst, moving);
+            }
+            ActionToPerform::DropToTrash(paths) => self.drop_to_trash(ctx, paths),
             ActionToPerform::BeginRename(path) => self.begin_rename(path),
             ActionToPerform::PasteInto(folder) => self.paste_into(ctx, folder),
             ActionToPerform::RunSavedSearch { id, target } => {
@@ -1518,6 +1576,7 @@ impl eframe::App for App {
         self.poll_drives(&ctx);
         self.poll_plugins();
         self.process_file_system_changes(&ctx);
+        self.sync_open_history(&ctx);
         self.forget_stale_cut();
         self.commit_paused_typing(&ctx);
         self.tabs.set_current_window(self.focused_window);

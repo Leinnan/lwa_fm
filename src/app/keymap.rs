@@ -202,6 +202,14 @@ pub fn pressed(ctx: &Context) -> Vec<Command> {
     let in_text = ctx.text_edit_focused();
     let mut commands = Vec::new();
     ctx.input_mut(|input| {
+        if !in_text {
+            let modifiers = input.modifiers;
+            for event in &mut input.events {
+                if let Some(key) = clipboard_key(event, modifiers) {
+                    *event = key;
+                }
+            }
+        }
         for binding in BINDINGS {
             if in_text && !binding.in_text {
                 continue;
@@ -230,6 +238,29 @@ pub fn pressed(ctx: &Context) -> Vec<Command> {
         }
     });
     commands
+}
+
+/// The key press behind a clipboard event. egui-winit turns Ctrl+X, Ctrl+C,
+/// Ctrl+V and, on Windows, Shift+Delete, Ctrl+Insert and Shift+Insert into
+/// `Cut` / `Copy` / `Paste` without the key event, so outside text fields
+/// they are turned back into keys for the table above.
+const fn clipboard_key(event: &egui::Event, modifiers: Modifiers) -> Option<egui::Event> {
+    let (key, modifiers) = match event {
+        egui::Event::Cut if cfg!(windows) && modifiers.shift && !modifiers.command => {
+            (Key::Delete, Modifiers::SHIFT)
+        }
+        egui::Event::Cut => (Key::X, modifiers),
+        egui::Event::Copy => (Key::C, modifiers.plus(CMD)),
+        egui::Event::Paste(_) => (Key::V, CMD),
+        _ => return None,
+    };
+    Some(egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    })
 }
 
 /// The first shortcut bound to `command`, formatted for this platform.
@@ -372,6 +403,45 @@ mod tests {
             vec![Command::Back]
         );
         assert_eq!(press(&ctx, Modifiers::NONE, Key::ArrowLeft), Vec::new());
+    }
+
+    fn clipboard(ctx: &egui::Context, modifiers: Modifiers, event: Event) -> Vec<Command> {
+        let mut commands = Vec::new();
+        let input = RawInput {
+            events: vec![Event::ModifiersChanged(modifiers), event],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| commands = pressed(ui.ctx()));
+        output.textures_delta.clear();
+        commands
+    }
+
+    /// egui-winit sends these as clipboard events instead of key presses.
+    #[test]
+    fn clipboard_events_run_their_shortcuts() {
+        let ctx = egui::Context::default();
+        assert_eq!(
+            clipboard(&ctx, Modifiers::COMMAND, Event::Cut),
+            vec![Command::Cut]
+        );
+        assert_eq!(
+            clipboard(&ctx, Modifiers::COMMAND, Event::Copy),
+            vec![Command::Copy]
+        );
+        assert_eq!(
+            clipboard(&ctx, Modifiers::COMMAND | Modifiers::SHIFT, Event::Copy),
+            vec![Command::CopyAsPath]
+        );
+        assert_eq!(
+            clipboard(&ctx, Modifiers::COMMAND, Event::Paste("x".into())),
+            vec![Command::Paste]
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                clipboard(&ctx, Modifiers::SHIFT, Event::Cut),
+                vec![Command::DeletePermanently]
+            );
+        }
     }
 
     #[test]

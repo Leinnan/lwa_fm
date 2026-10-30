@@ -117,6 +117,11 @@ pub struct ApplicationSettings {
     pub inspector_width: f32,
     /// Ask before moving items to the Recycle Bin.
     pub confirm_trash: bool,
+    /// Ask before moving or copying items dropped onto a folder.
+    pub confirm_drop: bool,
+    /// Remember which files are opened from the app, for "Date opened" and
+    /// "Times opened".
+    pub track_open_history: bool,
     /// Show the recently opened folders in the sidebar.
     pub show_recent_folders: bool,
     /// Show the Recycle Bin / Trash in the sidebar.
@@ -140,6 +145,10 @@ pub struct ApplicationSettings {
     /// waits for the confirming click.
     #[serde(skip)]
     restore_armed: Option<(SettingsCategory, f64)>,
+    /// "Clear open history" was clicked once at this time and waits for the
+    /// confirming click.
+    #[serde(skip)]
+    clear_history_armed: Option<f64>,
 }
 
 impl Default for ApplicationSettings {
@@ -157,6 +166,8 @@ impl Default for ApplicationSettings {
             sidebar_width: 200.0,
             inspector_width: 280.0,
             confirm_trash: false,
+            confirm_drop: true,
+            track_open_history: true,
             show_recent_folders: true,
             show_trash: true,
             show_drive_capacity: true,
@@ -167,6 +178,7 @@ impl Default for ApplicationSettings {
             plugins: crate::plugins::host::SettingsMap::new(),
             category: SettingsCategory::General,
             restore_armed: None,
+            clear_history_armed: None,
         }
     }
 }
@@ -274,7 +286,11 @@ impl ApplicationSettings {
 
     /// Displays the settings dialog: a header, the pages on the left and
     /// the open page on the right, at a fixed size.
-    pub(crate) fn display(&mut self, ctx: &egui::Context, plugins: &mut crate::plugins::PluginHost) {
+    pub(crate) fn display(
+        &mut self,
+        ctx: &egui::Context,
+        plugins: &mut crate::plugins::PluginHost,
+    ) {
         let size = dialog_size(ctx);
         let narrow = size.x < NARROW_WIDTH;
         let palette = Palette::for_context(ctx, ctx.global_style().visuals.dark_mode);
@@ -606,7 +622,7 @@ impl ApplicationSettings {
             );
         });
         apply_directory_defaults(ui, view, hidden, before);
-        ui::settings_group(ui, "Deleting", |group| {
+        ui::settings_group(ui, "Confirmations", |group| {
             let title = format!("Ask before moving items to the {}", trash_bin::LABEL);
             group.row(
                 &title,
@@ -615,7 +631,49 @@ impl ApplicationSettings {
                     ui::toggle_switch(ui, &mut self.confirm_trash, &title);
                 },
             );
+            let title = "Ask before moving or copying dragged items";
+            group.row(
+                title,
+                Some("So an item let go over the wrong folder stays where it was."),
+                |ui| {
+                    ui::toggle_switch(ui, &mut self.confirm_drop, title);
+                },
+            );
         });
+        let now = ui.input(|i| i.time);
+        let armed = self
+            .clear_history_armed
+            .is_some_and(|at| now - at < RESTORE_CONFIRM_SECONDS);
+        ui::settings_group(ui, "Open history", |group| {
+            let title = "Remember opened files";
+            group.row(
+                title,
+                Some("Files opened here sort by \"Date opened\" and \"Times opened\""),
+                |ui| {
+                    ui::toggle_switch(ui, &mut self.track_open_history, title);
+                },
+            );
+            group.row("Forget every opened file", None, |ui| {
+                let label = if armed {
+                    "Click again to clear"
+                } else {
+                    "Clear open history"
+                };
+                if ui.button(label).clicked() {
+                    if armed {
+                        crate::app::open_history::clear();
+                        self.clear_history_armed = None;
+                        crate::toast!(Info, "Open history cleared");
+                    } else {
+                        self.clear_history_armed = Some(now);
+                    }
+                }
+            });
+        });
+        if armed {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
     }
 
     fn previews_page(&mut self, ui: &mut Ui) {
@@ -704,6 +762,8 @@ impl ApplicationSettings {
             }
             SettingsCategory::Files => {
                 self.confirm_trash = defaults.confirm_trash;
+                self.confirm_drop = defaults.confirm_drop;
+                self.track_open_history = defaults.track_open_history;
                 ui.data_set_persisted(DirectoryViewSettings::default());
                 ui.data_set_persisted(DirectoryShowHidden::default());
                 ActionToPerform::ViewSettingsChanged(crate::app::DataSource::Settings).schedule();
@@ -732,6 +792,7 @@ mod tests {
         assert!(!settings.inspector_visible);
         assert!(settings.show_recent_folders);
         assert!(settings.show_trash);
+        assert!(settings.track_open_history);
         assert!((settings.sidebar_width - 200.0).abs() < f32::EPSILON);
     }
     #[test]
@@ -740,6 +801,7 @@ mod tests {
             appearance: Appearance::Light,
             inspector_visible: true,
             sidebar_width: 225.0,
+            track_open_history: false,
             ..Default::default()
         };
         let encoded = serde_json::to_string(&settings).expect("encode");
@@ -747,6 +809,7 @@ mod tests {
         assert_eq!(restored.appearance, Appearance::Light);
         assert!(restored.inspector_visible);
         assert!((restored.sidebar_width - 225.0).abs() < f32::EPSILON);
+        assert!(!restored.track_open_history);
     }
     #[test]
     fn sidebar_sections_default_and_round_trip() {

@@ -54,8 +54,11 @@ impl App {
     fn plugin_request(&mut self, ctx: &egui::Context, request: AppRequest) {
         match request {
             AppRequest::Open(path) => {
-                ActionToPerform::TabAction(TabTarget::ActiveTab, TabAction::ChangePaths(path.into()))
-                    .schedule();
+                ActionToPerform::TabAction(
+                    TabTarget::ActiveTab,
+                    TabAction::ChangePaths(path.into()),
+                )
+                .schedule();
             }
             AppRequest::OpenInNewTab(path) => ActionToPerform::NewTab(path).schedule(),
             AppRequest::Refresh => {
@@ -128,7 +131,8 @@ impl App {
             .actions
             .iter()
             .filter(|action| {
-                action.def.palette && crate::plugins::applies(action, &context.targets, context.dir.as_deref())
+                action.def.palette
+                    && crate::plugins::applies(action, &context.targets, context.dir.as_deref())
             })
             .map(|action| ValidAction {
                 action: ActionToPerform::RunPluginAction {
@@ -161,9 +165,13 @@ impl App {
         let ctx = root.ctx().clone();
         let mut clicked = None;
         egui::Panel::bottom("pluginBar")
+            .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(super::ui::Palette::for_context(&ctx, ctx.global_style().visuals.dark_mode).toolbar)
+                    .fill(
+                        super::ui::Palette::for_context(&ctx, ctx.global_style().visuals.dark_mode)
+                            .toolbar,
+                    )
                     .inner_margin(egui::Margin::symmetric(12, 3)),
             )
             .show(root, |ui| {

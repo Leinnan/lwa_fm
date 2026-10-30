@@ -42,6 +42,7 @@ fn meta(entry_type: EntryType, deleted_at: TimestampSeconds, size: u64) -> DirEn
     DirEntryMetaData {
         modified_at: deleted_at,
         created_at: deleted_at,
+        accessed_at: deleted_at,
         since_modified: deleted_at.elapsed(),
         size,
         ..DirEntryMetaData::from(entry_type)

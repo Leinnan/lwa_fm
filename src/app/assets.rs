@@ -256,6 +256,7 @@ impl MediaBackend for SystemMediaBackend {
         cancel: &AtomicBool,
         task: &mut Option<Box<VideoTask>>,
     ) -> Result<PreviewStep, MediaError> {
+        let _access_time = crate::access_time::PreserveAccessTime::new(&source.path);
         task.get_or_insert_with(|| Box::new(VideoTask::new(source.clone(), spec, kind)))
             .step(cancel)
     }
@@ -2139,6 +2140,8 @@ fn load_or_generate_thumbnail(
         }
         let _ = fs::remove_file(&cached);
     }
+    // Making a thumbnail must not count as the user opening the file.
+    let _access_time = crate::access_time::PreserveAccessTime::new(source_path);
     let image = match kind {
         ThumbnailKind::Video => {
             if let Some(image) = generate_shell_poster(source_path, target_edge, &path, cacheable) {

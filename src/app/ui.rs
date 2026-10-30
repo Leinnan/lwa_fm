@@ -218,6 +218,118 @@ pub fn icon_menu_button(
     egui::Popup::menu(&response).show(add_contents);
     response
 }
+/// The frame of a dialog: a popup with room around its contents.
+pub fn dialog_frame(ctx: &Context) -> Frame {
+    Frame::popup(&ctx.global_style()).inner_margin(20)
+}
+
+/// How a dialog button is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonKind {
+    /// The dialog's main action, filled with the accent color.
+    Primary,
+    /// A main action that destroys data, filled red.
+    Danger,
+    Plain,
+}
+
+/// One button of [`dialog_buttons`].
+#[derive(Clone, Copy, Debug)]
+pub struct DialogButton<'a> {
+    pub label: &'a str,
+    pub kind: ButtonKind,
+    pub enabled: bool,
+}
+
+impl<'a> DialogButton<'a> {
+    pub const fn primary(label: &'a str) -> Self {
+        Self {
+            label,
+            kind: ButtonKind::Primary,
+            enabled: true,
+        }
+    }
+    pub const fn danger(label: &'a str) -> Self {
+        Self {
+            label,
+            kind: ButtonKind::Danger,
+            enabled: true,
+        }
+    }
+    pub const fn plain(label: &'a str) -> Self {
+        Self {
+            label,
+            kind: ButtonKind::Plain,
+            enabled: true,
+        }
+    }
+    pub const fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+}
+
+/// The button row at the bottom of a dialog: right-aligned, as on Windows,
+/// with `buttons` in reading order (main action first, Cancel last) and of
+/// equal minimum width. With `focus_first`, the first enabled button takes
+/// keyboard focus so Enter runs it; dialogs with a text field leave it off.
+/// Returns the index of the clicked button.
+pub fn dialog_buttons(ui: &mut Ui, focus_first: bool, buttons: &[DialogButton]) -> Option<usize> {
+    ui.add_space(12.0);
+    let height = control_height(ui);
+    let mut clicked = None;
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), height),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let first = buttons.iter().position(|button| button.enabled);
+            // Right to left, so the last button is added first.
+            for (index, button) in buttons.iter().enumerate().rev() {
+                let fill = match button.kind {
+                    _ if !button.enabled => None,
+                    ButtonKind::Primary => Some(Palette::of(ui).accent),
+                    ButtonKind::Danger => Some(Color32::from_rgb(196, 43, 28)),
+                    ButtonKind::Plain => None,
+                };
+                let widget = fill.map_or_else(
+                    || egui::Button::new(button.label),
+                    |fill| {
+                        // Fluent's dark accent is light; keep the label readable on it.
+                        let text = if fill.intensity() > 0.6 {
+                            Color32::BLACK
+                        } else {
+                            Color32::WHITE
+                        };
+                        egui::Button::new(RichText::new(button.label).color(text))
+                            .fill(fill)
+                            .stroke(Stroke::NONE)
+                    },
+                );
+                let response =
+                    ui.add_enabled(button.enabled, widget.min_size(Vec2::new(88.0, height)));
+                if focus_first && Some(index) == first && ui.memory(|m| m.focused().is_none()) {
+                    response.request_focus();
+                }
+                if response.has_focus() {
+                    ui.painter().rect_stroke(
+                        response.rect.expand(2.0),
+                        control_radius(ui),
+                        Stroke::new(1.0_f32, ui.visuals().strong_text_color()),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                if response.clicked()
+                    || (response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                {
+                    clicked = Some(index);
+                }
+            }
+        },
+    );
+    clicked
+}
+
 pub fn card(ui: &Ui) -> Frame {
     Frame::new()
         .fill(Palette::of(ui).card)
@@ -602,6 +714,10 @@ pub fn is_fluent(ctx: &Context) -> bool {
 }
 pub fn control_height(ui: &Ui) -> f32 {
     if is_fluent(ui.ctx()) { 32.0 } else { 28.0 }
+}
+/// The top bar's padding; tighter around Fluent's taller controls.
+pub fn toolbar_margin(ui: &Ui) -> egui::Margin {
+    egui::Margin::symmetric(12, if is_fluent(ui.ctx()) { 6 } else { 8 })
 }
 pub fn text_edit_min_size(ui: &Ui) -> Vec2 {
     if is_fluent(ui.ctx()) {

@@ -15,7 +15,7 @@ use std::{
 
 /// Bumped whenever the persisted [`Listing`] encoding changes, so stale cache
 /// records decode as a version mismatch instead of garbage.
-const LISTING_FORMAT_VERSION: u8 = 3;
+const LISTING_FORMAT_VERSION: u8 = 4;
 /// Below this many entries the rayon dispatch costs more than it saves.
 const PARALLEL_THRESHOLD: usize = 2048;
 
@@ -68,6 +68,8 @@ pub struct DirEntryMetaData {
     pub entry_type: EntryType,
     pub created_at: TimestampSeconds,
     pub modified_at: TimestampSeconds,
+    /// Last access as tracked by the filesystem; 0 when unknown.
+    pub accessed_at: TimestampSeconds,
     /// Nanoseconds since the Unix epoch, used to invalidate derived assets.
     pub source_revision: u128,
     pub since_modified: ElapsedTime,
@@ -181,6 +183,7 @@ impl From<EntryType> for DirEntryMetaData {
             entry_type,
             created_at: TimestampSeconds::default(),
             modified_at: TimestampSeconds::default(),
+            accessed_at: TimestampSeconds::default(),
             source_revision: 0,
             since_modified: ElapsedTime::default(),
             size: 0,
@@ -196,6 +199,10 @@ impl From<std::fs::Metadata> for DirEntryMetaData {
         let entry_type: EntryType = meta.file_type().into();
         let created_at = meta
             .created()
+            .map(TimestampSeconds::from)
+            .unwrap_or_default();
+        let accessed_at = meta
+            .accessed()
             .map(TimestampSeconds::from)
             .unwrap_or_default();
         let modified = meta.modified().ok();
@@ -219,6 +226,7 @@ impl From<std::fs::Metadata> for DirEntryMetaData {
             entry_type,
             created_at,
             modified_at,
+            accessed_at,
             source_revision,
             since_modified: modified_at.elapsed(),
             size,
@@ -650,8 +658,14 @@ impl Listing {
     #[inline]
     #[must_use]
     pub fn dir(&self, index: usize) -> &Arc<str> {
-        let dir_index = self.dir_idx.get(index).map_or(0, |&dir| dir as usize);
-        &self.dirs[dir_index]
+        &self.dirs[self.dir_index(index)]
+    }
+
+    /// Index into [`Self::dirs`] of the folder holding entry `index`.
+    #[inline]
+    #[must_use]
+    pub fn dir_index(&self, index: usize) -> usize {
+        self.dir_idx.get(index).map_or(0, |&dir| dir as usize)
     }
 
     #[inline]

@@ -376,10 +376,12 @@ impl App {
         let running = self.file_ops.running_on(&drive.mount).len();
         let mut confirmed = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ConfirmEject)).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 440.0));
-            ui.heading(format!("Eject {}?", drive.display_name()));
-            ui.label(match running {
+        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ConfirmEject))
+            .frame(super::ui::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 440.0));
+                ui.heading(format!("Eject {}?", drive.display_name()));
+                ui.label(match running {
                 0 => "The file operations on this drive have finished.".to_owned(),
                 1 => "A file operation is still running on this drive. Ejecting cancels it."
                     .to_owned(),
@@ -387,12 +389,19 @@ impl App {
                     "{n} file operations are still running on this drive. Ejecting cancels them."
                 ),
             });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                confirmed = ui.button(drive.eject_label()).clicked();
-                cancel = ui.button("Cancel").clicked();
+                match super::ui::dialog_buttons(
+                    ui,
+                    true,
+                    &[
+                        super::ui::DialogButton::primary(drive.eject_label()),
+                        super::ui::DialogButton::plain("Cancel"),
+                    ],
+                ) {
+                    Some(0) => confirmed = true,
+                    Some(_) => cancel = true,
+                    None => {}
+                }
             });
-        });
         if confirmed {
             self.drives.confirm = None;
             ActionToPerform::EjectDrive {

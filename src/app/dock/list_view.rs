@@ -509,11 +509,14 @@ impl MyTabViewer<'_> {
                     paint_text(ui, galley, false, cells.weak);
                 }
             }
-            Column::Modified | Column::Created => {
-                let timestamp = if column == Column::Modified {
-                    val.meta.modified_at
-                } else {
-                    val.meta.created_at
+            Column::Modified | Column::Created | Column::Accessed => {
+                let timestamp = match column {
+                    Column::Modified => val.meta.modified_at,
+                    Column::Created => val.meta.created_at,
+                    _ => crate::app::open_history::last_opened(
+                        crate::app::open_history::of_entry(val),
+                        val.meta.accessed_at,
+                    ),
                 };
                 let galley = if *timestamp == 0 {
                     text_fit::label(
@@ -547,6 +550,18 @@ impl MyTabViewer<'_> {
                     cells.weak,
                 );
                 paint_text(ui, galley, column.right_aligned(), cells.weak);
+            }
+            Column::OpenCount => {
+                if let Some(record) = crate::app::open_history::of_entry(val) {
+                    let galley = text_fit::label(
+                        ui,
+                        &("open_count", record.count),
+                        || record.count.to_string(),
+                        &cells.font,
+                        cells.weak,
+                    );
+                    paint_text(ui, galley, column.right_aligned(), cells.weak);
+                }
             }
             Column::Size => {
                 // A package's own size is its directory record's, not its contents'.

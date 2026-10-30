@@ -4,6 +4,7 @@ use anyhow::Context;
 use consts::APP_NAME;
 use eframe::egui;
 
+mod access_time;
 mod app;
 mod child_process;
 mod clipboard;

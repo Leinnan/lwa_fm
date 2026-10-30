@@ -77,6 +77,15 @@ impl MyTabViewer<'_> {
                 #[cfg(any(windows, target_os = "macos"))]
                 if single && !is_dir && ui.button("Open with…").clicked() {
                     crate::shell::open_with(val.get_path());
+                    crate::app::open_history::opened(&val.get_path());
+                    ui.close();
+                }
+                if paths
+                    .iter()
+                    .any(|path| crate::app::open_history::get(path).is_some())
+                    && ui.button("Remove from open history").clicked()
+                {
+                    crate::app::open_history::forget(paths.iter().map(PathBuf::as_path));
                     ui.close();
                 }
                 #[cfg(any(windows, target_os = "macos"))]
@@ -253,6 +262,13 @@ impl MyTabViewer<'_> {
         for (label, timestamp) in [
             (modified, entry.meta.modified_at),
             ("Created", entry.meta.created_at),
+            (
+                "Opened",
+                crate::app::open_history::last_opened(
+                    crate::app::open_history::of_entry(entry),
+                    entry.meta.accessed_at,
+                ),
+            ),
         ] {
             if *timestamp != 0 {
                 ui.small(format!(

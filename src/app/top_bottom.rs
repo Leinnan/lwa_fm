@@ -217,14 +217,20 @@ impl App {
             .map(super::undo::UndoItem::label);
         let mut inline_search = false;
         let mut search_out = SearchBarOutput::default();
+        // A fixed height: a resizable panel keeps whatever height it once
+        // had in memory, and the bar used to grow and never shrink back.
+        let margin = ui::toolbar_margin(root);
+        let height = ui::control_height(root) + margin.sum().y;
         egui::Panel::top("top_panel")
+            .resizable(false)
+            .exact_size(height)
             .frame(
                 egui::Frame::new()
                     .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).toolbar)
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
+                    .inner_margin(margin),
             )
             .show(root, |ui| {
-                ui.horizontal_centered(|ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     let Some(tab) = self.tabs.get_current_tab() else {
                         return;
@@ -335,6 +341,7 @@ impl App {
         let (extensions, folders) = search_suggestions(ctx, tab, field_id);
         let search = tab.search.as_mut().expect("search exists");
         egui::Panel::top("search_row")
+            .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).toolbar)
@@ -539,6 +546,7 @@ impl App {
     pub(crate) fn bottom_panel(&mut self, root: &mut Ui) {
         let ctx = &root.ctx().clone();
         egui::Panel::bottom("bottomPanel")
+            .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).toolbar)
@@ -1030,7 +1038,41 @@ fn filter_menu(ui: &mut Ui, search: &mut Search) -> Option<FilterAdded> {
     result
 }
 
-/// The Type, Modified and Size submenus of "+ Filter".
+/// A "+ Filter" submenu of [`Age`] presets for the date chip made by `chip`.
+fn age_filter(
+    ui: &mut Ui,
+    search: &mut Search,
+    result: &mut Option<FilterAdded>,
+    label: &str,
+    chip: fn(Age) -> Chip,
+) {
+    let current = Age::ALL
+        .into_iter()
+        .find(|&age| search.chips.contains(&chip(age)));
+    ui.menu_button(label, |ui| {
+        for value in Age::ALL {
+            if ui
+                .add(egui::Button::selectable(
+                    current == Some(value),
+                    value.label(),
+                ))
+                .clicked()
+            {
+                let value_chip = chip(value);
+                *result = if current == Some(value) {
+                    let token = super::search::query::chip_token(&value_chip);
+                    search.chips.retain(|chip| *chip != value_chip);
+                    Some(FilterAdded::Changed(format!("remove filter {token}")))
+                } else {
+                    search.add_chip(value_chip).map(FilterAdded::Changed)
+                };
+                ui.close();
+            }
+        }
+    });
+}
+
+/// The Type, Modified, Opened and Size submenus of "+ Filter".
 fn preset_filters(ui: &mut Ui, search: &mut Search, result: &mut Option<FilterAdded>) {
     let kinds: Vec<FileKind> = search
         .chips
@@ -1048,31 +1090,8 @@ fn preset_filters(ui: &mut Ui, search: &mut Search, result: &mut Option<FilterAd
             }
         }
     });
-    let age = search.chips.iter().find_map(|chip| match chip {
-        Chip::Modified(age) => Some(*age),
-        _ => None,
-    });
-    ui.menu_button("Modified", |ui| {
-        for value in Age::ALL {
-            if ui
-                .add(egui::Button::selectable(age == Some(value), value.label()))
-                .clicked()
-            {
-                *result = if age == Some(value) {
-                    search.chips.retain(|chip| *chip != Chip::Modified(value));
-                    Some(FilterAdded::Changed(format!(
-                        "remove filter modified:{}",
-                        value.keyword()
-                    )))
-                } else {
-                    search
-                        .add_chip(Chip::Modified(value))
-                        .map(FilterAdded::Changed)
-                };
-                ui.close();
-            }
-        }
-    });
+    age_filter(ui, search, result, "Modified", Chip::Modified);
+    age_filter(ui, search, result, "Opened", Chip::Opened);
     ui.menu_button("Size", |ui| {
         for (label, cmp, bytes) in [
             ("Under 1 MB", Cmp::Less, 1 << 20),

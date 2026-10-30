@@ -18,12 +18,12 @@ use rayon::{
 
 use crate::{
     app::{
-        Data, Search, Sort, database,
+        Data, Search, Sort, database, open_history,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
         dock::{CurrentPath, build_collator},
     },
     data::files::{
-        EntryType, Listing, ListingChange, is_hidden_entry, is_hidden_name, is_system_clutter,
+        DirEntryMetaData, EntryType, Listing, ListingChange, is_hidden_entry, is_hidden_name, is_system_clutter,
     },
     helper::{DataHolder, canonical_form, normalize_path},
 };
@@ -640,6 +640,47 @@ pub fn read_directory_streaming(
     }
 }
 
+/// A key per entry of `listing` from its open history record (if any) and
+/// metadata. History is looked up once per folder, then by name.
+fn opening_keys(
+    listing: &Listing,
+    key: impl Fn(Option<open_history::OpenRecord>, &DirEntryMetaData) -> (u32, u32),
+) -> Vec<(u32, u32)> {
+    let by_dir: Vec<_> = if open_history::is_empty() {
+        Vec::new()
+    } else {
+        listing
+            .dirs()
+            .iter()
+            .map(|dir| open_history::records_in(Path::new(dir.as_ref())))
+            .collect()
+    };
+    (0..listing.len())
+        .map(|index| {
+            let record = by_dir
+                .get(listing.dir_index(index))
+                .and_then(Option::as_ref)
+                .and_then(|names| names.get(listing.name(index)).copied());
+            key(record, listing.meta(index))
+        })
+        .collect()
+}
+
+/// Folders first in both directions, like the other sorts.
+fn sort_by_opening(
+    order: &mut [u32],
+    keys: &[(u32, u32)],
+    is_file: &(impl Fn(u32) -> bool + Sync),
+    invert: bool,
+) {
+    use std::cmp::Reverse;
+    if invert {
+        order.par_sort_unstable_by_key(|&i| (is_file(i), Reverse(keys[i as usize])));
+    } else {
+        order.par_sort_unstable_by_key(|&i| (is_file(i), keys[i as usize]));
+    }
+}
+
 /// Compute the display order (indices into `listing`) for `settings`.
 pub fn sort_order(listing: &Listing, settings: &DirectoryViewSettings) -> Vec<u32> {
     use std::cmp::Reverse;
@@ -668,6 +709,22 @@ pub fn sort_order(listing: &Listing, settings: &DirectoryViewSettings) -> Vec<u3
         }
         (Sort::Created, true) => {
             order.par_sort_unstable_by_key(|&i| (is_file(i), Reverse(meta(i).created_at)));
+        }
+        (Sort::Accessed, invert) => {
+            let opened = opening_keys(listing, |record, meta| {
+                (0, *open_history::last_opened(record, meta.accessed_at))
+            });
+            sort_by_opening(&mut order, &opened, &is_file, invert);
+        }
+        (Sort::MostOpened, invert) => {
+            // Ties (most files: never opened here) fall back to recency.
+            let opened = opening_keys(listing, |record, meta| {
+                (
+                    record.map_or(0, |record| record.count),
+                    *open_history::last_opened(record, meta.accessed_at),
+                )
+            });
+            sort_by_opening(&mut order, &opened, &is_file, invert);
         }
         (Sort::Size, false) => {
             order.par_sort_unstable_by_key(|&i| (is_file(i), meta(i).size));
@@ -1304,6 +1361,14 @@ mod tests {
         entry
     }
 
+    fn entry_accessed(name: &str, accessed: u32) -> DirEntry {
+        let mut entry = entry_with(name, 0, 0, 0);
+        entry.meta.accessed_at = crate::data::time::TimestampSeconds::from(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::from(accessed)),
+        );
+        entry
+    }
+
     fn sorted_names(
         entries: &[DirEntry],
         sorting: super::super::Sort,
@@ -1384,6 +1449,59 @@ mod tests {
         assert_eq!(
             sorted_names(&entries, super::super::Sort::Modified, true),
             ["newest", "middle", "oldest"]
+        );
+    }
+
+    #[test]
+    fn opening_in_the_app_beats_an_older_access_time() {
+        let mut entries = [
+            entry_accessed("recent_atime", 30),
+            entry_accessed("opened_here", 10),
+        ];
+        for entry in &mut entries {
+            entry.dir = std::sync::Arc::from("/sort_history_date");
+        }
+        crate::app::open_history::record(std::path::Path::new("/sort_history_date/opened_here"));
+        assert_eq!(
+            sorted_names(&entries, super::super::Sort::Accessed, true),
+            ["opened_here", "recent_atime"]
+        );
+    }
+
+    #[test]
+    fn times_opened_sorts_by_count_then_recency() {
+        let mut entries = [
+            entry_accessed("never", 50),
+            entry_accessed("once", 10),
+            entry_accessed("twice", 10),
+            entry_accessed("never_older", 20),
+        ];
+        for entry in &mut entries {
+            entry.dir = std::sync::Arc::from("/sort_history_count");
+        }
+        crate::app::open_history::record(std::path::Path::new("/sort_history_count/once"));
+        crate::app::open_history::record(std::path::Path::new("/sort_history_count/twice"));
+        crate::app::open_history::record(std::path::Path::new("/sort_history_count/twice"));
+        assert_eq!(
+            sorted_names(&entries, super::super::Sort::MostOpened, true),
+            ["twice", "once", "never", "never_older"]
+        );
+    }
+
+    #[test]
+    fn sort_by_accessed_ascending_and_inverted() {
+        let entries = [
+            entry_accessed("recent", 30),
+            entry_accessed("stale", 10),
+            entry_accessed("middle", 20),
+        ];
+        assert_eq!(
+            sorted_names(&entries, super::super::Sort::Accessed, false),
+            ["stale", "middle", "recent"]
+        );
+        assert_eq!(
+            sorted_names(&entries, super::super::Sort::Accessed, true),
+            ["recent", "middle", "stale"]
         );
     }
 }

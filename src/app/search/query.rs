@@ -29,6 +29,7 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("size:>10mb", "Size; also <, <=, >=, = and kb, mb, gb"),
     ("modified:week", "today, week, month, year"),
+    ("opened:week", "Opened today, week, month, year"),
     ("in:\"D:\\Work\"", "Also search this folder"),
 ];
 
@@ -139,6 +140,10 @@ pub fn parse_filter(token: &str) -> Option<Chip> {
             .into_iter()
             .find(|age| age.keyword().eq_ignore_ascii_case(value))
             .map(Chip::Modified),
+        "opened" => Age::ALL
+            .into_iter()
+            .find(|age| age.keyword().eq_ignore_ascii_case(value))
+            .map(Chip::Opened),
         "in" => Some(Chip::In(PathBuf::from(value))),
         _ => None,
     }
@@ -215,6 +220,7 @@ pub fn chip_token(chip: &Chip) -> String {
         ),
         Chip::Size { cmp, bytes } => format!("size:{}{}", cmp.symbol(), format_size(*bytes)),
         Chip::Modified(age) => format!("modified:{}", age.keyword()),
+        Chip::Opened(age) => format!("opened:{}", age.keyword()),
         Chip::In(path) => format!("in:{}", quote_if_needed(&path.display().to_string())),
     }
 }
@@ -278,6 +284,7 @@ pub fn chip_parts(chip: &Chip) -> (Option<&'static str>, String) {
             format!("{} {}", cmp_words(*cmp), display_size(*bytes)),
         ),
         Chip::Modified(age) => (Some("Modified"), age.label().to_lowercase()),
+        Chip::Opened(age) => (Some("Opened"), age.label().to_lowercase()),
         Chip::In(path) => (
             Some("Folder"),
             path.file_name().map_or_else(
@@ -370,7 +377,8 @@ mod tests {
 
     #[test]
     fn every_chip_round_trips_through_its_token() {
-        let chips = parse(r#"report "annual plan" -draft *.pdf /^IMG/ ext:pdf kind:doc,video size:<=1.5mb modified:today in:"C:\a b""#).chips;
+        let chips = parse(r#"report "annual plan" -draft *.pdf /^IMG/ ext:pdf kind:doc,video size:<=1.5mb modified:today opened:week in:"C:\a b""#).chips;
+        assert!(chips.contains(&Chip::Opened(Age::Week)));
         for chip in &chips {
             assert_eq!(&parse(&chip_token(chip)).chips[0], chip, "{chip:?}");
         }

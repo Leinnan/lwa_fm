@@ -823,6 +823,17 @@ impl TabData {
         ctx.data_mut(|data| data.remove::<PopupOpened>(popup_memory_id(self.id)));
     }
 
+    /// The search has an `opened:` filter, whose results change with the
+    /// open history.
+    pub fn filters_by_opening(&self) -> bool {
+        self.search.as_ref().is_some_and(|search| {
+            search
+                .effective_chips()
+                .iter()
+                .any(|chip| matches!(chip, crate::app::search::Chip::Opened(_)))
+        })
+    }
+
     pub fn is_searching(&self) -> bool {
         self.search.as_ref().is_some_and(Search::has_query)
     }

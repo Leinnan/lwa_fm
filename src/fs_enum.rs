@@ -125,6 +125,8 @@ pub struct RawEntry<'a> {
     pub size: u64,
     pub created: Option<SystemTime>,
     pub modified: Option<SystemTime>,
+    /// Last access, as tracked by the filesystem (coarse, may be disabled).
+    pub accessed: Option<SystemTime>,
     /// Volume-unique file identifier (NTFS/ReFS file reference, inode on
     /// Unix). 0 when the filesystem does not provide one.
     pub file_id: u64,
@@ -181,6 +183,7 @@ impl RawEntry<'_> {
             entry_type,
             created_at: self.created.map(Into::into).unwrap_or_default(),
             modified_at,
+            accessed_at: self.accessed.map(Into::into).unwrap_or_default(),
             source_revision,
             since_modified: modified_at.elapsed(),
             size: self.size,
@@ -259,6 +262,7 @@ pub fn enumerate_std(dir: &Path, sink: &mut dyn FnMut(&RawEntry<'_>)) -> io::Res
             size: meta.len(),
             created: meta.created().ok(),
             modified: meta.modified().ok(),
+            accessed: meta.accessed().ok(),
             file_id: file_id_of(&meta),
         };
         sink(&raw);
@@ -422,6 +426,7 @@ mod tests {
             size: 7,
             created: None,
             modified: Some(UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)),
+            accessed: None,
             file_id: 0,
         };
         let meta = raw.metadata();

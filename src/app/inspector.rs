@@ -88,6 +88,14 @@ impl App {
                     }
                     detail(ui, "Created", &format_date(entry.meta.created_at));
                     detail(ui, "Modified", &format_date(entry.meta.modified_at));
+                    let record = crate::app::open_history::of_entry(&entry.entry_ref());
+                    let opened =
+                        crate::app::open_history::last_opened(record, entry.meta.accessed_at);
+                    detail(ui, "Opened", &format_date(opened));
+                    if let Some(record) = record {
+                        let times = if record.count == 1 { "time" } else { "times" };
+                        detail(ui, "Opened here", &format!("{} {times}", record.count));
+                    }
                 });
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {

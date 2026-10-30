@@ -20,13 +20,25 @@ pub enum Column {
     Folder,
     Modified,
     Created,
+    /// When the file was last opened: in the app, or as the filesystem
+    /// tracks it.
+    Accessed,
+    /// How many times the file was opened from the app.
+    OpenCount,
     Kind,
     Size,
 }
 
 impl Column {
     /// Columns the user can show or hide, in menu order.
-    pub const OPTIONAL: [Self; 4] = [Self::Modified, Self::Created, Self::Kind, Self::Size];
+    pub const OPTIONAL: [Self; 6] = [
+        Self::Modified,
+        Self::Created,
+        Self::Accessed,
+        Self::OpenCount,
+        Self::Kind,
+        Self::Size,
+    ];
 
     pub const fn title(self, in_trash: bool) -> &'static str {
         match self {
@@ -36,6 +48,8 @@ impl Column {
             Self::Modified if in_trash => "Deleted",
             Self::Modified => "Modified",
             Self::Created => "Created",
+            Self::Accessed => "Opened",
+            Self::OpenCount => "Opens",
             Self::Kind => "Kind",
             Self::Size => "Size",
         }
@@ -47,6 +61,8 @@ impl Column {
             Self::Folder => None,
             Self::Modified => Some(Sort::Modified),
             Self::Created => Some(Sort::Created),
+            Self::Accessed => Some(Sort::Accessed),
+            Self::OpenCount => Some(Sort::MostOpened),
             Self::Kind => Some(Sort::Kind),
             Self::Size => Some(Sort::Size),
         }
@@ -56,9 +72,10 @@ impl Column {
         match self {
             Self::Name => 0.0,
             Self::Folder => 200.0,
-            Self::Modified | Self::Created => 130.0,
+            Self::Modified | Self::Created | Self::Accessed => 130.0,
             Self::Kind => 120.0,
             Self::Size => 90.0,
+            Self::OpenCount => 70.0,
         }
     }
 
@@ -68,21 +85,21 @@ impl Column {
         match self {
             Self::Name => 0.0,
             Self::Folder => 120.0,
-            Self::Modified | Self::Created => 96.0,
+            Self::Modified | Self::Created | Self::Accessed => 96.0,
             Self::Kind => 80.0,
-            Self::Size => 64.0,
+            Self::Size | Self::OpenCount => 64.0,
         }
     }
 
     /// Numbers read best right-aligned; everything else starts at the left.
     pub const fn right_aligned(self) -> bool {
-        matches!(self, Self::Size)
+        matches!(self, Self::Size | Self::OpenCount)
     }
 
     /// Lower values are hidden first when the pane is too narrow.
     const fn keep_priority(self) -> u8 {
         match self {
-            Self::Created => 0,
+            Self::Created | Self::Accessed | Self::OpenCount => 0,
             Self::Kind => 1,
             Self::Size => 2,
             Self::Modified => 3,

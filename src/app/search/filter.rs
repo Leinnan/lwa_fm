@@ -210,6 +210,8 @@ enum Predicate {
     Size(Cmp, u64),
     /// Modified at or after this Unix time.
     ModifiedSince(u64),
+    /// Opened at or after this Unix time.
+    OpenedSince(u64),
 }
 
 /// A search ready to test entries: name patterns combined by
@@ -262,6 +264,9 @@ impl CompiledQuery {
                 Chip::Modified(age) => {
                     predicates.push(Predicate::ModifiedSince(now.saturating_sub(age.seconds())));
                 }
+                Chip::Opened(age) => {
+                    predicates.push(Predicate::OpenedSince(now.saturating_sub(age.seconds())));
+                }
                 // Extra folders change what is scanned, not what matches.
                 Chip::In(_) => {}
             }
@@ -312,6 +317,11 @@ impl CompiledQuery {
                 meta.entry_type == EntryType::File && cmp.holds(meta.size, *bytes)
             }
             Predicate::ModifiedSince(since) => u64::from(*meta.modified_at) >= *since,
+            Predicate::OpenedSince(since) => {
+                let record = crate::app::open_history::of_entry(&listing.entry(index));
+                u64::from(*crate::app::open_history::last_opened(record, meta.accessed_at))
+                    >= *since
+            }
         })
     }
 }
@@ -381,6 +391,21 @@ mod tests {
         // Test entries have no size.
         assert_eq!(matching(&listing, &none), Vec::<String>::new());
         assert!(CompiledQuery::new(Some(&Search::default())).is_none());
+    }
+
+    #[test]
+    fn opened_filter_uses_the_open_history() {
+        let entries: Vec<DirEntry> = ["seen.txt", "unseen.txt"]
+            .iter()
+            .map(|name| DirEntry::test_new(&format!("/opened_filter/{name}")))
+            .collect();
+        let listing = Listing::from_entries(&entries);
+        crate::app::open_history::record(std::path::Path::new("/opened_filter/seen.txt"));
+        let search = Search {
+            chips: query::parse("opened:today").chips,
+            ..Default::default()
+        };
+        assert_eq!(matching(&listing, &search), vec!["seen.txt"]);
     }
 
     #[test]

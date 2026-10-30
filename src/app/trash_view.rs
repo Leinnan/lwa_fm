@@ -152,7 +152,7 @@ impl App {
         }
         if let Some(payload) = response.dnd_release_payload::<crate::app::file_ops::DraggedPaths>()
         {
-            ActionToPerform::FileOp(FileOp::Trash(payload.0.clone())).schedule();
+            ActionToPerform::DropToTrash(payload.0.clone()).schedule();
         }
         response.context_menu(|ui| {
             if ui.button("Open in new tab").clicked() {

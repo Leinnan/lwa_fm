@@ -169,7 +169,7 @@ fn chip_icon(chip: &Chip, invalid: bool) -> Option<Icon> {
             None => Icon::Shapes,
         },
         Chip::Size { .. } => Icon::HardDrive,
-        Chip::Modified(_) => Icon::Calendar,
+        Chip::Modified(_) | Chip::Opened(_) => Icon::Calendar,
         Chip::In(_) => Icon::FolderSearch,
     })
 }
@@ -414,6 +414,7 @@ fn chip_editor(
         Chip::Kind(_) => "Type",
         Chip::Size { .. } => "Size",
         Chip::Modified(_) => "Modified",
+        Chip::Opened(_) => "Opened",
         Chip::In(_) => "Also search in folder",
     };
     ui.strong(title);
@@ -439,7 +440,7 @@ fn chip_editor(
             }
             false
         }
-        Chip::Modified(age) => {
+        Chip::Modified(age) | Chip::Opened(age) => {
             for value in Age::ALL {
                 ui.radio_value(age, value, value.label());
             }

@@ -45,6 +45,7 @@ impl App {
         }
         let palette = Palette::for_context(&ctx, ctx.global_style().visuals.dark_mode);
         egui::Panel::top("disk_access")
+            .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(palette.toolbar)

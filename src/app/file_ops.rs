@@ -4,7 +4,7 @@
 
 use super::App;
 use super::commands::{ActionToPerform, COMMANDS_QUEUE, ModalWindow, TabAction};
-use super::ui;
+use super::ui::{self, DialogButton};
 use super::undo::{UndoItem, UndoStack};
 use crate::app::dock::TabId;
 use crate::clipboard;
@@ -256,6 +256,14 @@ pub struct PendingDelete {
     pub empty_trash: bool,
 }
 
+/// Items dropped onto a folder, waiting for the user to confirm the move or copy.
+#[derive(Debug, Clone)]
+pub struct PendingDrop {
+    srcs: Vec<PathBuf>,
+    dst: PathBuf,
+    moving: bool,
+}
+
 /// Items to select once the tab's listing contains them.
 #[derive(Debug, Clone)]
 pub struct PendingSelect {
@@ -392,85 +400,91 @@ impl App {
             .filter(|(path, name, _)| display_name(path) != *name)
             .count();
         let problems = preview.iter().filter(|(_, _, p)| p.is_some()).count();
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::BatchRename)).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(320.0, 620.0));
-            ui.heading(format!("Rename {} items", state.paths.len()));
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut state.mode, BatchMode::Replace, "Find and replace");
-                ui.selectable_value(&mut state.mode, BatchMode::Pattern, "Name pattern");
-            });
-            match state.mode {
-                BatchMode::Replace => {
-                    egui::Grid::new("batch_replace")
-                        .num_columns(2)
-                        .show(ui, |ui| {
-                            ui.label("Find");
-                            let find = ui.text_edit_singleline(&mut state.find);
-                            if !state.focused {
-                                state.focused = true;
-                                find.request_focus();
-                            }
-                            ui.end_row();
-                            ui.label("Replace with");
-                            ui.text_edit_singleline(&mut state.replace);
-                            ui.end_row();
-                        });
-                }
-                BatchMode::Pattern => {
-                    egui::Grid::new("batch_pattern")
-                        .num_columns(2)
-                        .show(ui, |ui| {
-                            ui.label("Pattern");
-                            ui.text_edit_singleline(&mut state.pattern);
-                            ui.end_row();
-                            ui.label("Start at");
-                            ui.add(egui::DragValue::new(&mut state.start).range(0..=100_000));
-                            ui.end_row();
-                        });
-                    ui.weak("{name} is the old name, {ext} its extension, {n} a number.");
-                }
-            }
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .max_height(260.0)
-                .show(ui, |ui| {
-                    egui::Grid::new("batch_preview")
-                        .num_columns(3)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for (path, name, problem) in &preview {
-                                ui.label(display_name(path));
-                                ui.label("→");
-                                match problem {
-                                    Some(problem) => {
-                                        ui.colored_label(ui.visuals().error_fg_color, name)
-                                            .on_hover_text(*problem);
-                                    }
-                                    None => {
-                                        ui.strong(name);
-                                    }
+        let modal = egui::Modal::new(egui::Id::new(ModalWindow::BatchRename))
+            .frame(ui::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(320.0, 620.0));
+                ui.heading(format!("Rename {} items", state.paths.len()));
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut state.mode, BatchMode::Replace, "Find and replace");
+                    ui.selectable_value(&mut state.mode, BatchMode::Pattern, "Name pattern");
+                });
+                match state.mode {
+                    BatchMode::Replace => {
+                        egui::Grid::new("batch_replace")
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                ui.label("Find");
+                                let find = ui.text_edit_singleline(&mut state.find);
+                                if !state.focused {
+                                    state.focused = true;
+                                    find.request_focus();
                                 }
                                 ui.end_row();
-                            }
-                        });
-                });
-            ui.separator();
-            if problems > 0 {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    format!("{problems} names can't be used; hover them for details."),
-                );
-            }
-            ui.horizontal(|ui| {
-                confirm = ui
-                    .add_enabled(
-                        problems == 0 && changes > 0,
-                        egui::Button::new(format!("Rename {changes} items")),
-                    )
-                    .clicked();
-                cancel = ui.button("Cancel").clicked();
+                                ui.label("Replace with");
+                                ui.text_edit_singleline(&mut state.replace);
+                                ui.end_row();
+                            });
+                    }
+                    BatchMode::Pattern => {
+                        egui::Grid::new("batch_pattern")
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                ui.label("Pattern");
+                                ui.text_edit_singleline(&mut state.pattern);
+                                ui.end_row();
+                                ui.label("Start at");
+                                ui.add(egui::DragValue::new(&mut state.start).range(0..=100_000));
+                                ui.end_row();
+                            });
+                        ui.weak("{name} is the old name, {ext} its extension, {n} a number.");
+                    }
+                }
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("batch_preview")
+                            .num_columns(3)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for (path, name, problem) in &preview {
+                                    ui.label(display_name(path));
+                                    ui.label("→");
+                                    match problem {
+                                        Some(problem) => {
+                                            ui.colored_label(ui.visuals().error_fg_color, name)
+                                                .on_hover_text(*problem);
+                                        }
+                                        None => {
+                                            ui.strong(name);
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                ui.separator();
+                if problems > 0 {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!("{problems} names can't be used; hover them for details."),
+                    );
+                }
+                let rename = format!("Rename {changes} items");
+                match ui::dialog_buttons(
+                    ui,
+                    false,
+                    &[
+                        DialogButton::primary(&rename).enabled(problems == 0 && changes > 0),
+                        DialogButton::plain("Cancel"),
+                    ],
+                ) {
+                    Some(0) => confirm = true,
+                    Some(_) => cancel = true,
+                    None => {}
+                }
             });
-        });
         if confirm {
             let pairs: Vec<(PathBuf, PathBuf)> = preview
                 .into_iter()
@@ -546,6 +560,39 @@ impl App {
                 conflicts,
             });
             self.display_modal = Some(ModalWindow::Conflict);
+        }
+    }
+
+    /// Items dropped onto a folder: asks first, unless turned off in settings.
+    pub(crate) fn drop_transfer(
+        &mut self,
+        ctx: &Context,
+        srcs: Vec<PathBuf>,
+        dst: PathBuf,
+        moving: bool,
+    ) {
+        if self.settings.confirm_drop {
+            self.pending_drop = Some(PendingDrop { srcs, dst, moving });
+            self.display_modal = Some(ModalWindow::ConfirmDrop);
+        } else {
+            self.transfer(ctx, srcs, dst, moving);
+        }
+    }
+
+    /// Items dropped onto the Recycle Bin: asks first, like a drop on a folder.
+    pub(crate) fn drop_to_trash(&mut self, ctx: &Context, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        if self.settings.confirm_drop || self.settings.confirm_trash {
+            self.pending_delete = PendingDelete {
+                paths,
+                permanent: false,
+                ..PendingDelete::default()
+            };
+            self.display_modal = Some(ModalWindow::ConfirmDelete);
+        } else {
+            self.submit_file_op(ctx, FileOp::Trash(paths), AfterOp::Nothing);
         }
     }
 
@@ -645,6 +692,17 @@ impl App {
         });
         if self.file_ops.finished.len() > 30 {
             self.file_ops.finished.pop_front();
+        }
+        match &outcome.undo {
+            Some(crate::fileops::Undo::Rename { from, to }) => {
+                crate::app::open_history::rename(from, to);
+            }
+            Some(crate::fileops::Undo::Moves(pairs)) => {
+                for (now, was) in pairs {
+                    crate::app::open_history::rename(was, now);
+                }
+            }
+            _ => {}
         }
         if let Some(undo) = outcome.undo.clone() {
             self.file_ops
@@ -909,48 +967,50 @@ impl App {
         let mut cancel = false;
         let original = display_name(&state.path);
         let error = rename_error(&state.path, &original, &state.name);
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::Rename)).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 420.0));
-            ui.heading("Rename");
-            ui.label("New name");
-            let id = egui::Id::new("rename_field");
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut state.name)
-                    .id(id)
-                    .min_size(ui::text_edit_min_size(ui))
-                    .vertical_align(ui::text_edit_align(ui))
-                    .desired_width(ui.available_width()),
-            );
-            if !state.initialized {
-                state.initialized = true;
-                response.request_focus();
-                select_stem(
-                    ctx,
-                    id,
-                    &state.name,
-                    state.path.is_dir() && !crate::fs_enum::is_package(&state.path),
+        let modal = egui::Modal::new(egui::Id::new(ModalWindow::Rename))
+            .frame(ui::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 420.0));
+                ui.heading("Rename");
+                ui.label("New name");
+                let id = egui::Id::new("rename_field");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.name)
+                        .id(id)
+                        .min_size(ui::text_edit_min_size(ui))
+                        .vertical_align(ui::text_edit_align(ui))
+                        .desired_width(ui.available_width()),
                 );
-            }
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                commit = true;
-            }
-            if let Some(error) = error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let can_rename = error.is_none() && state.name != original;
-                if ui
-                    .add_enabled(can_rename, egui::Button::new("Rename"))
-                    .clicked()
-                {
+                if !state.initialized {
+                    state.initialized = true;
+                    response.request_focus();
+                    select_stem(
+                        ctx,
+                        id,
+                        &state.name,
+                        state.path.is_dir() && !crate::fs_enum::is_package(&state.path),
+                    );
+                }
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     commit = true;
                 }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
+                if let Some(error) = error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                let can_rename = error.is_none() && state.name != original;
+                match ui::dialog_buttons(
+                    ui,
+                    false,
+                    &[
+                        DialogButton::primary("Rename").enabled(can_rename),
+                        DialogButton::plain("Cancel"),
+                    ],
+                ) {
+                    Some(0) => commit = true,
+                    Some(_) => cancel = true,
+                    None => {}
                 }
             });
-        });
         let unchanged = state.name == original;
         if commit && (error.is_some() || unchanged) {
             // Enter on an unchanged name just closes; on an invalid one, stay.
@@ -976,50 +1036,53 @@ impl App {
         let paths = &self.pending_delete.paths;
         let permanent = self.pending_delete.permanent;
         let empty_trash = self.pending_delete.empty_trash;
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ConfirmDelete)).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 440.0));
-            let bin = crate::fileops::trash_bin::LABEL;
-            if empty_trash {
-                ui.heading(format!("Empty the {bin}?"));
-            } else if permanent {
-                ui.heading("Delete permanently?");
-            } else {
-                ui.heading(format!("Move to the {bin}?"));
-            }
-            let what = match paths.as_slice() {
-                [one] => format!("\"{}\"", display_name(one)),
-                many => format!("{} items", many.len()),
-            };
-            ui.label(if empty_trash {
-                format!("Everything in the {bin} will be deleted. This can't be undone.")
-            } else if permanent {
-                format!("{what} will be deleted. This can't be undone.")
-            } else {
-                format!("{what} will be moved to the {bin}. Ctrl+Z brings it back.")
-            });
-            if paths.len() > 1 {
-                egui::ScrollArea::vertical()
-                    .max_height(140.0)
-                    .show(ui, |ui| {
-                        for path in paths {
-                            ui.weak(display_name(path));
-                        }
-                    });
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let delete = ui.button("Delete");
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
+        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ConfirmDelete))
+            .frame(ui::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 440.0));
+                let bin = crate::fileops::trash_bin::LABEL;
+                if empty_trash {
+                    ui.heading(format!("Empty the {bin}?"));
+                } else if permanent {
+                    ui.heading("Delete permanently?");
+                } else {
+                    ui.heading(format!("Move to the {bin}?"));
+                }
+                let what = match paths.as_slice() {
+                    [one] => format!("\"{}\"", display_name(one)),
+                    many => format!("{} items", many.len()),
+                };
+                ui.label(if empty_trash {
+                    format!("Everything in the {bin} will be deleted. This can't be undone.")
+                } else if permanent {
+                    format!("{what} will be deleted. This can't be undone.")
+                } else {
+                    format!("{what} will be moved to the {bin}. Ctrl+Z brings it back.")
+                });
+                if paths.len() > 1 {
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            for path in paths {
+                                ui.weak(display_name(path));
+                            }
+                        });
                 }
                 // The destructive button is the default, as in Explorer.
-                if !delete.has_focus() && ui.memory(|m| m.focused().is_none()) {
-                    delete.request_focus();
+                let move_to_bin = format!("Move to the {bin}");
+                let action = if empty_trash {
+                    DialogButton::danger("Empty")
+                } else if permanent {
+                    DialogButton::danger("Delete")
+                } else {
+                    DialogButton::primary(&move_to_bin)
+                };
+                match ui::dialog_buttons(ui, true, &[action, DialogButton::plain("Cancel")]) {
+                    Some(0) => confirmed = true,
+                    Some(_) => cancel = true,
+                    None => {}
                 }
-                confirmed = delete.clicked()
-                    || (delete.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
             });
-        });
         if confirmed {
             let pending = std::mem::take(&mut self.pending_delete);
             let op = if pending.empty_trash {
@@ -1039,6 +1102,73 @@ impl App {
         }
     }
 
+    /// Draws the dialog for `ModalWindow::ConfirmDrop`: items were dropped
+    /// onto a folder, and are moved or copied only once confirmed.
+    pub(crate) fn confirm_drop_ui(&mut self, ctx: &Context) {
+        let Some(pending) = &self.pending_drop else {
+            ActionToPerform::CloseActiveModalWindow.schedule();
+            return;
+        };
+        let mut choice = None;
+        let mut cancel = false;
+        let (verb, other) = if pending.moving {
+            ("Move", "Copy")
+        } else {
+            ("Copy", "Move")
+        };
+        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ConfirmDrop))
+            .frame(ui::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 460.0));
+                let what = match pending.srcs.as_slice() {
+                    [one] => format!("\"{}\"", display_name(one)),
+                    many => format!("{} items", many.len()),
+                };
+                ui.heading(format!(
+                    "{verb} {what} to \"{}\"?",
+                    display_name(&pending.dst)
+                ));
+                ui.add_space(4.0);
+                ui.weak(pending.dst.display().to_string());
+                if pending.srcs.len() > 1 {
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            for path in &pending.srcs {
+                                ui.label(display_name(path));
+                            }
+                        });
+                }
+                match ui::dialog_buttons(
+                    ui,
+                    true,
+                    &[
+                        DialogButton::primary(verb),
+                        DialogButton::plain(other),
+                        DialogButton::plain("Cancel"),
+                    ],
+                ) {
+                    Some(0) => choice = Some(pending.moving),
+                    Some(1) => choice = Some(!pending.moving),
+                    Some(_) => cancel = true,
+                    None => {}
+                }
+            });
+        if let Some(moving) = choice
+            && let Some(pending) = self.pending_drop.take()
+        {
+            self.transfer(ctx, pending.srcs, pending.dst, moving);
+            // Name conflicts open their own dialog in place of this one.
+            if self.display_modal == Some(ModalWindow::ConfirmDrop) {
+                ActionToPerform::CloseActiveModalWindow.schedule();
+            }
+        } else if cancel || modal.should_close() || escape_pressed(ctx) {
+            self.pending_drop = None;
+            ActionToPerform::CloseActiveModalWindow.schedule();
+        }
+    }
+
     /// Draws the dialog for `ModalWindow::ChooseFolder`.
     pub(crate) fn choose_folder_ui(&mut self, ctx: &Context) {
         let Some(state) = &mut self.choose_folder else {
@@ -1050,42 +1180,47 @@ impl App {
         let target = PathBuf::from(state.input.trim());
         let valid = target.is_dir() && !crate::fs_enum::is_package(&target);
         let verb = if state.moving { "Move" } else { "Copy" };
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ChooseFolder)).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 520.0));
-            ui.heading(format!(
-                "{verb} {}",
-                match state.srcs.as_slice() {
-                    [one] => format!("\"{}\"", display_name(one)),
-                    many => format!("{} items", many.len()),
+        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ChooseFolder))
+            .frame(ui::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 520.0));
+                ui.heading(format!(
+                    "{verb} {}",
+                    match state.srcs.as_slice() {
+                        [one] => format!("\"{}\"", display_name(one)),
+                        many => format!("{} items", many.len()),
+                    }
+                ));
+                ui.label("Destination folder");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.input)
+                        .min_size(ui::text_edit_min_size(ui))
+                        .vertical_align(ui::text_edit_align(ui))
+                        .desired_width(ui.available_width()),
+                );
+                if !state.focused {
+                    state.focused = true;
+                    response.request_focus();
                 }
-            ));
-            ui.label("Destination folder");
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut state.input)
-                    .min_size(ui::text_edit_min_size(ui))
-                    .vertical_align(ui::text_edit_align(ui))
-                    .desired_width(ui.available_width()),
-            );
-            if !state.focused {
-                state.focused = true;
-                response.request_focus();
-            }
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                confirm = true;
-            }
-            if !valid {
-                ui.colored_label(ui.visuals().error_fg_color, "This folder doesn't exist.");
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.add_enabled(valid, egui::Button::new(verb)).clicked() {
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     confirm = true;
                 }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
+                if !valid {
+                    ui.colored_label(ui.visuals().error_fg_color, "This folder doesn't exist.");
+                }
+                match ui::dialog_buttons(
+                    ui,
+                    false,
+                    &[
+                        DialogButton::primary(verb).enabled(valid),
+                        DialogButton::plain("Cancel"),
+                    ],
+                ) {
+                    Some(0) => confirm = true,
+                    Some(_) => cancel = true,
+                    None => {}
                 }
             });
-        });
         if confirm && valid {
             if let Some(state) = self.choose_folder.take() {
                 self.transfer(ctx, state.srcs, target, state.moving);
@@ -1107,35 +1242,38 @@ impl App {
         };
         let mut choice = None;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::Conflict)).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 460.0));
-            ui.heading("Replace or skip items");
-            ui.label(match pending.conflicts.as_slice() {
-                [one] => format!(
-                    "The destination \"{}\" already has an item named \"{one}\".",
-                    display_name(&pending.dst)
-                ),
-                many => format!(
-                    "The destination \"{}\" already has {} items with the same names.",
-                    display_name(&pending.dst),
-                    many.len()
-                ),
+        let modal = egui::Modal::new(egui::Id::new(ModalWindow::Conflict))
+            .frame(ui::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 460.0));
+                ui.heading("Replace or skip items");
+                ui.label(match pending.conflicts.as_slice() {
+                    [one] => format!(
+                        "The destination \"{}\" already has an item named \"{one}\".",
+                        display_name(&pending.dst)
+                    ),
+                    many => format!(
+                        "The destination \"{}\" already has {} items with the same names.",
+                        display_name(&pending.dst),
+                        many.len()
+                    ),
+                });
+                ui.add_space(12.0);
+                let size = [ui.available_width(), ui::control_height(ui)];
+                for (label, policy) in [
+                    (
+                        "Replace the items in the destination",
+                        ConflictPolicy::Replace,
+                    ),
+                    ("Skip these items", ConflictPolicy::Skip),
+                    ("Keep both (rename the new items)", ConflictPolicy::KeepBoth),
+                ] {
+                    if ui.add_sized(size, egui::Button::new(label)).clicked() {
+                        choice = Some(policy);
+                    }
+                }
+                cancel = ui::dialog_buttons(ui, false, &[DialogButton::plain("Cancel")]).is_some();
             });
-            ui.add_space(8.0);
-            if ui.button("Replace the items in the destination").clicked() {
-                choice = Some(ConflictPolicy::Replace);
-            }
-            if ui.button("Skip these items").clicked() {
-                choice = Some(ConflictPolicy::Skip);
-            }
-            if ui.button("Keep both (rename the new items)").clicked() {
-                choice = Some(ConflictPolicy::KeepBoth);
-            }
-            ui.separator();
-            if ui.button("Cancel").clicked() {
-                cancel = true;
-            }
-        });
         if let Some(policy) = choice
             && let Some(pending) = self.pending_transfer.take()
         {
@@ -1186,7 +1324,7 @@ pub fn folder_drop_target(ui: &Ui, response: &egui::Response, dst: &Path) {
     );
     if let Some(payload) = response.dnd_release_payload::<DraggedPaths>() {
         let moving = drop_moves(&payload.0, dst, ui.input(|i| i.modifiers));
-        ActionToPerform::Transfer {
+        ActionToPerform::DropTransfer {
             srcs: payload.0.clone(),
             dst: dst.to_path_buf(),
             moving,
@@ -1213,6 +1351,9 @@ pub fn app_drop_target(ui: &Ui, response: &egui::Response, app: &Path) {
     );
     if let Some(payload) = response.dnd_release_payload::<DraggedPaths>() {
         crate::shell::open_files_with(app, &payload.0);
+        for path in payload.0.iter() {
+            crate::app::open_history::opened(path);
+        }
     }
 }
 
