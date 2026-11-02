@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// Where downloaded `FFmpeg` tools live.
 pub fn managed_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("io", "github.leinnan", "dirfleet")
-        .map(|dirs| dirs.data_local_dir().join("ffmpeg"))
+    crate::paths::project_dirs().map(|dirs| dirs.data_local_dir().join("ffmpeg"))
 }
 
 /// A downloaded tool (`ffmpeg` or `ffprobe`), if present.

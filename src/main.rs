@@ -18,6 +18,7 @@ mod locations;
 #[cfg(target_os = "macos")]
 mod macos_tools;
 mod native_drag;
+mod paths;
 mod plugins;
 #[cfg(feature = "profiling")]
 mod profiler;
@@ -73,6 +74,8 @@ fn parse_present_mode() -> wgpu::PresentMode {
 }
 
 fn main() -> anyhow::Result<()> {
+    paths::migrate_legacy_paths();
+
     #[cfg(feature = "profiling")]
     profiler::enable_profiling();
 
@@ -85,11 +88,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     let native_options = eframe::NativeOptions {
+        persistence_path: paths::settings_file(),
         viewport: egui::ViewportBuilder::default()
+            .with_app_id(consts::APP_ID)
             .with_inner_size([1100.0, 720.0])
             .with_icon(
-                eframe::icon_data::from_png_bytes(include_bytes!("../static/base_icon.png"))
-                    .unwrap_or_default(),
+                eframe::icon_data::from_png_bytes(consts::WINDOW_ICON_PNG).unwrap_or_default(),
             )
             .with_min_inner_size([640.0, 420.0]),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {

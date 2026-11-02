@@ -1,5 +1,4 @@
 use crate::data::files::{Listing, ListingChange};
-use directories::ProjectDirs;
 use foldhash::{HashMap, HashMapExt};
 use lru::LruCache;
 use std::{
@@ -85,7 +84,14 @@ static IN_MEMORY_CACHE: LazyLock<Mutex<DirectoryCache>> = LazyLock::new(|| {
 static CACHE_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub static SLED_DIRS: LazyLock<sled::Db> = LazyLock::new(|| {
-    let path = ProjectDirs::from("com", "Crayen", "Files2").expect("");
+    // Tests never touch the real database.
+    if cfg!(test) {
+        return sled::Config::new()
+            .temporary(true)
+            .open()
+            .expect("Failed to open a temporary directory cache");
+    }
+    let path = crate::paths::project_dirs().expect("");
     if !path.data_dir().exists() {
         std::fs::create_dir_all(path.data_dir()).expect("Failed to create data directory");
     }

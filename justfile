@@ -25,14 +25,17 @@ validate:
     cargo test
     cargo clippy -- -D warnings
 
-_gen_icon size postfix:
-    sips -z {{size}} {{size}} static/base_icon.png --out static/icon.iconset/icon_{{postfix}}.png
-    cp static/icon.iconset/icon_{{postfix}}.png static/resources/{{postfix}}.png
+_gen_icon source size postfix:
+    rsvg-convert -w {{size}} -h {{size}} {{source}} -o static/icon.iconset/icon_{{postfix}}.png
 
-[windows]
+# Build the window icon and Windows icon from the SVGs, without the tile's margin
 [group('setup')]
 make_win_icon:
-    convert static/base_icon.png -define icon:auto-resize=16,24,32,48,64,128,256,512 static/icon.ico
+    rsvg-convert static/icon.svg | magick - -trim +repage icon_full.png
+    rsvg-convert static/icon_small.svg | magick - -trim +repage icon_small.png
+    magick icon_full.png -resize 256x256 static/window_icon.png
+    magick \( icon_small.png -resize 16x16 \) \( icon_small.png -resize 24x24 \) \( icon_small.png -resize 32x32 \) \( icon_full.png -resize 48x48 \) \( icon_full.png -resize 64x64 \) \( icon_full.png -resize 128x128 \) \( icon_full.png -resize 256x256 \) static/icon.ico
+    rm icon_full.png icon_small.png
 
 # Build the icon for macOS app
 [group('setup')]
@@ -41,19 +44,16 @@ make_mac_icon:
     mkdir -p static/icon.iconset
     rm -rf static/resources
     mkdir -p static/resources
-    just _gen_icon 16 "16x16"
-    just _gen_icon 32 "32x32"
-    just _gen_icon 64 "64x64"
-    just _gen_icon 128 "128x128"
-    just _gen_icon 256 "256x256"
-    just _gen_icon 512 "512x512"
-    just _gen_icon 1024 "1024x1024"
-    just _gen_icon 32 "16x16@2x"
-    just _gen_icon 64 "32x32@2x"
-    just _gen_icon 128 "64x64@2x"
-    just _gen_icon 256 "128x128@2x"
-    just _gen_icon 512 "256x256@2x"
-    just _gen_icon 1024 "512x512@2x"
+    just _gen_icon static/icon_small.svg 16 "16x16"
+    just _gen_icon static/icon_small.svg 32 "16x16@2x"
+    just _gen_icon static/icon_small.svg 32 "32x32"
+    just _gen_icon static/icon.svg 64 "32x32@2x"
+    just _gen_icon static/icon.svg 128 "128x128"
+    just _gen_icon static/icon.svg 256 "128x128@2x"
+    just _gen_icon static/icon.svg 256 "256x256"
+    just _gen_icon static/icon.svg 512 "256x256@2x"
+    just _gen_icon static/icon.svg 512 "512x512"
+    just _gen_icon static/icon.svg 1024 "512x512@2x"
 
     iconutil -c icns static/icon.iconset
     rm -rf static/icon.iconset

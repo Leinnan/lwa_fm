@@ -1550,6 +1550,7 @@ impl App {
                 continue;
             };
             let mut builder = egui::ViewportBuilder::default()
+                .with_app_id(crate::consts::APP_ID)
                 .with_title(crate::consts::APP_NAME)
                 .with_icon(std::sync::Arc::clone(&WINDOW_ICON))
                 .with_min_inner_size([640.0, 420.0])
@@ -1574,8 +1575,7 @@ impl App {
 /// The app icon, for windows opened after the first.
 static WINDOW_ICON: LazyLock<std::sync::Arc<egui::IconData>> = LazyLock::new(|| {
     std::sync::Arc::new(
-        eframe::icon_data::from_png_bytes(include_bytes!("../../static/base_icon.png"))
-            .unwrap_or_default(),
+        eframe::icon_data::from_png_bytes(crate::consts::WINDOW_ICON_PNG).unwrap_or_default(),
     )
 });
 

@@ -1,6 +1,4 @@
 //! Disk storage with bounded reads, atomic publication, and recurring eviction.
-#[cfg(not(test))]
-use directories::ProjectDirs;
 use lru::LruCache;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -294,8 +292,8 @@ pub(super) fn thumbnail_cache_dir() -> PathBuf {
 
 #[cfg(not(test))]
 pub(super) fn thumbnail_cache_base_dir() -> PathBuf {
-    ProjectDirs::from("io", "github.leinnan", "dirfleet").map_or_else(
-        || std::env::temp_dir().join("dirfleet"),
+    crate::paths::project_dirs().map_or_else(
+        || std::env::temp_dir().join(crate::consts::APP_ID),
         |dirs| dirs.cache_dir().to_path_buf(),
     )
 }
