@@ -1,10 +1,10 @@
 # lwa_fm
 
-[![build](https://github.com/Leinnan/lwa_fm/actions/workflows/rust.yml/badge.svg)](https://github.com/Leinnan/lwa_fm/actions/workflows/rust.yml) [![license](https://img.shields.io/crates/l/bevy_button_released_plugin)](https://github.com/Leinnan/bevy_button_released_plugin#license)
+[![build](https://github.com/Leinnan/lwa_fm/actions/workflows/rust.yml/badge.svg)](https://github.com/Leinnan/lwa_fm/actions/workflows/rust.yml) [![license](https://img.shields.io/github/license/Leinnan/lwa_fm)](LICENSE)
 
 A (free) File Manager built with egui in Rust. Just a hobby, won't be big and ~~slow~~ professional like Finder or Windows Explorer.
 
-![LWA_FM screenshot](image.png)
+![DirFleet screenshot](image.png)
 
 ## Configuration
 
@@ -47,7 +47,7 @@ Please keep PRs (reasonably) small and scoped.
 ## Contributors
 
 <p align="center">
-<a href="https://github.com/bircni/Raytracing/graphs/contributors">
+<a href="https://github.com/Leinnan/lwa_fm/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=Leinnan/lwa_fm"/>
 </a>
 </p>
