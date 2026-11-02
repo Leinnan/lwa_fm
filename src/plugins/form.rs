@@ -548,7 +548,7 @@ impl FormState {
         let changed = match field.kind {
             FieldType::Text | FieldType::Path => {
                 let mut text = value.as_str().unwrap_or_default().to_owned();
-                let mut edit = egui::TextEdit::singleline(&mut text).desired_width(260.0);
+                let mut edit = crate::app::ui::text_field(ui, &mut text).desired_width(260.0);
                 if let Some(hint) = &field.placeholder {
                     edit = edit.hint_text(hint.as_str());
                 }
@@ -558,6 +558,7 @@ impl FormState {
             FieldType::Multiline => {
                 let mut text = value.as_str().unwrap_or_default().to_owned();
                 let mut edit = egui::TextEdit::multiline(&mut text)
+                    .margin(crate::app::ui::text_field_margin(ui))
                     .desired_width(260.0)
                     .desired_rows(4);
                 if let Some(hint) = &field.placeholder {
@@ -649,7 +650,7 @@ impl FormState {
                     .entry(id.clone())
                     .or_insert_with(|| format_time(seconds));
                 let response = ui.add(
-                    egui::TextEdit::singleline(text)
+                    crate::app::ui::text_field(ui, text)
                         .desired_width(120.0)
                         .hint_text("hh:mm:ss.mmm"),
                 );

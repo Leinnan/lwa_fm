@@ -44,6 +44,7 @@ pub mod undo;
 pub use search::{MatchMode, SavedSearch, SavedSearches, Search, SearchTermType};
 pub mod menus;
 pub mod open_history;
+mod path_editor;
 #[cfg(test)]
 mod perf_tests;
 mod plugins_ui;
@@ -746,7 +747,7 @@ impl App {
                                 .current_path
                                 .single_path()
                                 .filter(|p| Path::new(&edit.text_input) == p.as_path())
-                                .map(|p| DirectoryPathInfo::build(&p, false));
+                                .map(|p| DirectoryPathInfo::build(&p));
                         }
                         self.handle_action(
                             ctx,
@@ -1164,13 +1165,31 @@ impl App {
                 }
             }
             ActionToPerform::ToggleTopEdit => {
+                let favorites: Vec<(String, PathBuf)> = ctx
+                    .data_get_persisted::<Locations>()
+                    .unwrap_or_default()
+                    .locations
+                    .iter()
+                    .map(|location| {
+                        (
+                            location.name.to_string(),
+                            PathBuf::from(location.path.as_ref()),
+                        )
+                    })
+                    .collect();
+                let recent: &[PathBuf] = if self.settings.show_recent_folders {
+                    &self.recent_folders
+                } else {
+                    &[]
+                };
                 let Some(tab) = self.tabs.get_current_tab() else {
                     return;
                 };
                 if tab.path_edit.take().is_none()
                     && let Some(path) = tab.current_path.single_path()
                 {
-                    tab.path_edit = Some(DirectoryPathInfo::build(&path, false));
+                    tab.path_edit =
+                        Some(DirectoryPathInfo::build(&path).with_shortcuts(favorites, recent));
                     ctx.memory_mut(|memory| {
                         memory.request_focus(egui::Id::new(("path_editor", tab.id)));
                     });

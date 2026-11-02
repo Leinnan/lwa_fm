@@ -719,6 +719,275 @@ fn path_editor_takes_focus_and_compact_overlay_dismisses() {
     assert!(harness.state().settings.sidebar_visible);
 }
 
+/// A window with the path editor open and focused on `info`.
+fn path_editor_harness(
+    appearance: Appearance,
+    info: crate::app::directory_path_info::DirectoryPathInfo,
+) -> Harness<'static, App> {
+    let mut app = fixture(appearance, false, false);
+    let tab = app.tabs.get_current_tab().expect("tab");
+    tab.path_edit = Some(info);
+    let id = tab.id;
+    let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
+        .with_size(egui::vec2(900.0, 560.0))
+        .build_ui_state(draw, app);
+    harness.run_steps(4);
+    harness
+        .ctx
+        .memory_mut(|memory| memory.request_focus(egui::Id::new(("path_editor", id))));
+    harness.run_steps(4);
+    harness
+}
+
+/// What the editor asked for: where the tab should go, which new tab to open
+/// and whether it closes.
+fn take_path_actions() -> (Vec<PathBuf>, Vec<PathBuf>, bool) {
+    let (mut moved, mut opened, mut closed) = (Vec::new(), Vec::new(), false);
+    while let Some(action) = COMMANDS_QUEUE.pop() {
+        match action {
+            ActionToPerform::TabAction(_, commands::TabAction::ChangePaths(path)) => {
+                moved.push(path.single_path().expect("one path"));
+            }
+            ActionToPerform::NewTab(path) => opened.push(path),
+            ActionToPerform::ToggleTopEdit => closed = true,
+            _ => {}
+        }
+    }
+    (moved, opened, closed)
+}
+
+/// A real folder with `Alpha/Inner` and `Beta` in it.
+fn path_editor_folder(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("lwa_fm_path_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("Alpha").join("Inner")).expect("create folders");
+    std::fs::create_dir_all(root.join("Beta")).expect("create folders");
+    root
+}
+
+#[test]
+fn path_editor_enter_opens_the_typed_path_not_the_hovered_row() {
+    use crate::app::directory_path_info::DirectoryPathInfo;
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = path_editor_folder("hover");
+    let mut harness = path_editor_harness(Appearance::Dark, DirectoryPathInfo::build(&root));
+    while COMMANDS_QUEUE.pop().is_some() {}
+    harness.get_by_label("Beta").hover();
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(1);
+    let (moved, _, closed) = take_path_actions();
+    assert_eq!(moved, std::slice::from_ref(&root));
+    assert!(closed);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn path_editor_arrow_keys_choose_the_row_enter_opens() {
+    use crate::app::directory_path_info::DirectoryPathInfo;
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = path_editor_folder("arrows");
+    let mut harness = path_editor_harness(Appearance::Dark, DirectoryPathInfo::build(&root));
+    while COMMANDS_QUEUE.pop().is_some() {}
+    harness.key_press(egui::Key::ArrowDown);
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run_steps(1);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(1);
+    let (moved, _, closed) = take_path_actions();
+    assert_eq!(moved, [root.join("Beta")]);
+    assert!(closed);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn path_editor_tab_completes_keeps_focus_and_lists_the_next_level() {
+    use crate::app::directory_path_info::DirectoryPathInfo;
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = path_editor_folder("tab");
+    let mut harness = path_editor_harness(Appearance::Dark, DirectoryPathInfo::build(&root));
+    let ctx = harness.ctx.clone();
+    let focused = ctx.memory(egui::Memory::focused);
+    assert!(focused.is_some());
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(3);
+    assert_eq!(ctx.memory(egui::Memory::focused), focused);
+    let tab = harness.state_mut().tabs.get_current_tab().expect("tab");
+    let info = tab.path_edit.as_ref().expect("still editing");
+    let expected = format!(
+        "{}{}",
+        root.join("Alpha").display(),
+        std::path::MAIN_SEPARATOR
+    );
+    assert_eq!(info.text_input, expected);
+    assert!(harness.query_by_label("Inner").is_some());
+    assert!(harness.query_by_label("Beta").is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn path_editor_click_navigates_and_command_click_opens_a_tab() {
+    use crate::app::directory_path_info::DirectoryPathInfo;
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = path_editor_folder("click");
+    let mut harness = path_editor_harness(Appearance::Dark, DirectoryPathInfo::build(&root));
+    while COMMANDS_QUEUE.pop().is_some() {}
+    harness.get_by_label("Beta").click();
+    harness.run_steps(2);
+    let (moved, opened, closed) = take_path_actions();
+    assert_eq!(moved, [root.join("Beta")]);
+    assert_eq!(opened, Vec::<PathBuf>::new());
+    assert!(closed);
+
+    let mut harness = path_editor_harness(Appearance::Dark, DirectoryPathInfo::build(&root));
+    while COMMANDS_QUEUE.pop().is_some() {}
+    harness
+        .get_by_label("Beta")
+        .click_modifiers(egui::Modifiers::COMMAND);
+    harness.run_steps(2);
+    let (moved, opened, closed) = take_path_actions();
+    assert_eq!(moved, Vec::<PathBuf>::new());
+    assert_eq!(opened, [root.join("Beta")]);
+    assert!(closed);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn path_editor_closes_when_pressed_outside_and_stays_when_pressed_inside() {
+    use crate::app::directory_path_info::DirectoryPathInfo;
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = Path::new("/virtual/Projects/DirFleet");
+    let mut harness = path_editor_harness(
+        Appearance::Dark,
+        DirectoryPathInfo::with_children(root, &["Alpha", "Beta"]),
+    );
+    let press = |harness: &mut Harness<'static, App>, pos: egui::Pos2| {
+        harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(pos));
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        harness.input_mut().events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(2);
+    };
+    let id = harness.state_mut().tabs.get_current_tab().expect("tab").id;
+    let field = harness
+        .ctx
+        .read_response(egui::Id::new(("path_editor", id)))
+        .expect("path field")
+        .rect
+        .center();
+    press(&mut harness, field);
+    let tab = harness.state_mut().tabs.get_current_tab().expect("tab");
+    assert!(tab.path_edit.is_some());
+    press(&mut harness, egui::pos2(800.0, 500.0));
+    let tab = harness.state_mut().tabs.get_current_tab().expect("tab");
+    assert!(tab.path_edit.is_none());
+}
+
+#[test]
+fn path_editor_scrolls_the_chosen_row_into_view() {
+    use crate::app::directory_path_info::DirectoryPathInfo;
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let names: Vec<String> = (0..40).map(|i| format!("Folder {i:02}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let root = Path::new("/virtual/Projects/DirFleet");
+    let mut harness = path_editor_harness(
+        Appearance::Dark,
+        DirectoryPathInfo::with_children(root, &names),
+    );
+    // Only the rows in view are drawn.
+    assert!(harness.query_by_label("Folder 00").is_some());
+    assert!(harness.query_by_label("Folder 30").is_none());
+    for _ in 0..=30 {
+        harness.key_press(egui::Key::ArrowDown);
+    }
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Folder 30").is_some());
+    assert!(harness.query_by_label("Folder 00").is_none());
+}
+
+#[test]
+fn path_editor_dropdown_snapshots() {
+    use crate::app::directory_path_info::DirectoryPathInfo;
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut snapshots = egui_kittest::SnapshotResults::new();
+    let root = Path::new("/virtual/Projects/DirFleet");
+    let names = [
+        "24_Ambience_Sounds",
+        "A folder with a name long enough that it has to be cut off before it reaches the edge of the dropdown list",
+        "AltLogos",
+        "Asset_Files",
+        "Base Software",
+        "bevy-main",
+        "bevy-release-0.18.1",
+        "binaryen-version_129",
+        "blender-mcp-main",
+        "bushes",
+        "CaRpg_0.19",
+    ];
+    let typed = |text: &str| {
+        let mut info = DirectoryPathInfo::with_children(root, &names);
+        info.text_input = format!("{}/{text}", root.display());
+        info.mark_edited();
+        info
+    };
+    let mut harness = path_editor_harness(
+        Appearance::Dark,
+        DirectoryPathInfo::with_children(root, &names),
+    );
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run_steps(2);
+    snapshots.add(harness.try_snapshot("dirfleet_path_editor_dark"));
+    let mut harness = path_editor_harness(
+        Appearance::Light,
+        DirectoryPathInfo::with_children(root, &names),
+    );
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run_steps(2);
+    snapshots.add(harness.try_snapshot("dirfleet_path_editor_light"));
+    let mut harness = path_editor_harness(Appearance::Dark, typed("bev"));
+    snapshots.add(harness.try_snapshot("dirfleet_path_editor_filtered"));
+    let mut harness = path_editor_harness(Appearance::Dark, typed("zzz"));
+    snapshots.add(harness.try_snapshot("dirfleet_path_editor_empty"));
+    let mut shortcuts = typed("").with_shortcuts(
+        vec![(
+            "Invoices".to_owned(),
+            PathBuf::from("/virtual/Work/Invoices"),
+        )],
+        &[PathBuf::from("/virtual/Archive/2026/Invoices old")],
+    );
+    "inv".clone_into(&mut shortcuts.text_input);
+    let mut harness = path_editor_harness(Appearance::Dark, shortcuts);
+    snapshots.add(harness.try_snapshot("dirfleet_path_editor_shortcuts"));
+}
+
 #[test]
 fn keyboard_selects_and_renames_without_hovering_the_list() {
     let _guard = dock::tests::SNAPSHOT_LOCK

@@ -4,7 +4,7 @@ The interface uses shared dark and light surfaces, compact Lucide controls, blue
 
 ## Controls
 
-- Command/Ctrl+L: edit the current path with autocomplete.
+- Command/Ctrl+L: edit the current path. The dropdown lists the folders under what is typed: Up/Down choose, Tab completes and lists the next level, Enter or a click opens, and Command/Ctrl-click opens in a new tab. A leading `~` means Home. The path opens selected, so typing a bare name replaces it and searches favorite and recent folders. Pressing outside the field or its dropdown closes the editor.
 - Command/Ctrl+F: open or close the focused pane’s search.
 - Command/Ctrl+,: settings; the existing Command/Ctrl+P shortcut also works.
 - Alt/Option+Command/Ctrl+S: toggle the sidebar.

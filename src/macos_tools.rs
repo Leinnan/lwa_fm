@@ -4,9 +4,11 @@
 
 use crate::helper::DetachedSpawn;
 use anyhow::Context;
-use objc2::{MainThreadMarker, rc::Retained};
-use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
-use objc2_foundation::{NSArray, NSString, NSURL};
+use objc2::{AnyThread, MainThreadMarker, rc::Retained};
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSModalResponseOK, NSOpenPanel, NSWorkspace,
+};
+use objc2_foundation::{NSArray, NSDictionary, NSSize, NSString, NSURL};
 use std::{
     ffi::{CString, OsStr},
     os::unix::ffi::OsStrExt,
@@ -14,6 +16,31 @@ use std::{
     process::Command,
     ptr::NonNull,
 };
+
+/// The icon Finder shows for `path` at `size` points, as a PNG.
+pub fn icon_png(path: &str, size: f64) -> Option<Vec<u8>> {
+    objc2::rc::autoreleasepool(|_| {
+        let icon = NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(path));
+        let size = NSSize::new(size, size);
+        icon.setSize(size);
+        // SAFETY: a null rect and context ask for the image at its own size,
+        // and no hints are passed.
+        #[allow(unsafe_code)]
+        let image =
+            unsafe { icon.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }?;
+        let bitmap = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &image);
+        bitmap.setSize(size);
+        // SAFETY: the properties are empty, so none can have the wrong type.
+        #[allow(unsafe_code)]
+        let png = unsafe {
+            bitmap.representationUsingType_properties(
+                NSBitmapImageFileType::PNG,
+                &NSDictionary::new(),
+            )
+        }?;
+        Some(png.to_vec())
+    })
+}
 
 /// Selects `path` in a Finder window.
 pub fn display_in_explorer(path: impl AsRef<OsStr>) -> anyhow::Result<()> {
@@ -186,5 +213,22 @@ pub fn relaunch_after_exit() {
         .spawn_detached()
     {
         log::warn!("Failed to relaunch: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_lookup_handles_names_that_are_not_ascii() {
+        let folder = std::env::temp_dir().join(format!(
+            "lwa_fm_icon_Cherezi\u{161}ska kr\u{118}lestwo ksi\u{2022}\u{13a}ki_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&folder).expect("create folder");
+        let png = icon_png(&folder.to_string_lossy(), 48.0).expect("icon");
+        let _ = std::fs::remove_dir(&folder);
+        image::load_from_memory(&png).expect("a valid image");
     }
 }

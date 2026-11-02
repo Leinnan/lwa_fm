@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{
@@ -24,8 +23,7 @@ use crate::{
         open_history,
     },
     data::files::{
-        DirEntryMetaData, EntryType, Listing, ListingChange, is_hidden_entry, is_hidden_name,
-        is_system_clutter,
+        DirEntryMetaData, EntryType, Listing, ListingChange, is_hidden_entry, is_system_clutter,
     },
     helper::{DataHolder, canonical_form, normalize_path},
 };
@@ -850,12 +848,6 @@ pub fn filter_visible(
     chunks.concat()
 }
 
-pub fn get_directories(path: &Path, show_hidden: bool) -> BTreeSet<Cow<'static, str>> {
-    // One level: going deeper reads every child folder at once, which on
-    // macOS asks for Desktop, Documents and Downloads access together.
-    get_directories_recursive(path, show_hidden, 1)
-}
-
 /// Immediate sub-directories of `path` as `(name, path)`, sorted by path.
 /// Uses the directory listing's file type only (no per-entry `metadata`).
 pub fn child_directories(path: &Path, show_hidden: bool) -> Vec<(String, PathBuf)> {
@@ -879,46 +871,6 @@ pub fn child_directories(path: &Path, show_hidden: bool) -> Vec<(String, PathBuf
         .unwrap_or_default();
     children.sort_by(|a, b| a.1.cmp(&b.1));
     children
-}
-
-pub fn get_directories_recursive(
-    path: &Path,
-    show_hidden: bool,
-    depth: usize,
-) -> BTreeSet<Cow<'static, str>> {
-    walkdir::WalkDir::new(path)
-        .max_depth(depth)
-        .into_iter()
-        // Packages are single items: neither suggested nor walked into.
-        .filter_entry(|e| {
-            e.depth() == 0 || !e.file_type().is_dir() || !crate::fs_enum::is_package(e.path())
-        })
-        .filter_map(Result::ok)
-        .filter(|e| {
-            if !e.file_type().is_dir() {
-                return false;
-            }
-            if show_hidden {
-                return true;
-            }
-            if is_hidden_name(&e.file_name().to_string_lossy()) {
-                return false;
-            }
-            let mut current_path: Option<&Path> = e.path().parent();
-
-            while let Some(parent) = current_path {
-                if let Some(parent_name) = parent.file_name().and_then(|name| name.to_str())
-                    && is_hidden_name(parent_name)
-                    && !parent.eq(path)
-                {
-                    return false;
-                }
-                current_path = parent.parent(); // Move to the next parent
-            }
-            true
-        })
-        .map(|e| format!("{}", e.path().display()).into())
-        .collect::<BTreeSet<_>>()
 }
 
 #[cfg(test)]

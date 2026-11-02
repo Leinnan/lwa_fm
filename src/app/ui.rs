@@ -123,7 +123,8 @@ pub fn configure(ctx: &Context) {
             .insert(TextStyle::Monospace, FontId::monospace(13.0));
         style.spacing.item_spacing = Vec2::new(8.0, 4.0);
         style.spacing.button_padding = Vec2::new(8.0, 4.0);
-        style.spacing.interact_size.y = 26.0;
+        // The same as `control_height`, so buttons line up with text fields.
+        style.spacing.interact_size.y = 28.0;
         style.visuals.panel_fill = p.content;
         style.visuals.window_fill = p.sidebar;
         style.visuals.window_stroke = Stroke::new(1.0_f32, p.border);
@@ -719,18 +720,18 @@ pub fn control_height(ui: &Ui) -> f32 {
 pub fn toolbar_margin(ui: &Ui) -> egui::Margin {
     egui::Margin::symmetric(12, if is_fluent(ui.ctx()) { 6 } else { 8 })
 }
-pub fn text_edit_min_size(ui: &Ui) -> Vec2 {
-    if is_fluent(ui.ctx()) {
-        Vec2::new(0.0, 32.0)
-    } else {
-        Vec2::ZERO
-    }
+/// A one-line field as tall as the other controls, with its text centered.
+pub fn text_field<'t>(ui: &Ui, text: &'t mut dyn egui::TextBuffer) -> egui::TextEdit<'t> {
+    egui::TextEdit::singleline(text)
+        .min_size(Vec2::new(0.0, control_height(ui)))
+        .vertical_align(egui::Align::Center)
+        .margin(text_field_margin(ui))
 }
-pub fn text_edit_align(ui: &Ui) -> egui::Align {
+pub fn text_field_margin(ui: &Ui) -> egui::Margin {
     if is_fluent(ui.ctx()) {
-        egui::Align::Center
+        egui::Margin::symmetric(4, 2)
     } else {
-        egui::Align::Min
+        egui::Margin::symmetric(8, 2)
     }
 }
 #[cfg_attr(not(any(windows, test)), allow(clippy::missing_const_for_fn))]

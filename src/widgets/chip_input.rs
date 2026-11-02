@@ -387,7 +387,7 @@ fn parse_extensions(text: &str) -> Vec<String> {
 /// A text field that takes focus when the editor opens and reports Enter.
 fn editor_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &mut bool) -> (bool, bool) {
     let response = ui.add(
-        egui::TextEdit::singleline(text)
+        ui::text_field(ui, text)
             .hint_text(hint)
             .desired_width(f32::INFINITY),
     );

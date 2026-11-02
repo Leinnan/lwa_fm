@@ -353,7 +353,7 @@ pub fn settings_page(ui: &mut Ui, host: &mut PluginHost, settings: &mut Settings
                     Some(note.as_deref().unwrap_or("Shortcut")),
                     |ui| {
                         let response = ui.add(
-                            egui::TextEdit::singleline(&mut text)
+                            app_ui::text_field(ui, &mut text)
                                 .hint_text("None")
                                 .desired_width(120.0),
                         );

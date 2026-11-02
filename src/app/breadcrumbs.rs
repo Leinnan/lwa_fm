@@ -140,7 +140,7 @@ pub fn fit(widths: &[f32], compact_anchor: f32, ellipsis: f32, sep: f32, availab
     }
 }
 
-fn home_dir() -> Option<&'static str> {
+pub(super) fn home_dir() -> Option<&'static str> {
     static HOME: OnceLock<Option<String>> = OnceLock::new();
     HOME.get_or_init(|| {
         directories::UserDirs::new().map(|dirs| dirs.home_dir().to_string_lossy().into_owned())

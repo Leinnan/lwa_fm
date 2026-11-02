@@ -415,14 +415,14 @@ impl App {
                             .num_columns(2)
                             .show(ui, |ui| {
                                 ui.label("Find");
-                                let find = ui.text_edit_singleline(&mut state.find);
+                                let find = ui.add(ui::text_field(ui, &mut state.find));
                                 if !state.focused {
                                     state.focused = true;
                                     find.request_focus();
                                 }
                                 ui.end_row();
                                 ui.label("Replace with");
-                                ui.text_edit_singleline(&mut state.replace);
+                                ui.add(ui::text_field(ui, &mut state.replace));
                                 ui.end_row();
                             });
                     }
@@ -431,7 +431,7 @@ impl App {
                             .num_columns(2)
                             .show(ui, |ui| {
                                 ui.label("Pattern");
-                                ui.text_edit_singleline(&mut state.pattern);
+                                ui.add(ui::text_field(ui, &mut state.pattern));
                                 ui.end_row();
                                 ui.label("Start at");
                                 ui.add(egui::DragValue::new(&mut state.start).range(0..=100_000));
@@ -977,10 +977,8 @@ impl App {
                 ui.label("New name");
                 let id = egui::Id::new("rename_field");
                 let response = ui.add(
-                    egui::TextEdit::singleline(&mut state.name)
+                    ui::text_field(ui, &mut state.name)
                         .id(id)
-                        .min_size(ui::text_edit_min_size(ui))
-                        .vertical_align(ui::text_edit_align(ui))
                         .desired_width(ui.available_width()),
                 );
                 if !state.initialized {
@@ -1194,12 +1192,8 @@ impl App {
                     }
                 ));
                 ui.label("Destination folder");
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut state.input)
-                        .min_size(ui::text_edit_min_size(ui))
-                        .vertical_align(ui::text_edit_align(ui))
-                        .desired_width(ui.available_width()),
-                );
+                let response = ui
+                    .add(ui::text_field(ui, &mut state.input).desired_width(ui.available_width()));
                 if !state.focused {
                     state.focused = true;
                     response.request_focus();

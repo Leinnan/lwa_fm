@@ -155,9 +155,7 @@ impl CommandPalette {
             ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 460.0));
             ui.heading("Commands");
             let edit = ui.add(
-                egui::TextEdit::singleline(&mut self.query)
-                    .min_size(crate::app::ui::text_edit_min_size(ui))
-                    .vertical_align(crate::app::ui::text_edit_align(ui))
+                crate::app::ui::text_field(ui, &mut self.query)
                     .id(egui::Id::new("command_palette_query"))
                     .hint_text("Find a command…")
                     .desired_width(ui.available_width()),

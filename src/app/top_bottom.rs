@@ -4,7 +4,6 @@ use super::{
     ActionToPerform, App, DataSource, DisplayType, MatchMode, SavedSearches, Search,
     SearchTermType, Sort,
     commands::TabAction,
-    directory_path_info::DirectoryPathInfo,
     directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
     dock::TabData,
     ui::{self, Palette},
@@ -89,39 +88,6 @@ impl TopDisplayPath {
 }
 
 impl App {
-    pub(crate) fn top_display_editable(
-        index: TabId,
-        info: &mut DirectoryPathInfo,
-        current_path: &Path,
-        ui: &mut Ui,
-    ) {
-        use crate::widgets::autocomplete_text::AutoCompleteTextEdit;
-        let response = ui.add_sized(
-            [ui.available_width().max(32.0), ui::control_height(ui)],
-            AutoCompleteTextEdit::new(&mut info.text_input, &info.possible_options)
-                .max_suggestions(10)
-                .set_text_edit_properties(move |edit| {
-                    edit.id(egui::Id::new(("path_editor", index)))
-                })
-                .highlight_matches(true),
-        );
-        if !response.has_focus() && !ui.ctx().memory(|m| m.focused().is_some()) {
-            response.request_focus();
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            ActionToPerform::ToggleTopEdit.schedule();
-        } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let path = Path::new(&info.text_input);
-            if path.is_dir() {
-                if path != current_path {
-                    TabAction::ChangePaths(path.to_path_buf().into()).schedule_tab(index);
-                }
-                ActionToPerform::ToggleTopEdit.schedule();
-            } else {
-                crate::toast!(Warning, "Directory does not exist");
-            }
-        }
-    }
     /// The address bar in the Recycle Bin view: its name and "Empty".
     fn trash_display(tab: &TabData, ui: &mut Ui) {
         ui.label(ui::glyph(Icon::Trash2));
@@ -176,9 +142,12 @@ impl App {
         );
         path_ui.set_clip_rect(inner);
         let tab_id = tab.id;
+        let show_hidden = tab.show_hidden;
+        let mut close_editor = false;
         match (tab.current_path.single_path(), &mut tab.path_edit) {
             (Some(path), Some(info)) => {
-                Self::top_display_editable(tab_id, info, &path, &mut path_ui);
+                close_editor =
+                    super::path_editor::show(tab_id, info, &path, show_hidden, &mut path_ui);
             }
             _ if tab.current_path.is_trash() => Self::trash_display(tab, &mut path_ui),
             (Some(_), None) => {
@@ -189,6 +158,9 @@ impl App {
             (None, _) => {
                 path_ui.add(egui::Label::new(tab.current_path.get_name_from_path()).truncate());
             }
+        }
+        if close_editor {
+            tab.path_edit = None;
         }
     }
 

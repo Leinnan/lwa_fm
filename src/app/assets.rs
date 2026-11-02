@@ -2476,6 +2476,17 @@ fn load_system_icon_image(lookup_arg: &str, icon_size: IconSize) -> Option<Decod
             .lock()
             .expect("system icon extraction mutex poisoned");
         let px = icon_size.system_icon_px();
+        // `systemicons` cannot look up a macOS path that is not ASCII, and it
+        // goes through a temporary file.
+        #[cfg(target_os = "macos")]
+        let bytes = {
+            let Some(bytes) = crate::macos_tools::icon_png(lookup_arg, f64::from(px)) else {
+                log::warn!("icon_png failed for {lookup_arg:?}");
+                return None;
+            };
+            bytes
+        };
+        #[cfg(not(target_os = "macos"))]
         let bytes = match systemicons::get_icon(lookup_arg, px) {
             Ok(b) => b,
             Err(e) => {

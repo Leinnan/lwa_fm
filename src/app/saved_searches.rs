@@ -358,12 +358,8 @@ impl App {
                 "Save search"
             });
             ui.label("Name");
-            let name = ui.add(
-                egui::TextEdit::singleline(&mut editor.name)
-                    .min_size(ui::text_edit_min_size(ui))
-                    .vertical_align(ui::text_edit_align(ui))
-                    .desired_width(ui.available_width()),
-            );
+            let name =
+                ui.add(ui::text_field(ui, &mut editor.name).desired_width(ui.available_width()));
             if !editor.focused {
                 editor.focused = true;
                 name.request_focus();
@@ -443,7 +439,7 @@ impl App {
                 }
                 ui.horizontal(|ui| {
                     let input = ui.add(
-                        egui::TextEdit::singleline(&mut editor.new_folder)
+                        ui::text_field(ui, &mut editor.new_folder)
                             .hint_text("Folder path")
                             .desired_width((ui.available_width() - 40.0).max(120.0)),
                     );

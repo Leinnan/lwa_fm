@@ -473,12 +473,7 @@ impl ApplicationSettings {
                             self.terminal_path = program.display().to_string();
                         }
                     }
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.terminal_path)
-                            .min_size(ui::text_edit_min_size(ui))
-                            .vertical_align(ui::text_edit_align(ui))
-                            .desired_width(240.0),
-                    );
+                    ui.add(ui::text_field(ui, &mut self.terminal_path).desired_width(240.0));
                 },
             );
         });

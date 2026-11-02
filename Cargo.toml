@@ -79,7 +79,6 @@ embed_plist = "1.2"
 rayon = "1.10"
 bincode = "=2.0.1"
 egui_taffy = "=0.14.0"
-systemicons = { git = "https://github.com/Leinnan/systemicons.git" }
 lru = "0.16.3"
 glob = "0.3"
 # Unicode classes beyond case folding and \w/\d/\s (scripts, ages, ...) are rarely used in file names.
@@ -133,6 +132,9 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 libc = "0.2"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+systemicons = { git = "https://github.com/Leinnan/systemicons.git" }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
