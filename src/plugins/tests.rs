@@ -277,6 +277,54 @@ fn real_ffmpeg_converts_mov_to_mp4() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A video without audio has working inspector rows and a working form.
+/// Needs `FFmpeg` installed; run with `--ignored`.
+#[test]
+#[ignore = "needs FFmpeg"]
+fn real_ffmpeg_silent_video_in_inspector_and_form() {
+    let (ffmpeg, _) = crate::app::assets::ffmpeg_tool_paths();
+    assert!(ffmpeg.is_file(), "FFmpeg is not installed");
+    let dir = temp_dir("video_silent");
+    let source = dir.join("silent.mov");
+    let made = Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=320x240:rate=25",
+            "-c:v",
+            "libx264",
+        ])
+        .arg(&source)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(made.success());
+
+    let code = bundled("io.github.leinnan.video-convert");
+    let vm = vm(&code, None);
+    let context = CallContext {
+        dir: Some(dir.clone()),
+        targets: vec![target(&source)],
+        ..Default::default()
+    };
+    let rows: Vec<super::InspectorRow> =
+        mlua::LuaSerdeExt::from_value(&vm.lua, call(&vm, &["inspector"], &context)).expect("rows");
+    assert!(
+        rows.contains(&super::InspectorRow::Pair("Audio".into(), "None".into())),
+        "{rows:?}"
+    );
+    let form: super::form::Form = mlua::LuaSerdeExt::from_value(
+        &vm.lua,
+        call(&vm, &["actions", "convert", "form"], &context),
+    )
+    .expect("valid form");
+    form.check().expect("schema");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn snapshot_harness<'a>(
     size: egui::Vec2,
     mut draw: impl FnMut(&mut egui::Ui) + 'a,

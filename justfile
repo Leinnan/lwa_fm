@@ -1,3 +1,7 @@
+format_bundle := if os() == "windows" { "--format wxsmsi" } else { if os() == "linux" { "--format appimage" } else { "--format osx" } }
+bundle_dir := "target/release/bundle"
+installer_dir := "target/release/installer"
+
 # list available commands
 list:
 	just --list
@@ -5,12 +9,37 @@ list:
 # Install tools required for bundling
 [group('setup')]
 install-tools:
-    cargo install cargo-bundle
+    cargo install --git https://github.com/Leinnan/cargo-bundler --rev fd6436deb575361d7d2b467dcffd037bc9e3c936
 
 # Bundles project
 [group('build')]
 bundle:
-    cargo bundle --release
+    cargo bundler -r {{format_bundle}}
+
+# Old bundles would otherwise be picked up too, the AppImage name includes the version
+_clean_bundle:
+    rm -rf {{bundle_dir}} {{installer_dir}}
+
+# Build the installer and copy only it to target/release/installer
+[group('build')]
+[windows]
+installer: _clean_bundle bundle
+    mkdir -p {{installer_dir}}
+    cp {{bundle_dir}}/wsxmsi/*.msi {{installer_dir}}/
+
+# Build the installer and copy only it to target/release/installer
+[group('build')]
+[linux]
+installer: _clean_bundle bundle
+    mkdir -p {{installer_dir}}
+    cp {{bundle_dir}}/appimage/*.AppImage {{installer_dir}}/
+
+# Build the installer and copy only it to target/release/installer
+[group('build')]
+[macos]
+installer: _clean_bundle create_mac_installer
+    mkdir -p {{installer_dir}}
+    cp DirFleetInstaller.pkg {{installer_dir}}/
 
 # Clippy fixes and formatting
 [group('code')]

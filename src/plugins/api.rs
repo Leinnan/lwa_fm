@@ -893,6 +893,15 @@ static PROBES: LazyLock<Mutex<lru::LruCache<ProbeKey, MediaInfo>>> = LazyLock::n
     ))
 });
 
+/// `MediaInfo` for Lua, with unknown fields nil: the default `lua.null()` is
+/// truthy, so `info.audio_codec or "None"` would keep it.
+fn media_info_value(lua: &Lua, info: &MediaInfo) -> mlua::Result<Value> {
+    lua.to_value_with(
+        info,
+        mlua::SerializeOptions::new().serialize_none_to_null(false),
+    )
+}
+
 fn media_table(lua: &Lua) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set(
@@ -905,7 +914,7 @@ fn media_table(lua: &Lua) -> mlua::Result<Table> {
             };
             let key = (path.clone(), metadata.len(), unix_seconds(metadata.modified()));
             if let Some(info) = PROBES.lock().ok().and_then(|mut cache| cache.get(&key).cloned()) {
-                return Ok(MultiValue::from_vec(vec![lua.to_value(&info)?]));
+                return Ok(MultiValue::from_vec(vec![media_info_value(lua, &info)?]));
             }
             let cancel = std::sync::Arc::clone(&services(lua)?.cancel);
             let output = paused(lua, || {
@@ -935,7 +944,7 @@ fn media_table(lua: &Lua) -> mlua::Result<Table> {
                         if let Ok(mut cache) = PROBES.lock() {
                             cache.put(key, info.clone());
                         }
-                        Ok(MultiValue::from_vec(vec![lua.to_value(&info)?]))
+                        Ok(MultiValue::from_vec(vec![media_info_value(lua, &info)?]))
                     }
                     None => failure(lua, "FFprobe gave no readable answer"),
                 },
@@ -1234,5 +1243,33 @@ mod tests {
         assert_eq!(encoders, ["libx264", "aac"]);
         assert_eq!(progress_seconds("out_time_us=2500000"), Some(2.5));
         assert_eq!(progress_seconds("frame=10"), None);
+    }
+
+    #[test]
+    fn probe_leaves_unknown_fields_nil() {
+        let vm = vm("return {}", &[]);
+        let info = MediaInfo {
+            video_codec: Some("h264".into()),
+            has_video: true,
+            ..Default::default()
+        };
+        let info = media_info_value(&vm.lua, &info).expect("converts");
+        vm.lua.globals().set("info", info).expect("sets global");
+        let audio = run(&vm, "return info.audio_codec or 'None'").expect("runs");
+        assert_eq!(
+            audio
+                .as_string()
+                .and_then(|text| text.to_str().ok().map(|text| text.to_owned()))
+                .as_deref(),
+            Some("None")
+        );
+        let video = run(&vm, "return info.video_codec").expect("runs");
+        assert_eq!(
+            video
+                .as_string()
+                .and_then(|text| text.to_str().ok().map(|text| text.to_owned()))
+                .as_deref(),
+            Some("h264")
+        );
     }
 }

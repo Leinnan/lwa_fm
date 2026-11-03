@@ -166,7 +166,8 @@ unwrap_used = { level = "deny", priority = 10 }
 
 [package.metadata.bundle]
 name = "DirFleet"
-resources = ["static/resources/*"]
+# The MSI uses the first one, so the .ico has to stay first.
+icon = ["static/icon.ico", "static/window_icon.png"]
 identifier = "io.github.leinnan.dirfleet"
 osx_url_schemes = ["io.github.leinnan.dirfleet"]
 short_description = "File Manager"

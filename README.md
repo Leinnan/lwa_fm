@@ -6,6 +6,14 @@ A (free) File Manager built with egui in Rust. Just a hobby, won't be big and ~~
 
 ![DirFleet screenshot](image.png)
 
+## Download
+
+Installers are on the [Releases](https://github.com/Leinnan/lwa_fm/releases) page. The builds aren't signed with a publisher certificate, so each system asks for confirmation the first time:
+
+- **Windows** (`.msi`): SmartScreen shows a warning; choose "More info", then "Run anyway".
+- **macOS** (`.pkg`, Apple Silicon): the builds aren't notarized. After the first blocked attempt, choose "Open Anyway" in System Settings → Privacy & Security. Folder and Full Disk Access may have to be granted again after an update.
+- **Linux** (`.AppImage`, x86_64): run `chmod +x` on the file first. It needs GTK 3 installed on the system.
+
 ## Configuration
 
 There is no config file to edit by hand. Change settings in the app's Settings dialog, which has these pages: General, Appearance, Files & folders, Previews, Keyboard and Plugins. Each page except Keyboard and Plugins has a "Restore defaults" button.

@@ -1,0 +1,113 @@
+name: Release
+
+# Builds the installers for every platform, then publishes them as a GitHub release of the Cargo.toml version.
+# Nothing is published unless every build succeeds, so a release always has all the platforms.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        type: boolean
+        description: "Create the GitHub release (otherwise only build the installers)"
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: version
+        run: echo "version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "lwa_fm") | .version')" >> "$GITHUB_OUTPUT"
+      - name: Check Info.plist version
+        # The plist is written by hand, so it can get out of step with Cargo.toml.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          for key in CFBundleVersion CFBundleShortVersionString; do
+            if ! grep -A1 "<key>$key</key>" static/Info.plist | grep -qF "<string>$VERSION</string>"; then
+              echo "::error file=static/Info.plist::$key is not $VERSION"
+              exit 1
+            fi
+          done
+      - name: Check the release doesn't exist yet
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "::error file=Cargo.toml::Release v$VERSION already exists, bump the version first"
+            exit 1
+          fi
+
+  build:
+    needs: prepare
+    runs-on: ${{ matrix.system }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { system: windows-latest, suffix: windows-x64 }
+          - { system: macos-15, suffix: macos-arm64 }
+          # Older glibc, so the AppImage runs on more distros.
+          - { system: ubuntu-22.04, suffix: linux-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwayland-dev libxkbcommon-dev squashfs-tools
+      - name: Install macOS packages
+        # rsvg-convert, for the app icon.
+        if: runner.os == 'macOS'
+        run: brew install librsvg
+      - name: Install cargo-bundler
+        # The macOS installer is built without it.
+        if: runner.os != 'macOS'
+        run: just install-tools
+      - name: Build installer
+        env:
+          # Ad-hoc signature, CI doesn't have a signing certificate.
+          DIRFLEET_SIGN_IDENTITY: "-"
+        run: just installer
+      - name: Name installer
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          mkdir dist
+          for file in target/release/installer/*; do
+            mv "$file" "dist/DirFleet-$VERSION-$SUFFIX.${file##*.}"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.suffix }}
+          path: dist
+          if-no-files-found: error
+
+  publish:
+    if: inputs.publish
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: gh release create "v$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "DirFleet $VERSION" --generate-notes
