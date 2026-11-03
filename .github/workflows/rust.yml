@@ -34,6 +34,17 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: extractions/setup-just@v2
+      # GTK for systemicons, Vulkan (lavapipe) so the snapshot tests can render without a GPU.
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwayland-dev libxkbcommon-dev libvulkan1 mesa-vulkan-drivers
+      # There are no Linux baselines and lavapipe rasterizes differently, so re-record
+      # the snapshots instead of comparing them; every other assertion still fails the job.
+      - name: Re-record snapshots on Linux
+        if: runner.os == 'Linux'
+        run: echo "UPDATE_SNAPSHOTS=1" >> "$GITHUB_ENV"
       - name: Validate
         run: just validate
       - name: Validate profiling
