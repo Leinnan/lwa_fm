@@ -3,6 +3,7 @@ name = "lwa_fm"
 edition = "2024"
 rust-version = "1.95"
 version = "0.0.1"
+authors = ["Piotr Siuszko"]
 homepage = "https://github.com/Leinnan/lwa_fm"
 
 [profile.release]
