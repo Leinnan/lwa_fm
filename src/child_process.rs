@@ -283,6 +283,7 @@ pub fn run(command: &mut Command, options: Run<'_>) -> Result<Output, RunError> 
         }
     };
     // The child is done; anything it started is not needed any more.
+    #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
     drop(tree);
     let grace_until = Instant::now() + READER_GRACE;
     let _ = join_reader(output_reader, grace_until);

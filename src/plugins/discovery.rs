@@ -39,6 +39,57 @@ const BUNDLED: &[(&str, &[(&str, &str)])] = &[
             ),
         ],
     ),
+    (
+        "io.github.leinnan.heic-convert",
+        &[
+            (
+                "plugin.toml",
+                include_str!("../../plugins/io.github.leinnan.heic-convert/plugin.toml"),
+            ),
+            (
+                "main.lua",
+                include_str!("../../plugins/io.github.leinnan.heic-convert/main.lua"),
+            ),
+            (
+                "lib/args.lua",
+                include_str!("../../plugins/io.github.leinnan.heic-convert/lib/args.lua"),
+            ),
+        ],
+    ),
+    (
+        "io.github.leinnan.folder-usage",
+        &[
+            (
+                "plugin.toml",
+                include_str!("../../plugins/io.github.leinnan.folder-usage/plugin.toml"),
+            ),
+            (
+                "main.lua",
+                include_str!("../../plugins/io.github.leinnan.folder-usage/main.lua"),
+            ),
+            (
+                "lib/scan.lua",
+                include_str!("../../plugins/io.github.leinnan.folder-usage/lib/scan.lua"),
+            ),
+        ],
+    ),
+    (
+        "io.github.leinnan.rust-clean",
+        &[
+            (
+                "plugin.toml",
+                include_str!("../../plugins/io.github.leinnan.rust-clean/plugin.toml"),
+            ),
+            (
+                "main.lua",
+                include_str!("../../plugins/io.github.leinnan.rust-clean/main.lua"),
+            ),
+            (
+                "lib/cargo.lua",
+                include_str!("../../plugins/io.github.leinnan.rust-clean/lib/cargo.lua"),
+            ),
+        ],
+    ),
 ];
 
 /// The `LuaLS` definitions of the `dirfleet` API.

@@ -13,6 +13,7 @@ pub struct PreserveAccessTime {
 
 impl PreserveAccessTime {
     #[must_use]
+    #[cfg_attr(not(windows), allow(clippy::missing_const_for_fn))]
     pub fn new(path: &Path) -> Self {
         #[cfg(windows)]
         {

@@ -4,6 +4,7 @@
 use super::App;
 use super::command_palette::ValidAction;
 use super::commands::{ActionToPerform, ModalWindow, TabAction, TabTarget};
+use crate::plugins::host::Started;
 use crate::plugins::{AppRequest, CallContext, NotifyLevel, PluginMsg};
 use crate::toast;
 use std::borrow::Cow;
@@ -36,11 +37,13 @@ impl App {
         } else {
             context.tab = current.tab;
         }
-        if self
+        match self
             .plugins
             .start_action(action, context, &self.settings.plugins)
         {
-            self.display_modal = Some(ModalWindow::PluginForm);
+            Started::Nothing => {}
+            Started::Form => self.display_modal = Some(ModalWindow::PluginForm),
+            Started::Results => self.display_modal = Some(ModalWindow::PluginResults),
         }
     }
 
@@ -78,8 +81,17 @@ impl App {
                 ActionToPerform::SystemOpen(path.to_string_lossy().into_owned().into()).schedule();
             }
             AppRequest::OpenTerminal(dir) => ActionToPerform::OpenInTerminal(dir).schedule(),
-            AppRequest::FileOp(op) => ActionToPerform::FileOp(op).schedule(),
+            AppRequest::FileOp(op) => {
+                self.plugins.file_op_requested();
+                ActionToPerform::FileOp(op).schedule();
+            }
             AppRequest::Clipboard(text) => ctx.copy_text(text),
+            AppRequest::ShowTable { plugin, job, spec } => {
+                self.plugins.apply_table(&plugin, job, spec);
+            }
+            AppRequest::UpdateTableRow { plugin, update } => {
+                self.plugins.apply_row(&plugin, update);
+            }
             AppRequest::Notify { level, text } => match level {
                 NotifyLevel::Info => {
                     toast!(Info, "{text}");

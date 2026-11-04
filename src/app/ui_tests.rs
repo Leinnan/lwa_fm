@@ -610,15 +610,15 @@ fn command_palette_supports_keyboard_choice() {
     harness.run_steps(2);
     harness.key_press(egui::Key::Enter);
     harness.run_steps(2);
+    assert!(matches!(
+        COMMANDS_QUEUE.pop(),
+        Some(ActionToPerform::CloseActiveModalWindow)
+    ));
     let action = COMMANDS_QUEUE.pop();
     assert!(
         matches!(action, Some(ActionToPerform::ToggleInspector)),
         "received {action:?}"
     );
-    assert!(matches!(
-        COMMANDS_QUEUE.pop(),
-        Some(ActionToPerform::CloseActiveModalWindow)
-    ));
     snapshot.expect("command palette snapshot");
 }
 
@@ -2021,6 +2021,7 @@ fn dropping_items_on_a_folder_asks_first() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     while COMMANDS_QUEUE.pop().is_some() {}
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut snapshots = egui_kittest::SnapshotResults::new();
     let mut harness = Harness::builder()
         .with_options(ui::snapshot_options())
@@ -2073,4 +2074,1414 @@ fn dropping_items_on_a_folder_asks_first() {
     snapshots.add(harness.try_snapshot("fluent_confirm_delete"));
     while COMMANDS_QUEUE.pop().is_some() {}
     snapshots.unwrap();
+}
+
+/// Runs frames until `done`, reporting what the plugins were doing if never.
+#[cfg(unix)]
+fn wait(
+    harness: &mut Harness<'_, App>,
+    what: &str,
+    mut done: impl FnMut(&Harness<'_, App>) -> bool,
+) {
+    for _ in 0..1500 {
+        harness.step();
+        if done(harness) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let plugins = &harness.state().plugins;
+    let jobs: Vec<_> = plugins
+        .finished
+        .iter()
+        .map(|job| (&job.summary, &job.failures))
+        .collect();
+    panic!(
+        "timed out waiting for {what}; finished jobs: {jobs:?}, panels: {}, form open: {}, running: {}",
+        plugins.panels.len(),
+        plugins.form.is_some(),
+        plugins.jobs.len(),
+    );
+}
+
+/// A harness running the real app loop: queue, plugin workers and modals.
+#[cfg(unix)]
+fn plugin_harness(app: App) -> Harness<'static, App> {
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        // Fast enough for two clicks to make a double-click.
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(
+            |root, app: &mut App| {
+                let ctx = root.ctx().clone();
+                let id = egui::Id::new("fonts_set");
+                if !ctx.data(|data| data.get_temp::<bool>(id).unwrap_or(false)) {
+                    let mut fonts = egui::FontDefinitions::default();
+                    ui::register_icons(&mut fonts);
+                    ctx.set_fonts(fonts);
+                    ui::configure_test(&ctx, false);
+                    ctx.data_mut(|data| data.insert_temp(id, true));
+                    return;
+                }
+                app.drain_command_queue(&ctx);
+                app.poll_plugins();
+                // What the app itself draws, so a dialog only appears when
+                // the app would really show it.
+                app.render_window(root);
+                ctx.request_repaint();
+            },
+            app,
+        )
+}
+
+/// The app in `dir` with the bundled plugins, once they are running.
+#[cfg(unix)]
+fn running_plugins(dir: &Path) -> Harness<'static, App> {
+    let mut tab = TabData::from_path(dir);
+    tab.load = crate::app::dock::LoadState::Idle;
+    tab.current_path = CurrentPath::One(dir.to_path_buf());
+    let mut tabs = Workspace::from_tabs(vec![tab]);
+    tabs.focused = true;
+    let mut harness = plugin_harness(App {
+        tabs,
+        plugins: crate::plugins::PluginHost::bundled_only(),
+        ..Default::default()
+    });
+    wait(&mut harness, "plugins to start", |harness| {
+        harness
+            .state()
+            .plugins
+            .plugins
+            .iter()
+            .all(|plugin| matches!(plugin.status, crate::plugins::host::Status::Running))
+    });
+    harness
+}
+
+/// Actions from the Commands window that open a form must leave it open,
+/// both a form from the manifest and one Lua builds.
+#[cfg(unix)]
+#[test]
+fn commands_window_opens_plugin_forms() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let dir = std::env::temp_dir()
+        .canonicalize()
+        .expect("temp dir")
+        .join(format!("dirfleet_plugins_palette_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("creates");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"palette\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("writes");
+    let mut harness = running_plugins(&dir);
+
+    for (action, label) in [
+        (
+            "io.github.leinnan.folder-usage.scan",
+            "Rust projects anywhere below",
+        ),
+        ("io.github.leinnan.rust-clean.clear_target", "Close"),
+    ] {
+        let app = harness.state_mut();
+        app.command_palette.commands = vec![command_palette::ValidAction {
+            action: ActionToPerform::RunPluginAction {
+                action: action.to_owned(),
+                context: crate::plugins::CallContext::default(),
+            },
+            name: action.to_owned().into(),
+            shortcut: None,
+        }];
+        app.display_modal = Some(ModalWindow::Commands);
+        for _ in 0..6 {
+            harness.step();
+        }
+        harness.key_press(egui::Key::Enter);
+        wait(&mut harness, action, |harness| {
+            harness.state().display_modal.is_some()
+                && harness.state().display_modal != Some(ModalWindow::Commands)
+                && harness.query_by_label(label).is_some()
+        });
+        harness.state_mut().plugins.form = None;
+        harness.state_mut().display_modal = None;
+        for _ in 0..3 {
+            harness.step();
+        }
+    }
+    finish_plugins(harness);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A plugin whose job shows its option and folder, then runs until the file
+/// `finish` exists in that folder, so a test decides how long it takes.
+#[cfg(unix)]
+fn slow_plugin() -> std::sync::Arc<crate::plugins::PluginCode> {
+    let manifest = r#"
+api_version = 1
+id = "test.slow"
+name = "Slow"
+version = "1.0.0"
+author = "Test"
+permissions = ["fs.read"]
+
+[activation]
+always = true
+
+[[action]]
+id = "scan"
+title = "Slow…"
+targets = { kind = "current_dir" }
+form = "static"
+mode = "job"
+results = true
+
+[[action.field]]
+id = "mode"
+type = "radio"
+options = [["first", "First option"], ["second", "Second option"]]
+default = "first"
+
+[[action]]
+id = "refresh"
+title = "Refresh"
+palette = false
+targets = { kind = "current_dir" }
+mode = "job"
+
+[[action]]
+id = "confirm"
+title = "Confirm"
+palette = false
+targets = { kind = "current_dir" }
+form = "static"
+mode = "job"
+
+[[action.field]]
+id = "sure"
+type = "bool"
+label = "Sure about it"
+"#;
+    let code = r#"
+local M = { actions = {} }
+local function show(ctx, values, stage, progress)
+  dirfleet.app.show_table({
+    title = "Slow",
+    progress = progress,
+    refresh_action = "refresh",
+    columns = { { id = "name", label = "Name" }, { id = "size", label = "Bytes", kind = "size" } },
+    rows = {
+      { path = ctx.dir, cells = { name = values.mode .. " " .. stage .. " " .. dirfleet.path.name(ctx.dir), size = 2147483648 },
+        menu = { { label = "Do it…", action = "test.slow.confirm", danger = true, busy = "Doing it…", title = "Do it?" } } },
+      { path = dirfleet.path.join(ctx.dir, "sub"), cells = { name = "other", size = 1048576 },
+        menu = { { label = "Do it…", action = "test.slow.confirm", danger = true, busy = "Doing it…" } } },
+    },
+    sort = { column = "size", descending = true },
+  })
+end
+M.actions.scan = {
+  run = function(ctx, values)
+    show(ctx, values, "partial", "Scanning 1 of 2")
+    while not dirfleet.fs.exists(dirfleet.path.join(ctx.dir, "finish")) do
+      if dirfleet.job.cancelled() then
+        return { skipped = true }
+      end
+    end
+    show(ctx, values, "done")
+  end,
+}
+M.actions.confirm = {
+  run = function(ctx)
+    while not dirfleet.fs.exists(dirfleet.path.join(ctx.dir, "release")) do
+      if dirfleet.job.cancelled() then
+        return { skipped = true }
+      end
+    end
+    if dirfleet.fs.exists(dirfleet.path.join(ctx.dir, "fail")) then
+      return { error = "boom" }
+    end
+  end,
+}
+M.actions.refresh = {
+  run = function(ctx)
+    dirfleet.app.update_table_row({ path = ctx.dir, cells = { size = 3072 } })
+  end,
+}
+return M
+"#;
+    std::sync::Arc::new(crate::plugins::PluginCode {
+        manifest: crate::plugins::manifest::parse(manifest).expect("manifest"),
+        files: std::collections::BTreeMap::from([("main.lua".to_owned(), code.to_owned())]),
+        source: crate::plugins::Source::Bundled,
+    })
+}
+
+/// The app with the slow plugin running, and two folders to run it on.
+#[cfg(unix)]
+fn slow_harness(name: &str) -> (Harness<'static, App>, PathBuf, PathBuf, PathBuf) {
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .expect("temp dir")
+        .join(format!("dirfleet_plugins_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (one, two) = (base.join("one"), base.join("two"));
+    std::fs::create_dir_all(&one).expect("creates");
+    std::fs::create_dir_all(&two).expect("creates");
+    let mut tab = TabData::from_path(&one);
+    tab.load = crate::app::dock::LoadState::Idle;
+    tab.current_path = CurrentPath::One(one.clone());
+    let mut tabs = Workspace::from_tabs(vec![tab]);
+    tabs.focused = true;
+    let mut harness = plugin_harness(App {
+        tabs,
+        plugins: crate::plugins::PluginHost::with_plugins(vec![slow_plugin()]),
+        ..Default::default()
+    });
+    wait(&mut harness, "the plugin to start", |harness| {
+        matches!(
+            harness.state().plugins.plugins[0].status,
+            crate::plugins::host::Status::Running
+        )
+    });
+    (harness, base, one, two)
+}
+
+#[cfg(unix)]
+fn open_slow(harness: &mut Harness<'_, App>, dir: &Path) {
+    harness.state_mut().run_plugin_action(
+        "test.slow.scan",
+        crate::plugins::CallContext {
+            dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        },
+    );
+    settle(harness);
+}
+
+/// Ends a test with running plugins: nothing they still had going may reach
+/// the next test, since the command queue is shared.
+#[cfg(unix)]
+fn finish_plugins(mut harness: Harness<'static, App>) {
+    let jobs: Vec<u64> = harness
+        .state()
+        .plugins
+        .jobs
+        .iter()
+        .map(|job| job.id)
+        .collect();
+    for job in jobs {
+        harness.state_mut().plugins.cancel_job(job);
+    }
+    jobs_end(&mut harness);
+    drop(harness);
+    while COMMANDS_QUEUE.pop().is_some() {}
+}
+
+/// Clicks a status bar item once it has stopped moving: closing a dialog
+/// refreshes the file list, and "Loading…" pushes the items along meanwhile.
+#[cfg(unix)]
+fn click_status_item(harness: &mut Harness<'_, App>, label: &str) {
+    wait(harness, "the file list to settle", |harness| {
+        harness
+            .state()
+            .tabs
+            .tabs()
+            .all(|tab| !tab.load.is_loading())
+    });
+    settle(harness);
+    harness.get_by_label_contains(label).click();
+    settle(harness);
+}
+
+/// Lets a dialog finish moving during its first frames, or anything queued land.
+#[cfg(unix)]
+fn settle(harness: &mut Harness<'_, App>) {
+    for _ in 0..6 {
+        harness.step();
+    }
+}
+
+#[cfg(unix)]
+fn click_run(harness: &mut Harness<'_, App>, button: &str, row: &str) {
+    harness.get_by_label(button).click();
+    wait(harness, row, |harness| {
+        harness.query_by_label_contains(row).is_some()
+    });
+    settle(harness);
+}
+
+#[cfg(unix)]
+fn jobs_end(harness: &mut Harness<'_, App>) {
+    wait(harness, "the job to end", |harness| {
+        harness.state().plugins.jobs.is_empty()
+    });
+    settle(harness);
+}
+
+/// Results show as they arrive, in the dialog with the options, with no other
+/// window needed. Hiding leaves the job running and the status bar comes back.
+#[cfg(unix)]
+#[test]
+fn results_dialog_runs_in_the_background() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let (mut harness, base, one, _) = slow_harness("background");
+
+    open_slow(&mut harness, &one);
+    assert_eq!(
+        harness.state().display_modal,
+        Some(ModalWindow::PluginResults)
+    );
+    assert!(harness.query_by_label("First option").is_some());
+    assert!(
+        harness.query_by_label("Stop").is_none(),
+        "nothing to stop yet"
+    );
+    click_run(&mut harness, "Run", "first partial one");
+    assert!(harness.query_by_label("Restart").is_some());
+    assert!(harness.query_by_label("Scanning 1 of 2").is_some());
+    harness.get_by_label("Bytes").click();
+    settle(&mut harness);
+    let sorted = harness.state().plugins.panels[0]
+        .table
+        .as_ref()
+        .and_then(crate::plugins::table::TableView::sorted_by);
+
+    // Esc hides, and the job goes on.
+    harness.key_press(egui::Key::Escape);
+    settle(&mut harness);
+    assert_eq!(harness.state().display_modal, None);
+    assert_eq!(harness.state().plugins.jobs.len(), 1, "still running");
+    assert!(
+        harness
+            .query_by_label_contains("first partial one")
+            .is_none()
+    );
+
+    // The status bar brings it back as it was.
+    click_status_item(&mut harness, "Slow: Scanning 1 of 2");
+    assert_eq!(
+        harness.state().display_modal,
+        Some(ModalWindow::PluginResults)
+    );
+    assert!(
+        harness
+            .query_by_label_contains("first partial one")
+            .is_some()
+    );
+    let table = harness.state().plugins.panels[0].table.as_ref();
+    assert_eq!(
+        table.and_then(crate::plugins::table::TableView::sorted_by),
+        sorted
+    );
+
+    // Hide with the button; it ends while hidden and doesn't pop up.
+    harness.get_by_label("Run in background").click();
+    settle(&mut harness);
+    assert_eq!(harness.state().display_modal, None);
+    std::fs::write(one.join("finish"), "").expect("writes");
+    jobs_end(&mut harness);
+    assert_eq!(harness.state().display_modal, None, "no pop-up");
+
+    click_status_item(&mut harness, "Slow: results");
+    assert!(harness.query_by_label_contains("first done one").is_some());
+    assert!(harness.query_by_label_contains("Updated").is_some());
+    assert!(harness.query_by_label("Run").is_some());
+
+    // Opening a row hides the dialog, and the way back stays.
+    // (Clicks soon after the last one would count as a triple click.)
+    for _ in 0..60 {
+        harness.step();
+    }
+    let row = harness.get_by_label_contains("first done one");
+    row.click();
+    harness.step();
+    let row = harness.get_by_label_contains("first done one");
+    row.click();
+    settle(&mut harness);
+    assert_eq!(harness.state().display_modal, None);
+    assert!(
+        harness
+            .state()
+            .tabs
+            .tabs()
+            .filter(|tab| tab.current_path.single_path() == Some(one.clone()))
+            .count()
+            >= 2,
+        "opened in a new tab"
+    );
+    assert!(harness.query_by_label("Slow: results").is_some());
+
+    // The action brings it back too, and the status bar's × forgets it.
+    open_slow(&mut harness, &one);
+    assert!(harness.query_by_label_contains("first done one").is_some());
+    harness.key_press(egui::Key::Escape);
+    settle(&mut harness);
+    click_status_item(&mut harness, "Discard results");
+    assert!(harness.state().plugins.panels.is_empty());
+    assert!(harness.query_by_label("Slow: results").is_none());
+
+    finish_plugins(harness);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Stop keeps what was found; Restart uses the current options, and the run it
+/// replaced can't change the results any more.
+#[cfg(unix)]
+#[test]
+fn results_dialog_stops_and_restarts() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let (mut harness, base, one, two) = slow_harness("restart");
+
+    open_slow(&mut harness, &one);
+    click_run(&mut harness, "Run", "first partial one");
+
+    // While it runs, opening it from elsewhere stays on this run.
+    harness.key_press(egui::Key::Escape);
+    settle(&mut harness);
+    open_slow(&mut harness, &two);
+    assert_eq!(
+        harness.state().plugins.panels[0].context.dir,
+        Some(one.clone()),
+        "a run in progress keeps its folder"
+    );
+    let old_job = harness.state().plugins.panels[0].job;
+
+    // Restart with the other option.
+    harness.get_by_label("Second option").click();
+    settle(&mut harness);
+    click_run(&mut harness, "Restart", "second partial one");
+    assert_ne!(harness.state().plugins.panels[0].job, old_job);
+    assert!(harness.query_by_label_contains("first partial").is_none());
+    assert_eq!(harness.state().plugins.jobs.len(), 1);
+
+    // A late update from the replaced run is dropped.
+    let ctx = harness.ctx.clone();
+    let spec = serde_json::from_value(serde_json::json!({
+        "title": "Old",
+        "columns": [{ "id": "name", "label": "Name" }],
+        "rows": [{ "cells": { "name": "stale row" } }],
+    }))
+    .expect("spec");
+    harness.state_mut().handle_plugin_message(
+        &ctx,
+        crate::plugins::PluginMsg::App(crate::plugins::AppRequest::ShowTable {
+            plugin: "test.slow".into(),
+            job: old_job,
+            spec,
+        }),
+    );
+    settle(&mut harness);
+    assert!(harness.query_by_label_contains("stale row").is_none());
+    assert!(
+        harness
+            .query_by_label_contains("second partial one")
+            .is_some()
+    );
+
+    // Stop keeps the rows and says so.
+    harness.get_by_label("Stop").click();
+    jobs_end(&mut harness);
+    assert!(
+        harness
+            .query_by_label_contains("second partial one")
+            .is_some()
+    );
+    assert!(harness.query_by_label("Stopped early").is_some());
+    assert!(harness.query_by_label("Run").is_some());
+    assert_eq!(
+        harness.state().display_modal,
+        Some(ModalWindow::PluginResults)
+    );
+
+    // Idle now: from another folder the old results stay, labelled, until Run.
+    harness.key_press(egui::Key::Escape);
+    settle(&mut harness);
+    open_slow(&mut harness, &two);
+    assert!(
+        harness
+            .query_by_label_contains("second partial one")
+            .is_some()
+    );
+    let note = format!("Showing {}. Run scans {}.", one.display(), two.display());
+    assert!(harness.query_by_label(&note).is_some());
+    click_run(&mut harness, "Run", "second partial two");
+    assert!(harness.query_by_label(&note).is_none());
+
+    // The status bar's × stops a running one, without losing the rows.
+    harness.key_press(egui::Key::Escape);
+    settle(&mut harness);
+    click_status_item(&mut harness, "Cancel");
+    jobs_end(&mut harness);
+    assert_eq!(harness.state().plugins.panels.len(), 1);
+    assert!(harness.query_by_label("Slow: results").is_some());
+
+    finish_plugins(harness);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Typing a size hides smaller rows at once, without a new scan, and the
+/// filter stays for the next run.
+#[cfg(unix)]
+#[test]
+fn results_dialog_filters_by_size() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let (mut harness, base, one, _) = slow_harness("filter");
+    open_slow(&mut harness, &one);
+    click_run(&mut harness, "Run", "first partial one");
+    assert!(harness.query_by_label_contains("other, ").is_some());
+    let job = harness.state().plugins.panels[0].job;
+
+    let amount = harness.get_by_label("Hide smaller than");
+    amount.click();
+    settle(&mut harness);
+    let amount = harness.get_by_label("Hide smaller than");
+    amount.type_text("1");
+    harness.step();
+    harness.key_press(egui::Key::Enter);
+    settle(&mut harness);
+    assert!(
+        harness
+            .query_by_label_contains("first partial one")
+            .is_some()
+    );
+    assert!(harness.query_by_label_contains("other, ").is_none());
+    assert!(harness.query_by_label("Showing 1 of 2").is_some());
+    assert_eq!(harness.state().plugins.panels[0].job, job, "no new scan");
+
+    // The next update and the next run keep it.
+    std::fs::write(one.join("finish"), "").expect("writes");
+    jobs_end(&mut harness);
+    assert!(harness.query_by_label_contains("first done one").is_some());
+    assert!(harness.query_by_label_contains("other, ").is_none());
+    std::fs::remove_file(one.join("finish")).expect("removes");
+    click_run(&mut harness, "Run", "first partial one");
+    assert!(harness.query_by_label_contains("other, ").is_none());
+    harness.get_by_label("Stop").click();
+    jobs_end(&mut harness);
+
+    // Back to zero shows everything.
+    let amount = harness.get_by_label("Hide smaller than");
+    amount.click();
+    settle(&mut harness);
+    let amount = harness.get_by_label("Hide smaller than");
+    amount.type_text("0");
+    harness.step();
+    harness.key_press(egui::Key::Enter);
+    settle(&mut harness);
+    assert!(harness.query_by_label_contains("other, ").is_some());
+
+    finish_plugins(harness);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Runs the real Folder Usage on `dir`, leaving its results on screen.
+#[cfg(unix)]
+fn usage_results(dir: &Path, option: &str, row: &str) -> Harness<'static, App> {
+    let mut harness = running_plugins(dir);
+    harness.state_mut().run_plugin_action(
+        "io.github.leinnan.folder-usage.scan",
+        crate::plugins::CallContext {
+            dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        },
+    );
+    settle(&mut harness);
+    harness.get_by_label(option).click();
+    settle(&mut harness);
+    harness.get_by_label("Run").click();
+    wait(&mut harness, "the results", |harness| {
+        harness.state().plugins.jobs.is_empty() && harness.query_by_label_contains(row).is_some()
+    });
+    settle(&mut harness);
+    harness
+}
+
+/// Right-clicks a row and chooses a menu entry.
+#[cfg(unix)]
+fn row_menu(harness: &mut Harness<'_, App>, row: &str, entry: &str) {
+    harness.get_by_label_contains(row).click_secondary();
+    settle(harness);
+    harness.get_by_label(entry).click();
+    settle(harness);
+}
+
+#[cfg(unix)]
+fn row_text(harness: &Harness<'_, App>, row: &str) -> String {
+    // Its label: kittest shows it only through the node's description.
+    let node = format!("{:?}", harness.get_by_label_contains(row));
+    node.split("label: \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Waits for a row's text to change, once a removal or a new measure is done.
+#[cfg(unix)]
+fn row_changes(harness: &mut Harness<'_, App>, row: &str, before: &str) {
+    wait(harness, "the row to change", |harness| {
+        harness.query_by_label_contains(row).is_some() && row_text(harness, row) != before
+    });
+}
+
+#[cfg(unix)]
+fn back_at_results(harness: &mut Harness<'_, App>) {
+    wait(harness, "the results to come back", |harness| {
+        harness.state().display_modal == Some(ModalWindow::PluginResults)
+    });
+    settle(harness);
+}
+
+#[cfg(unix)]
+fn fixture_project(dir: &Path, name: &str, build: bool) {
+    std::fs::create_dir_all(dir.join("src")).expect("creates");
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+    )
+    .expect("writes");
+    std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("writes");
+    if build {
+        cargo_build(dir);
+    }
+}
+
+#[cfg(unix)]
+fn cargo_build(dir: &Path) {
+    let cargo = directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().join(".cargo/bin/cargo"))
+        .filter(|path| path.is_file())
+        .map_or_else(|| "cargo".into(), PathBuf::from);
+    let status = std::process::Command::new(cargo)
+        .args(["build", "--offline", "--quiet"])
+        .current_dir(dir)
+        .status()
+        .expect("cargo runs");
+    assert!(status.success());
+}
+
+#[cfg(unix)]
+fn fixture_base(name: &str) -> PathBuf {
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .expect("temp dir")
+        .join(format!("dirfleet_plugins_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("creates");
+    base
+}
+
+/// The row menu through the real app, on real Cargo projects: each entry asks
+/// first, says what goes, comes back to the results and updates the row.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn row_menu_asks_then_removes_and_updates_the_row() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let base = fixture_base("row_menu");
+    let project = base.join("games/menu_project");
+    fixture_project(&project, "menu_project", true);
+    let neighbour = base.join("games/menu_neighbour");
+    fixture_project(&neighbour, "menu_neighbour", false);
+    let incremental = project.join("target/debug/incremental");
+    let row = "games/menu_project, ";
+    let mut harness = usage_results(&base, "Rust projects anywhere below", row);
+
+    // Asking, then Cancel: back at the results, nothing gone.
+    row_menu(&mut harness, row, "Clear incremental…");
+    wait(&mut harness, "the confirmation", |harness| {
+        harness.query_by_label_contains("Delete ").is_some()
+    });
+    assert_eq!(harness.state().display_modal, Some(ModalWindow::PluginForm));
+    settle(&mut harness);
+    assert!(
+        harness
+            .query_by_label_contains(&incremental.display().to_string())
+            .is_some(),
+        "says which folder goes"
+    );
+    harness.get_by_label("Cancel").click();
+    back_at_results(&mut harness);
+    assert!(incremental.is_dir());
+    assert!(harness.query_by_label_contains(row).is_some());
+
+    // Esc in the confirmation does the same.
+    row_menu(&mut harness, row, "Clear incremental…");
+    wait(&mut harness, "the confirmation", |harness| {
+        harness.query_by_label_contains("Delete ").is_some()
+    });
+    settle(&mut harness);
+    harness.key_press(egui::Key::Escape);
+    back_at_results(&mut harness);
+    assert!(incremental.is_dir());
+
+    // Confirming removes only the cache, and the row follows by itself.
+    let before = row_text(&harness, row);
+    row_menu(&mut harness, row, "Clear incremental…");
+    wait(&mut harness, "the confirmation", |harness| {
+        harness.query_by_label_contains("Delete ").is_some()
+    });
+    settle(&mut harness);
+    harness.get_by_label_contains("Delete ").click();
+    wait(&mut harness, "the cache to go", |_| !incremental.exists());
+    back_at_results(&mut harness);
+    row_changes(&mut harness, row, &before);
+    assert!(project.join("target/debug/deps").is_dir());
+    assert!(project.join("src/main.rs").is_file());
+    cargo_build(&project);
+
+    // Measure again sees what changed outside the app.
+    let before = row_text(&harness, row);
+    std::fs::write(project.join("big.bin"), vec![1u8; 8 << 20]).expect("writes");
+    for _ in 0..60 {
+        harness.step();
+    }
+    row_menu(&mut harness, row, "Measure again");
+    row_changes(&mut harness, row, &before);
+    assert_eq!(
+        harness.state().display_modal,
+        Some(ModalWindow::PluginResults)
+    );
+
+    // Clear target, through cargo clean.
+    let before = row_text(&harness, row);
+    row_menu(&mut harness, row, "Clear target…");
+    wait(&mut harness, "the confirmation", |harness| {
+        harness.query_by_label_contains("Delete ").is_some()
+    });
+    settle(&mut harness);
+    assert!(
+        harness
+            .query_by_label_contains(&project.join("target").display().to_string())
+            .is_some()
+    );
+    harness.get_by_label_contains("Delete ").click();
+    let gone = project.join("target");
+    wait(&mut harness, "target to go", |_| !gone.exists());
+    back_at_results(&mut harness);
+    row_changes(&mut harness, row, &before);
+    assert!(project.join("src/main.rs").is_file());
+
+    // Remove folder: says what goes, Trash chosen unless changed, then gone.
+    row_menu(&mut harness, row, "Remove folder…");
+    wait(&mut harness, "the confirmation", |harness| {
+        harness.query_all_by_label("Move to Trash").next().is_some()
+    });
+    settle(&mut harness);
+    assert!(
+        harness
+            .query_by_label_contains(&project.display().to_string())
+            .is_some()
+    );
+    harness.get_by_label("Delete permanently").click();
+    settle(&mut harness);
+    // The radio reads "Delete …" too; the button comes after it.
+    harness
+        .query_all_by_label_contains("Delete ")
+        .last()
+        .expect("the button")
+        .click();
+    wait(&mut harness, "the folder to go", |_| !project.exists());
+    back_at_results(&mut harness);
+    wait(&mut harness, "the row to go", |harness| {
+        harness.query_by_label_contains(row).is_none()
+    });
+    settle(&mut harness);
+    assert!(
+        neighbour.join("src/main.rs").is_file(),
+        "its neighbour stays"
+    );
+    assert!(
+        harness.query_by_label_contains("Projects: 1 · ").is_some(),
+        "the totals follow"
+    );
+
+    finish_plugins(harness);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The safety checks of Rust Clean hold when reached from a row.
+#[cfg(unix)]
+#[test]
+fn row_menu_keeps_the_rust_clean_checks() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let base = fixture_base("row_checks");
+    std::fs::write(
+        base.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"member\"]\nresolver = \"2\"\n",
+    )
+    .expect("writes");
+    fixture_project(&base.join("member"), "member", false);
+    cargo_build(&base);
+    // Cargo can't read this one, and its `target` isn't provably Cargo's.
+    let broken = base.join("broken");
+    std::fs::create_dir_all(broken.join("target")).expect("creates");
+    std::fs::write(broken.join("Cargo.toml"), "not toml [").expect("writes");
+    std::fs::write(broken.join("target/precious.txt"), "keep").expect("writes");
+
+    let member_row = "member, ";
+    let mut harness = usage_results(&base, "Subfolders of this folder", member_row);
+
+    // A member clears the workspace's folder, and is told so.
+    row_menu(&mut harness, member_row, "Clear target…");
+    wait(&mut harness, "the confirmation", |harness| {
+        harness.query_by_label_contains("Delete ").is_some()
+    });
+    settle(&mut harness);
+    assert!(
+        harness
+            .query_by_label_contains(&base.join("target").display().to_string())
+            .is_some(),
+        "names the workspace's target"
+    );
+    assert!(
+        harness
+            .query_by_label_contains("part of the workspace")
+            .is_some()
+    );
+    harness.get_by_label("Cancel").click();
+    back_at_results(&mut harness);
+    assert!(base.join("target").is_dir());
+
+    // A folder that isn't provably Cargo's is refused.
+    row_menu(&mut harness, "broken, ", "Clear target…");
+    wait(&mut harness, "the refusal", |harness| {
+        harness
+            .query_by_label_contains("doesn't look like")
+            .is_some()
+    });
+    settle(&mut harness);
+    assert!(
+        harness.query_by_label_contains("Delete ").is_none(),
+        "no way to go ahead"
+    );
+    assert!(harness.state().plugins.jobs.is_empty(), "nothing started");
+    assert!(broken.join("target/precious.txt").is_file());
+    harness.get_by_label("Close").click();
+    back_at_results(&mut harness);
+
+    finish_plugins(harness);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// While a scan runs its rows can't be acted on; opening them still works.
+#[cfg(unix)]
+#[test]
+fn row_menu_waits_for_the_scan() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let (mut harness, base, one, _) = slow_harness("row_wait");
+    open_slow(&mut harness, &one);
+    click_run(&mut harness, "Run", "first partial one");
+
+    row_menu(&mut harness, "first partial one", "Do it…");
+    assert_eq!(
+        harness.state().display_modal,
+        Some(ModalWindow::PluginResults),
+        "disabled during the scan"
+    );
+    assert!(harness.state().plugins.form.is_none());
+    // Esc closes the menu, and only the next one hides the dialog.
+    harness
+        .get_by_label_contains("first partial one")
+        .click_secondary();
+    settle(&mut harness);
+    assert!(
+        harness.query_by_label("Copy path").is_some(),
+        "menu is open"
+    );
+    harness.key_press(egui::Key::Escape);
+    settle(&mut harness);
+    assert!(harness.query_by_label("Copy path").is_none(), "menu closed");
+    assert_eq!(
+        harness.state().display_modal,
+        Some(ModalWindow::PluginResults),
+        "the dialog stays"
+    );
+    harness.key_press(egui::Key::Escape);
+    settle(&mut harness);
+    assert_eq!(harness.state().display_modal, None);
+    click_status_item(&mut harness, "Slow: Scanning");
+
+    harness.get_by_label("Stop").click();
+    jobs_end(&mut harness);
+    row_menu(&mut harness, "first partial one", "Do it…");
+    assert_eq!(harness.state().display_modal, Some(ModalWindow::PluginForm));
+    assert!(harness.query_by_label("Sure about it").is_some());
+    harness.get_by_label("Cancel").click();
+    back_at_results(&mut harness);
+
+    // Copy path and Open in new tab, which need no confirmation.
+    let row = "first partial one";
+    harness.get_by_label_contains(row).click_secondary();
+    settle(&mut harness);
+    harness.get_by_label("Copy path").click();
+    harness.step();
+    let copied = harness.output().platform_output.commands.iter().any(|command| {
+        matches!(command, egui::OutputCommand::CopyText(text) if text == &one.display().to_string())
+    });
+    assert!(copied, "the row's path is on the clipboard");
+    settle(&mut harness);
+    row_menu(&mut harness, row, "Open in new tab");
+    assert_eq!(harness.state().display_modal, None);
+    assert!(
+        harness
+            .state()
+            .tabs
+            .tabs()
+            .filter(|tab| tab.current_path.single_path() == Some(one.clone()))
+            .count()
+            >= 2
+    );
+
+    finish_plugins(harness);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Starts the slow plugin's confirm action from a row, through its form.
+#[cfg(unix)]
+fn confirm_row(harness: &mut Harness<'_, App>, row: &str) {
+    row_menu(harness, row, "Do it…");
+    wait(harness, "the form", |harness| {
+        harness.query_by_label("Sure about it").is_some()
+    });
+    settle(harness);
+    harness.get_by_label("Run").click();
+    back_at_results(harness);
+}
+
+/// What the results show from the moment a removal is confirmed until its
+/// new sizes are in.
+#[cfg(unix)]
+#[test]
+fn rows_show_what_is_happening_to_them() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let (mut harness, base, one, _) = slow_harness("row_status");
+    let sub = one.join("sub");
+    std::fs::create_dir_all(&sub).expect("creates");
+    std::fs::write(one.join("finish"), "").expect("writes");
+    open_slow(&mut harness, &one);
+    harness.get_by_label("Run").click();
+    wait(&mut harness, "the results", |harness| {
+        harness.state().plugins.jobs.is_empty()
+            && harness.query_by_label_contains("first done one").is_some()
+    });
+    settle(&mut harness);
+    let row = "first done one";
+
+    // Running shows at once, and only on that row.
+    confirm_row(&mut harness, row);
+    wait(&mut harness, "the row to say so", |harness| {
+        row_text(harness, row).contains("Doing it…")
+    });
+    assert!(
+        row_text(&harness, row).contains("2.00 GB"),
+        "sizes stay for now"
+    );
+    assert!(!row_text(&harness, "other, ").contains('…'));
+
+    // A second one waits its turn, as the plugin runs one at a time.
+    confirm_row(&mut harness, "other, ");
+    wait(&mut harness, "the row to wait", |harness| {
+        row_text(harness, "other, ").contains("Waiting…")
+    });
+
+    // Neither can be started again meanwhile.
+    for _ in 0..60 {
+        harness.step();
+    }
+    row_menu(&mut harness, row, "Do it…");
+    assert_eq!(
+        harness.state().display_modal,
+        Some(ModalWindow::PluginResults)
+    );
+    assert!(harness.state().plugins.form.is_none(), "disabled");
+
+    // Done: on to measuring, and the next one's turn. The plugin's single job
+    // slot means the measuring waits for that one here.
+    std::fs::write(one.join("release"), "").expect("writes");
+    wait(&mut harness, "the second row's turn", |harness| {
+        row_text(harness, "other, ").contains("Doing it…")
+    });
+    assert!(row_text(&harness, row).contains("Measuring…"));
+
+    // Failing says so on the row, and keeps its sizes.
+    std::fs::write(sub.join("fail"), "").expect("writes");
+    std::fs::write(sub.join("release"), "").expect("writes");
+    wait(&mut harness, "the failure", |harness| {
+        row_text(harness, "other, ").contains("Failed")
+    });
+    assert!(row_text(&harness, "other, ").contains("1.00 MB"));
+
+    // With the slot free, the first row gets its new sizes and loses its status.
+    wait(&mut harness, "new sizes", |harness| {
+        let text = row_text(harness, row);
+        text.contains("3.00 KB") && !text.contains('…')
+    });
+    jobs_end(&mut harness);
+
+    // A failed row can be tried again.
+    std::fs::remove_file(sub.join("fail")).expect("removes");
+    for _ in 0..60 {
+        harness.step();
+    }
+    confirm_row(&mut harness, "other, ");
+    wait(&mut harness, "new sizes", |harness| {
+        row_text(harness, "other, ").contains("3.00 KB")
+    });
+    jobs_end(&mut harness);
+
+    // A file operation still going: the row waits for it, not just the job.
+    harness.state_mut().plugins.file_op_requested();
+    for _ in 0..60 {
+        harness.step();
+    }
+    let before = row_text(&harness, row);
+    confirm_row(&mut harness, row);
+    jobs_end(&mut harness);
+    assert!(
+        row_text(&harness, row).contains("Doing it…"),
+        "still busy: {before}"
+    );
+    harness.state_mut().plugins.file_op_finished();
+    wait(&mut harness, "the row to clear", |harness| {
+        !row_text(harness, row).contains('…')
+    });
+
+    finish_plugins(harness);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The dialog during a scan, with a row being cleared and one waiting, at the
+/// default width and in a narrow window.
+#[cfg(not(windows))]
+#[test]
+fn results_dialog_scanning_snapshots() {
+    use crate::plugins::panel::JobView;
+    use crate::plugins::table::RowStatus;
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut snapshots = egui_kittest::SnapshotResults::new();
+    for (name, size) in [
+        ("plugin_results_busy", egui::vec2(1100.0, 720.0)),
+        ("plugin_results_narrow", egui::vec2(620.0, 520.0)),
+    ] {
+        let mut panel = results_panel_fixture(Some("Scanning 42 of 136"));
+        if let Some(table) = panel.table.as_mut() {
+            table.set_status(
+                Path::new("/d/slavic"),
+                Some(RowStatus::Working("Clearing target…".into())),
+            );
+            table.set_status(Path::new("/d/carrspg"), Some(RowStatus::Waiting));
+            table.set_status(
+                Path::new("/d/notes"),
+                Some(RowStatus::Failed("boom".into())),
+            );
+        }
+        let job = JobView {
+            waiting: false,
+            fraction: 0.4,
+            label: "IDEAS/slowo".into(),
+        };
+        let mut harness = Harness::builder()
+            .with_options(crate::app::ui::snapshot_options())
+            .with_size(size)
+            .build_ui(move |ui| {
+                let ctx = ui.ctx().clone();
+                let id = egui::Id::new("fonts_set");
+                if !ctx.data(|data| data.get_temp::<bool>(id).unwrap_or(false)) {
+                    let mut fonts = egui::FontDefinitions::default();
+                    ui::register_icons(&mut fonts);
+                    ctx.set_fonts(fonts);
+                    ui::configure_test(&ctx, false);
+                    ctx.data_mut(|data| data.insert_temp(id, true));
+                    return;
+                }
+                panel.ui(&ctx, Some(&job));
+            });
+        harness.run_steps(12);
+        snapshots.add(harness.try_snapshot(name));
+    }
+    drop(snapshots);
+}
+
+/// A results dialog with a filled table, for pictures of it.
+#[cfg(not(windows))]
+fn results_panel_fixture(progress: Option<&str>) -> crate::plugins::panel::ResultsPanel {
+    let form: crate::plugins::form::Form = serde_json::from_value(serde_json::json!({
+        "fields": [{
+            "id": "show", "type": "radio", "label": "Show",
+            "options": [["subfolders", "Subfolders of this folder"], ["rust", "Rust projects anywhere below"]],
+            "default": "rust",
+        }],
+    }))
+    .expect("form");
+    let mut panel = crate::plugins::panel::ResultsPanel {
+        plugin: "test.slow".into(),
+        action: "scan".into(),
+        title: "Folder Usage".into(),
+        context: crate::plugins::CallContext {
+            dir: Some("/virtual/Documents".into()),
+            ..Default::default()
+        },
+        state: crate::plugins::form::FormState::new(form, None),
+        request: None,
+        job: None,
+        results_dir: Some("/virtual/Documents".into()),
+        table: None,
+        last_sort: None,
+        last_filter: crate::plugins::table::SizeFilter::default(),
+    };
+    panel.show(
+        serde_json::from_value(serde_json::json!({
+            "title": "Folder Usage",
+            "subtitle": "Projects: 3 · 201.0 GB",
+            "progress": progress,
+            "columns": [
+                { "id": "name", "label": "Folder" },
+                { "id": "size", "label": "Size", "kind": "size" },
+                { "id": "target", "label": "target", "kind": "size" },
+                { "id": "modified", "label": "Last change", "kind": "time" },
+            ],
+            "rows": [
+                { "path": "/d/slavic", "cells": { "name": "GAMES/slavic_castles", "size": 366_000_000_000_i64, "target": 364_000_000_000_i64, "modified": 1_793_700_000 } },
+                { "path": "/d/carrspg", "cells": { "name": "IDEAS/carrspg", "size": 220_000_000_000_i64, "target": 58_700_000_000_i64, "modified": 1_793_780_000 } },
+                { "path": "/d/notes", "cells": { "name": "NOTES", "size": 19_000_000, "modified": 1_754_000_000 } },
+                { "path": "/d/empty", "cells": { "name": "UTILS/rpack" } },
+            ],
+            "sort": { "column": "size", "descending": true },
+        }))
+        .expect("spec"),
+    );
+    panel
+}
+
+/// The dialog with its options and results.
+#[cfg(not(windows))]
+#[test]
+fn results_dialog_snapshot() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let panel = results_panel_fixture(None);
+    let mut app = fixture(Appearance::Dark, false, false);
+    app.plugins.panels.push(panel);
+    app.plugins.show_panel("test.slow.scan");
+    app.display_modal = Some(ModalWindow::PluginResults);
+    let mut harness = Harness::builder()
+        .with_options(crate::app::ui::snapshot_options())
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui_state(draw, app);
+    harness.run_steps(12);
+    let snapshot = harness.try_snapshot("plugin_results_dialog");
+    drop(harness);
+    while COMMANDS_QUEUE.pop().is_some() {}
+    snapshot.expect("results dialog snapshot");
+}
+
+/// The bundled plugins through the real app: a form's button, the job, the
+/// file operation worker and the results window. Only touches a temp folder.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn folder_usage_and_rust_clean_through_the_app() {
+    let _guard = dock::tests::SNAPSHOT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while COMMANDS_QUEUE.pop().is_some() {}
+
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .expect("temp dir")
+        .join(format!("dirfleet_plugins_e2e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let project = base.join("games/e2e_project");
+    std::fs::create_dir_all(project.join("src")).expect("creates");
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"e2e_project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("writes");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("writes");
+    let cargo = directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().join(".cargo/bin/cargo"))
+        .filter(|path| path.is_file())
+        .map_or_else(|| "cargo".into(), PathBuf::from);
+    let build = || {
+        let status = std::process::Command::new(&cargo)
+            .args(["build", "--offline", "--quiet"])
+            .current_dir(&project)
+            .status()
+            .expect("cargo runs");
+        assert!(status.success());
+    };
+    build();
+    let incremental = project.join("target/debug/incremental");
+    assert!(incremental.is_dir());
+
+    let mut tab = TabData::from_path(&base);
+    tab.load = crate::app::dock::LoadState::Idle;
+    tab.current_path = CurrentPath::One(base.clone());
+    let mut tabs = Workspace::from_tabs(vec![tab]);
+    tabs.focused = true;
+    let app = App {
+        tabs,
+        plugins: crate::plugins::PluginHost::bundled_only(),
+        ..Default::default()
+    };
+    let mut harness = plugin_harness(app);
+    let running = |harness: &Harness<'_, App>, id: &str| {
+        harness.state().plugins.plugins.iter().any(|plugin| {
+            plugin.id() == id && matches!(plugin.status, crate::plugins::host::Status::Running)
+        })
+    };
+    wait(&mut harness, "plugins to start", |harness| {
+        running(harness, "io.github.leinnan.folder-usage")
+            && running(harness, "io.github.leinnan.rust-clean")
+    });
+
+    // Folder Usage on the parent folder: the project is one level down.
+    harness.state_mut().run_plugin_action(
+        "io.github.leinnan.folder-usage.scan",
+        crate::plugins::CallContext {
+            dir: Some(base.clone()),
+            ..Default::default()
+        },
+    );
+    wait(&mut harness, "the scan form", |harness| {
+        harness
+            .query_by_label("Rust projects anywhere below")
+            .is_some()
+    });
+    // A modal moves while its first frames lay it out.
+    for _ in 0..6 {
+        harness.step();
+    }
+    harness.get_by_label("Rust projects anywhere below").click();
+    for _ in 0..4 {
+        harness.step();
+    }
+    harness.get_by_label("Run").click();
+    // The bug this guards against: with no other dialog open, the results
+    // must be on screen as soon as the job has sent them, and stay there.
+    wait(&mut harness, "the results", |harness| {
+        harness.state().plugins.jobs.is_empty()
+            && harness
+                .query_by_label_contains("games/e2e_project, ")
+                .is_some()
+    });
+    for _ in 0..8 {
+        harness.step();
+    }
+    assert!(
+        harness
+            .query_by_label_contains("games/e2e_project")
+            .is_some()
+    );
+    harness.get_by_label("Last change").click();
+    harness.step();
+    harness.get_by_label("target").click();
+    harness.step();
+    // Clicks soon after the headers' would count as a triple click.
+    for _ in 0..60 {
+        harness.step();
+    }
+    let row = harness.get_by_label_contains("games/e2e_project");
+    row.click();
+    harness.step();
+    let row = harness.get_by_label_contains("games/e2e_project");
+    row.click();
+    harness.step();
+    let wanted = project.clone();
+    for _ in 0..6 {
+        harness.step();
+    }
+    let tabs: Vec<_> = harness
+        .state()
+        .tabs
+        .tabs()
+        .map(|tab| tab.current_path.single_path())
+        .collect();
+    assert!(
+        tabs.contains(&Some(wanted)),
+        "double-click opens the project: {tabs:?}"
+    );
+
+    // Clear incremental: only the cache goes, and the project still builds.
+    assert_eq!(
+        harness.state().display_modal,
+        None,
+        "opening a row hides the dialog"
+    );
+    harness.state_mut().run_plugin_action(
+        "io.github.leinnan.rust-clean.clear_incremental",
+        crate::plugins::CallContext {
+            dir: Some(project.clone()),
+            ..Default::default()
+        },
+    );
+    wait(&mut harness, "the incremental form", |harness| {
+        harness.query_by_label_contains("Delete ").is_some()
+    });
+    for _ in 0..6 {
+        harness.step();
+    }
+    harness.get_by_label_contains("Delete ").click();
+    let path = incremental.clone();
+    wait(&mut harness, "the cache to go", |_| !path.exists());
+    assert!(project.join("target/debug/deps").is_dir());
+    assert!(project.join("src/main.rs").is_file());
+    build();
+    assert!(incremental.is_dir());
+
+    // Clear target: cargo clean through the job.
+    wait(&mut harness, "the first job to end", |harness| {
+        harness.state().plugins.jobs.is_empty()
+    });
+    harness.state_mut().run_plugin_action(
+        "io.github.leinnan.rust-clean.clear_target",
+        crate::plugins::CallContext {
+            dir: Some(project.clone()),
+            ..Default::default()
+        },
+    );
+    wait(&mut harness, "the target form", |harness| {
+        harness.query_by_label_contains("Delete ").is_some()
+    });
+    for _ in 0..6 {
+        harness.step();
+    }
+    harness.get_by_label_contains("Delete ").click();
+    let path = project.join("target");
+    wait(&mut harness, "target to go", |_| !path.exists());
+    assert!(project.join("src/main.rs").is_file());
+    assert!(project.join("Cargo.toml").is_file());
+
+    finish_plugins(harness);
+    let _ = std::fs::remove_dir_all(&base);
 }

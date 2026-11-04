@@ -212,9 +212,34 @@ impl App {
                 ModalWindow::ConfirmEject => self.confirm_eject_ui(ctx),
                 ModalWindow::PluginForm => {
                     if self.plugins.form_ui(ctx) {
-                        ActionToPerform::CloseActiveModalWindow.schedule();
+                        // A form opened from a results dialog goes back to it.
+                        if self.plugins.take_form_return().is_some() {
+                            ActionToPerform::ToggleModalWindow(ModalWindow::PluginResults)
+                                .schedule();
+                        } else {
+                            ActionToPerform::CloseActiveModalWindow.schedule();
+                        }
                     }
                 }
+                ModalWindow::PluginResults => match self.plugins.panel_ui(ctx) {
+                    crate::plugins::panel::PanelOutcome::Open => {}
+                    crate::plugins::panel::PanelOutcome::Hide => {
+                        ActionToPerform::CloseActiveModalWindow.schedule();
+                    }
+                    crate::plugins::panel::PanelOutcome::OpenRow(path) => {
+                        ActionToPerform::CloseActiveModalWindow.schedule();
+                        ActionToPerform::NewTab(path).schedule();
+                    }
+                    crate::plugins::panel::PanelOutcome::RowAction { action, path } => {
+                        self.run_plugin_action(
+                            &action,
+                            crate::plugins::CallContext {
+                                dir: Some(path),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                },
                 ModalWindow::SelectThumbnail => self.select_thumbnail_ui(ctx),
             }
         }

@@ -47,6 +47,7 @@ form = "dynamic"                      # none | dynamic (Lua builds it) | static 
 mode = "job"                          # quick (2 s budget) | job (own thread, progress, cancel)
 per_item = true                       # call run_item once per target (jobs only)
 confirm = "Really?"                   # ask before running (when there is no form)
+results = true                        # a dialog with the options and results; see Tables (needs mode = "job")
 
 [bar]
 handler = "bar"                       # M.bar(ctx) returns the segments
@@ -147,11 +148,18 @@ form = function(ctx)
 end
 ```
 
+A form can also set:
+
+- `danger = true`: the submit button is red, for what can't be undone;
+- `submit_when = { { when = { field = "x", equals = v }, label = "Delete", danger = true } }`: another look for the submit button while a condition holds;
+- `blocked = true`: there is nothing to submit, as its fields explain, so only **Close** is offered.
+
 Field types:
 
 | Type | Notes |
 | --- | --- |
-| `info` | Read-only text, from `text`. |
+| `info` | Read-only text, from `text`, across the whole dialog. |
+| `paths` | What an action will affect, from `rows = { { path = "...", size = "1 GB" } }`, in a card. |
 | `separator` | A divider. |
 | `group` | A heading (`label`) over its own `fields`. |
 | `text`, `multiline` | `placeholder`; `required` means not blank. |
@@ -175,14 +183,14 @@ The full list with types is in `plugins/types/dirfleet.d.lua`. In short:
 
 | Table | Functions |
 | --- | --- |
-| `dirfleet.path` | `join`, `parent`, `name`, `stem`, `ext`, `with_ext`, `is_absolute`, `unique` ("name (2).ext") |
+| `dirfleet.path` | `join`, `parent`, `name`, `stem`, `ext`, `with_ext`, `is_absolute`, `unique` ("name (2).ext"), `home` |
 | `dirfleet.fmt` | `duration(seconds)`, `size(bytes)` |
-| `dirfleet.fs` | `exists`, `is_dir`, `is_file`, `stat`, `read_dir`, `read_text`, `glob`, `write_text`, `mkdir` (absolute paths only) |
-| `dirfleet.ops` | `copy`, `move`, `trash`, `rename`: through the app's file operations, with progress and undo |
+| `dirfleet.fs` | `exists`, `is_dir`, `is_file`, `stat`, `read_dir`, `read_text`, `glob`, `usage`, `usage_many`, `write_text`, `mkdir` (absolute paths only) |
+| `dirfleet.ops` | `copy`, `move`, `trash`, `delete`, `rename`: through the app's file operations, with progress and, except for `delete`, undo |
 | `dirfleet.process` | `run{ cmd, args, cwd, env, timeout, stdin, on_line }` returns `{ code, ok, stdout, stderr }` |
 | `dirfleet.ffmpeg` | `run{ args, duration, on_progress }`, `available`, `version`, `encoders` |
 | `dirfleet.media` | `probe(path)` returns `{ duration, width, height, fps, video_codec, audio_codec, has_audio, … }` |
-| `dirfleet.app` | `open`, `open_in_new_tab`, `refresh`, `select`, `system_open`, `open_terminal` |
+| `dirfleet.app` | `open`, `open_in_new_tab`, `refresh`, `select`, `system_open`, `open_terminal`, `show_table`, `update_table_row` |
 | `dirfleet.job` | `progress(fraction, label)`, `cancelled()` |
 | `dirfleet.storage` | `get`, `set`: a JSON file per plugin |
 | `dirfleet.bar`, `dirfleet.inspector` | `invalidate()` |
@@ -193,6 +201,64 @@ How errors come back:
 - A missing permission raises an error that names it.
 - A failed operation returns `nil, message`.
 - `print` writes to the log.
+
+### Folder sizes
+
+`dirfleet.fs.usage(path, { newest_skip = { "target" } })` returns `{ bytes, freed, files, newest, errors, parts }`. It counts allocated disk space with hardlinks counted once, doesn't follow symlinks and stays on one filesystem, so its result matches `du`. Adding up `stat` sizes reads about twice the truth on a Cargo `target` folder, where outputs are hardlinked. `freed` is what deleting the folder would free: `bytes`, less files that also have links outside it, which is about 40% of a Cargo `incremental` folder. `newest` is the newest file's time, leaving out folders with the names in `newest_skip`. On Windows `bytes` adds up file sizes, so hardlinks count more than once.
+
+`subtotals = { "target" }` also fills `parts.target` from the same walk, for folders directly under the root. That's much faster than walking `target` again. On macOS file details are read in batches, which takes about 2.5 times less on large folders.
+
+`dirfleet.fs.usage_many{ paths, newest_skip, subtotals, on_result }` walks up to 8 folders at once on threads of its own. `on_result(path, usage, error)` runs on the plugin's thread as each folder finishes, in no set order. It returns `true`, or `nil, "cancelled"`.
+
+### Tables
+
+An action with `results = true` opens a dialog holding its options and results, instead of a form that closes when it runs. Its form must be `static` or `none`, and its `mode` must be `job`. The job fills in the results with `dirfleet.app.show_table`, as often as it likes, and each call replaces the previous one:
+
+```lua
+dirfleet.app.show_table({
+  title = "Largest folders",
+  subtitle = "3 folders",
+  progress = "Scanning 1 of 3",                         -- leave it out of the last call
+  columns = {
+    { id = "name", label = "Folder" },
+    { id = "size", label = "Size", kind = "size" },     -- bytes
+    { id = "when", label = "Changed", kind = "time" },  -- seconds since 1970
+  },
+  rows = { { path = "/a/b", cells = { name = "b", size = 1024, when = 1700000000 } } },
+  sort = { column = "size", descending = true },
+})
+```
+
+The dialog does the rest:
+
+- Radio fields become segmented buttons above the table, beside a **Hide smaller than** control when there's a `size` column.
+- **Run** becomes **Restart** while a job runs, next to **Stop**. A restart uses the current options and ignores anything the replaced job still sends.
+- **Run in background**, **Close**, Esc or clicking outside hide the dialog and leave the job running. The status bar shows an item that brings it back, and so does running the action again.
+- If the job ends without a last call, rows stay and it says it stopped early. Results last until the app quits or the status bar's × discards them.
+- Running the action from another folder while idle keeps the old results, labelled, until **Run**.
+
+The size filter applies to the first `size` column straight away with no new run, and stays for the next run. Rows without a size yet stay visible.
+
+Clicking a header sorts by that column and clicking again reverses it. The sort stays across updates. Ties keep the previous order, so sorting by date and then by size means size, with ties by date. A missing cell is blank and sorts last. Double-clicking a row with a `path` hides the dialog and opens that folder in a new tab.
+
+A subtitle can use `{count}` and `{total}`, filled in from the rows now in the table.
+
+Right-clicking a row with a `path` offers **Open in new tab** and **Copy path**. A row's `menu` adds entries that start an action on its folder, in this plugin or another:
+
+```lua
+{ path = "/a/b", cells = { ... }, menu = {
+  { label = "Remove folder…", action = "my.name.example.remove", danger = true,
+    busy = "Removing…", title = "Remove b?" },
+} }
+```
+
+The action's form is the confirmation, so it should say exactly what will go, with a `paths` field. Cancelling or confirming returns to the results. `title` is the confirmation's title, shown while the plugin prepares it. These entries are disabled while the table's own job runs, since it may be reading that folder.
+
+From confirming until new sizes arrive, the row shows what is happening beside its name and its entries are disabled: **Waiting…** behind another job, then the entry's `busy` text, then **Measuring…**. If the action fails, the row says so with the reason in its tooltip and keeps its sizes.
+
+Set `refresh_action` on the table to an action of this plugin that measures one folder again. It is run with `ctx.dir` set to the row's folder when a menu entry's job has ended and the file operations plugins asked for have finished, since `dirfleet.ops` only asks for the deleting to start. It also adds **Measure again** to the menu. The action reports with `dirfleet.app.update_table_row{ path, cells, clear, remove }`.
+
+Calling `show_table` or `update_table_row` from a plugin with no `results = true` action is an error.
 
 ### FFmpeg
 
@@ -214,6 +280,9 @@ The app adds `-hide_banner -nostdin -loglevel error -progress pipe:1`. With `dur
 | --- | --- |
 | Git (`plugins/io.github.leinnan.git`) | Inside a repository: branch, ahead/behind and changes in the bar, Fetch, Pull and Push jobs, Commit… with a message form, and the selected file's status and last commit in the inspector. |
 | Video Converter (`plugins/io.github.leinnan.video-convert`) | **Convert to MP4** on `.mov` and `.avi` writes `name.mp4` next to each file, adding " (2)" when it exists. **Convert video…** asks for format (MP4, MKV, WebM, GIF, MP3), quality, height, whole video or a fragment, audio, and what to do when the file exists. The inspector shows a video's length, resolution, codecs and bit rate. |
+| HEIC Converter (`plugins/io.github.leinnan.heic-convert`) | **Convert to JPEG** on `.heic` and `.heif` writes `name.jpg` next to each file, adding " (2)" when it exists. **Convert photo…** asks for format (JPEG, PNG, TIFF), JPEG quality, longest side (photos are never enlarged), and what to do when the file exists. macOS uses `sips`, which keeps the capture date, location and other metadata. Windows and Linux use FFmpeg 8.1 or newer: JPEG and TIFF lose that metadata, PNG keeps it. |
+| Folder Usage (`plugins/io.github.leinnan.folder-usage`) | **Folder Usage…** scans the current folder in a job and shows a table of its subfolders, or of the Rust projects anywhere below it. Options and results share one dialog, which fills in as each folder finishes, can hide folders below a size, offers **Clear incremental…**, **Clear target…** and **Remove folder…** from a right-click on a row, each with a confirmation listing what goes (Remove folder moves to the Trash unless told otherwise, and refuses the disk root and folders holding your home), can stop or restart with other options, and can be hidden while it runs: the status bar brings it back. Size is real disk use and **target** is the part of it that is Cargo's output. **Last change** is the newest file outside `target`, `.git` and `node_modules`; a fresh clone or checkout resets it. |
+| Rust Clean (`plugins/io.github.leinnan.rust-clean`) | Inside a Rust project: **Rust: Clear target…** runs `cargo clean`, and **Rust: Clear incremental…** deletes only the `incremental` caches, which Cargo has no flag for. Both show exact paths and sizes first and delete permanently. Paths come from `cargo metadata`, so workspace members clear the workspace's folder. A target folder outside the project is refused, since other projects may share it. When Cargo can't read a project, `<project>/target` is used, but only if it has `CACHEDIR.TAG` or `.rustc_info.json`. Clearing incremental caches during a build can make that build fail; run it again. |
 
 ## Tests
 

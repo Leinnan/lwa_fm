@@ -235,6 +235,16 @@ fn format_size(size: u64) -> String {
 /// The result of adding up a folder's size in the background.
 type FolderSize = std::sync::Arc<std::sync::Mutex<Option<u64>>>;
 
+/// Disk space the folder takes. Hardlinks count once, or a Cargo `target`
+/// reads about twice its real size.
+fn folder_disk_size(path: &std::path::Path) -> u64 {
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    crate::plugins::usage::measure(path, &crate::plugins::usage::Options::default(), &cancel)
+        .ok()
+        .flatten()
+        .map_or(0, |usage| usage.bytes)
+}
+
 /// "Size" for a folder: computed on request, since walking a large tree is slow.
 fn folder_size_row(ui: &mut Ui, path: &std::path::Path) {
     let id = egui::Id::new(("folder_size", path));
@@ -249,13 +259,7 @@ fn folder_size_row(ui: &mut Ui, path: &std::path::Path) {
                     let root = path.to_path_buf();
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
-                        let total: u64 = walkdir::WalkDir::new(root)
-                            .into_iter()
-                            .filter_map(Result::ok)
-                            .filter_map(|entry| entry.metadata().ok())
-                            .filter(std::fs::Metadata::is_file)
-                            .map(|meta| meta.len())
-                            .sum();
+                        let total = folder_disk_size(&root);
                         if let Ok(mut slot) = writer.lock() {
                             *slot = Some(total);
                         }
@@ -347,6 +351,37 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Calculate shows the disk use, with a hardlinked file counted once.
+    #[cfg(unix)]
+    #[test]
+    fn folder_size_row_counts_hardlinks_once() {
+        use egui_kittest::kittest::Queryable as _;
+        let dir = std::env::temp_dir().join(format!("dirfleet_inspector_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        std::fs::write(dir.join("a.bin"), vec![1u8; 4 << 20]).expect("writes");
+        let single = folder_disk_size(&dir);
+        std::fs::hard_link(dir.join("a.bin"), dir.join("b.bin")).expect("links");
+        let linked = folder_disk_size(&dir);
+        assert!(linked < single + (1 << 20), "{single} {linked}");
+        assert!(linked >= 4 << 20, "{linked}");
+
+        let path = dir.clone();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| folder_size_row(ui, &path));
+        harness.run_steps(2);
+        harness.get_by_label("Calculate").click();
+        let text = format_size(linked);
+        for _ in 0..500 {
+            harness.step();
+            if harness.query_by_label(&text).is_some() {
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("never showed {text}");
+    }
     #[test]
     fn absent_dates_are_not_shown_as_epoch() {
         assert_eq!(format_date(TimestampSeconds::default()), "Unavailable");

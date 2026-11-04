@@ -675,7 +675,10 @@ impl App {
                     op.current = current;
                 }
             }
-            FileOpEvent::Finished(outcome) => self.finish_file_op(outcome),
+            FileOpEvent::Finished(outcome) => {
+                self.finish_file_op(outcome);
+                self.plugins.file_op_finished();
+            }
         }
     }
 
@@ -1347,7 +1350,7 @@ pub fn app_drop_target(ui: &Ui, response: &egui::Response, app: &Path) {
     );
     if let Some(payload) = response.dnd_release_payload::<DraggedPaths>() {
         crate::shell::open_files_with(app, &payload.0);
-        for path in payload.0.iter() {
+        for path in &payload.0 {
             crate::app::open_history::opened(path);
         }
     }

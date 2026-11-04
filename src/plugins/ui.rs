@@ -158,8 +158,10 @@ pub fn inspector_ui(ui: &mut Ui, views: &[InspectorView<'_>]) {
     }
 }
 
-/// Running jobs in the status bar, and a list of finished ones.
-pub fn jobs_status(ui: &mut Ui, host: &mut PluginHost) {
+/// Running jobs in the status bar, a list of finished ones, and the way back
+/// to results dialogs in the background. Returns the panel to show.
+pub fn jobs_status(ui: &mut Ui, host: &mut PluginHost) -> Option<String> {
+    let mut reopen = None;
     if !host.finished.is_empty() {
         ui.separator();
         let response = app_ui::icon_button(ui, Icon::Puzzle, "Plugin activity", false);
@@ -186,7 +188,23 @@ pub fn jobs_status(ui: &mut Ui, host: &mut PluginHost) {
         });
     }
     let mut cancel = None;
+    let mut discard = None;
+    // Finished runs whose results are still there to come back to.
+    for panel in host.panels.iter().filter(|panel| panel.table.is_some()) {
+        if host.panel_running(panel) {
+            continue;
+        }
+        ui.separator();
+        let label = format!("{}: results", panel.title);
+        if ui.link(RichText::new(label).small()).clicked() {
+            reopen = Some(panel.key());
+        }
+        if app_ui::icon_button(ui, Icon::X, "Discard results", false).clicked() {
+            discard = Some(panel.key());
+        }
+    }
     for job in &host.jobs {
+        let panel = host.panels.iter().find(|panel| panel.job == Some(job.id));
         ui.separator();
         if job.waiting {
             ui.weak(format!("{} (waiting)", job.title));
@@ -201,7 +219,21 @@ pub fn jobs_status(ui: &mut Ui, host: &mut PluginHost) {
             } else {
                 format!("{}\n{}", job.title, job.label)
             });
-            ui.weak(&job.title);
+            if let Some(panel) = panel {
+                let progress = panel
+                    .table
+                    .as_ref()
+                    .and_then(super::table::TableView::progress);
+                let label = progress.map_or_else(
+                    || job.title.clone(),
+                    |progress| format!("{}: {progress}", job.title),
+                );
+                if ui.link(RichText::new(label).small()).clicked() {
+                    reopen = Some(panel.key());
+                }
+            } else {
+                ui.weak(&job.title);
+            }
         }
         if app_ui::icon_button(ui, Icon::X, "Cancel", false).clicked() {
             cancel = Some(job.id);
@@ -210,10 +242,14 @@ pub fn jobs_status(ui: &mut Ui, host: &mut PluginHost) {
     if let Some(id) = cancel {
         host.cancel_job(id);
     }
+    if let Some(key) = discard {
+        host.discard_panel(&key);
+    }
     if host.has_jobs() {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(250));
     }
+    reopen
 }
 
 fn status_text(status: &Status, enabled: bool) -> (&'static str, Option<String>) {

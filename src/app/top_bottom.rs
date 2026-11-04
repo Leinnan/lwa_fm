@@ -567,7 +567,10 @@ impl App {
                         ui.weak(tab.load.progress().unwrap_or("Loading…"));
                     }
                     self.file_ops_status(ui);
-                    crate::plugins::ui::jobs_status(ui, &mut self.plugins);
+                    if let Some(panel) = crate::plugins::ui::jobs_status(ui, &mut self.plugins) {
+                        self.plugins.show_panel(&panel);
+                        self.display_modal = Some(super::commands::ModalWindow::PluginResults);
+                    }
                     self.drive_status(ui, folder.as_deref());
                 });
             });

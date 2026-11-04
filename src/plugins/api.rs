@@ -5,13 +5,14 @@
 
 use super::permissions::Permission;
 use super::sandbox::Services;
+use super::usage::Options as UsageOptions;
 use super::{AppRequest, NotifyLevel, PluginMsg, send};
 use crate::child_process::{self, RunError};
 use crate::fileops::{ConflictPolicy, FileOp};
 use mlua::{Function, Lua, LuaSerdeExt as _, MultiValue, Table, Value, Variadic};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,9 @@ use std::time::{Duration, Instant};
 const READ_LIMIT: usize = 1024 * 1024;
 /// Most entries `fs.read_dir` and `fs.glob` return.
 const LIST_LIMIT: usize = 10_000;
+/// Folders `fs.usage_many` walks at once. More didn't help on an SSD: 44 s
+/// with 4, 38 s with 8 and 37 s with 12, on 136 projects.
+const USAGE_THREADS: usize = 8;
 /// Bytes of a process's stdout and stderr kept.
 const OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 
@@ -187,6 +191,12 @@ fn path_table(lua: &Lua) -> mlua::Result<Table> {
         "unique",
         lua.create_function(|_, path: String| Ok(to_string(&unique_path(Path::new(&path)))))?,
     )?;
+    table.set(
+        "home",
+        lua.create_function(|_, ()| {
+            Ok(directories::BaseDirs::new().map(|dirs| to_string(dirs.home_dir())))
+        })?,
+    )?;
     Ok(table)
 }
 
@@ -248,6 +258,93 @@ fn stat_table(lua: &Lua, path: &Path, metadata: &std::fs::Metadata) -> mlua::Res
     table.set("modified", unix_seconds(metadata.modified()))?;
     table.set("readonly", metadata.permissions().readonly())?;
     Ok(table)
+}
+
+fn usage_options(table: &Table) -> mlua::Result<UsageOptions> {
+    Ok(UsageOptions {
+        newest_skip: table
+            .get::<Option<Vec<String>>>("newest_skip")?
+            .unwrap_or_default(),
+        subtotals: table
+            .get::<Option<Vec<String>>>("subtotals")?
+            .unwrap_or_default(),
+    })
+}
+
+fn usage_table(lua: &Lua, usage: &super::usage::Usage) -> mlua::Result<Table> {
+    let result = lua.create_table()?;
+    result.set("bytes", usage.bytes)?;
+    result.set("freed", usage.freed)?;
+    result.set("files", usage.files)?;
+    result.set("newest", usage.newest)?;
+    result.set("errors", usage.errors)?;
+    let parts = lua.create_table()?;
+    for (name, bytes) in &usage.parts {
+        parts.set(name.as_str(), *bytes)?;
+    }
+    result.set("parts", parts)?;
+    Ok(result)
+}
+
+/// `fs.usage_many`: walks folders on threads of its own, so the app's other
+/// work keeps its threads, and calls Lua back on this thread as each finishes.
+fn usage_many(lua: &Lua, options: &Table) -> mlua::Result<MultiValue> {
+    let paths: Vec<String> = options.get("paths")?;
+    let on_result: Function = options.get("on_result")?;
+    let walk = usage_options(options)?;
+    let roots = paths
+        .iter()
+        .map(|path| absolute(path))
+        .collect::<mlua::Result<Vec<_>>>()?;
+    let cancel = std::sync::Arc::clone(&services(lua)?.cancel);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(USAGE_THREADS)
+        .thread_name(|index| format!("plugin usage {index}"))
+        .build()
+        .map_err(mlua::Error::external)?;
+    // Set by Cancel or a failing callback; the walks only look at this.
+    let stop = AtomicBool::new(false);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let outcome = pool.in_place_scope(|scope| {
+        for (index, root) in roots.iter().enumerate() {
+            let sender = sender.clone();
+            let (stop, walk) = (&stop, &walk);
+            scope.spawn(move |_| {
+                if !stop.load(Ordering::Acquire) {
+                    let _ = sender.send((index, super::usage::measure(root, walk, stop)));
+                }
+            });
+        }
+        drop(sender);
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                stop.store(true, Ordering::Release);
+            }
+            let message = paused(lua, || receiver.recv_timeout(Duration::from_millis(50)))?;
+            let (index, result) = match message {
+                Ok(finished) => finished,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            };
+            let path = paths[index].as_str();
+            let called = match result {
+                Ok(Some(usage)) => {
+                    on_result.call::<()>((path, usage_table(lua, &usage)?, Value::Nil))
+                }
+                Ok(None) => Ok(()),
+                Err(error) => on_result.call::<()>((path, Value::Nil, error.to_string())),
+            };
+            if let Err(error) = called {
+                stop.store(true, Ordering::Release);
+                return Err(error);
+            }
+        }
+    });
+    outcome?;
+    if cancel.load(Ordering::Acquire) {
+        return failure(lua, "cancelled");
+    }
+    Ok(MultiValue::from_vec(vec![Value::Boolean(true)]))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -362,6 +459,33 @@ fn fs_table(lua: &Lua) -> mlua::Result<Table> {
             }
         })?,
     )?;
+    table.set(
+        "usage",
+        lua.create_function(move |lua, (path, options): (String, Option<Table>)| {
+            read(lua)?;
+            let path = absolute(&path)?;
+            let options = options.map_or_else(
+                || Ok(UsageOptions::default()),
+                |options| usage_options(&options),
+            )?;
+            let cancel = std::sync::Arc::clone(&services(lua)?.cancel);
+            let usage = paused(lua, || super::usage::measure(&path, &options, &cancel))?;
+            match usage {
+                Ok(Some(usage)) => Ok(MultiValue::from_vec(vec![Value::Table(usage_table(
+                    lua, &usage,
+                )?)])),
+                Ok(None) => failure(lua, "cancelled"),
+                Err(error) => failure(lua, error),
+            }
+        })?,
+    )?;
+    table.set(
+        "usage_many",
+        lua.create_function(move |lua, options: Table| {
+            read(lua)?;
+            usage_many(lua, &options)
+        })?,
+    )?;
     let write = |lua: &Lua| require(lua, &Permission::FsWrite);
     table.set(
         "write_text",
@@ -438,6 +562,16 @@ fn ops_table(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(move |lua, paths: Value| {
             write(lua)?;
             send(PluginMsg::App(AppRequest::FileOp(FileOp::Trash(
+                paths_arg(paths)?,
+            ))));
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "delete",
+        lua.create_function(move |lua, paths: Value| {
+            write(lua)?;
+            send(PluginMsg::App(AppRequest::FileOp(FileOp::Delete(
                 paths_arg(paths)?,
             ))));
             Ok(())
@@ -967,6 +1101,23 @@ const RUNNABLE: &[&str] = &[
     "command",
 ];
 
+fn needs_results_action(lua: &Lua) -> mlua::Result<()> {
+    let services = services(lua)?;
+    if services
+        .code
+        .manifest
+        .actions
+        .iter()
+        .any(|action| action.results)
+    {
+        Ok(())
+    } else {
+        Err(mlua::Error::runtime(
+            "tables need an action with results = true in plugin.toml",
+        ))
+    }
+}
+
 fn app_table(lua: &Lua) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set(
@@ -1020,6 +1171,33 @@ fn app_table(lua: &Lua) -> mlua::Result<Table> {
         "open_terminal",
         lua.create_function(|_, path: String| {
             send(PluginMsg::App(AppRequest::OpenTerminal(absolute(&path)?)));
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "show_table",
+        lua.create_function(|lua, spec: Value| {
+            let spec: super::table::TableSpec = lua.from_value(spec)?;
+            spec.check().map_err(mlua::Error::runtime)?;
+            needs_results_action(lua)?;
+            let services = services(lua)?;
+            send(PluginMsg::App(AppRequest::ShowTable {
+                plugin: services.code.id().to_owned(),
+                job: services.job.as_ref().map(|job| job.id),
+                spec,
+            }));
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "update_table_row",
+        lua.create_function(|lua, update: Value| {
+            let update: super::table::RowUpdate = lua.from_value(update)?;
+            needs_results_action(lua)?;
+            send(PluginMsg::App(AppRequest::UpdateTableRow {
+                plugin: services(lua)?.code.id().to_owned(),
+                update,
+            }));
             Ok(())
         })?,
     )?;

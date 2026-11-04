@@ -1,0 +1,44 @@
+api_version = 1
+id = "io.github.leinnan.folder-usage"
+name = "Folder Usage"
+version = "1.0.0"
+author = "DirFleet"
+description = "Which folders take the most disk space and when they last changed, sortable by either."
+permissions = ["fs.read", "fs.write"]
+
+[activation]
+always = true
+
+[[action]]
+id = "scan"
+title = "Folder Usage…"
+icon = "hard-drive"
+targets = { kind = "current_dir" }
+context_menu = "background"
+form = "static"
+mode = "job"
+results = true
+
+[[action.field]]
+id = "show"
+type = "radio"
+label = "Show"
+options = [["subfolders", "Subfolders of this folder"], ["rust", "Rust projects anywhere below"]]
+default = "subfolders"
+
+# From a row's menu in the results.
+[[action]]
+id = "remove_folder"
+title = "Remove folder"
+palette = false
+targets = { kind = "current_dir" }
+form = "dynamic"
+mode = "job"
+
+# Run after a row's menu entry changed its folder.
+[[action]]
+id = "refresh_row"
+title = "Measuring folder"
+palette = false
+targets = { kind = "current_dir" }
+mode = "job"

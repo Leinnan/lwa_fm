@@ -1,0 +1,29 @@
+api_version = 1
+id = "io.github.leinnan.rust-clean"
+name = "Rust Clean"
+version = "1.0.0"
+author = "DirFleet"
+description = "Clear a Rust project's target folder, or only its incremental build cache."
+permissions = ["fs.read", "fs.write", "process:cargo"]
+
+# Inside Rust projects only. ctx.root is the nearest folder with a Cargo.toml.
+[activation]
+ancestor_contains = ["Cargo.toml"]
+
+[[action]]
+id = "clear_target"
+title = "Rust: Clear target…"
+icon = "trash-2"
+targets = { kind = "current_dir" }
+context_menu = "background"
+form = "dynamic"
+mode = "job"
+
+[[action]]
+id = "clear_incremental"
+title = "Rust: Clear incremental…"
+icon = "eraser"
+targets = { kind = "current_dir" }
+context_menu = "background"
+form = "dynamic"
+mode = "job"

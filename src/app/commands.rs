@@ -67,6 +67,8 @@ pub enum ModalWindow {
     ConfirmEject,
     /// A plugin action's form.
     PluginForm,
+    /// A plugin action's options and results.
+    PluginResults,
     /// Choose which overview frame is a video's thumbnail.
     SelectThumbnail,
 }
@@ -82,6 +84,7 @@ impl Display for ModalWindow {
             Self::Conflict => write!(f, "Replace or skip"),
             Self::ConfirmEject => write!(f, "Eject drive"),
             Self::PluginForm => write!(f, "Plugin"),
+            Self::PluginResults => write!(f, "Plugin results"),
             Self::ChooseFolder => write!(f, "Choose folder"),
             Self::EditSavedSearch => write!(f, "Saved search"),
             Self::BatchRename => write!(f, "Rename items"),

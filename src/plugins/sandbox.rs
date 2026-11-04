@@ -206,6 +206,7 @@ pub fn create(
 /// Removes everything that reaches outside the plugin and adds safe
 /// replacements: `require` over the plugin's files, `print` to the log and
 /// a small `os`.
+#[allow(clippy::too_many_lines)]
 fn restrict_globals(lua: &Lua, code: &Arc<PluginCode>) -> mlua::Result<()> {
     let globals = lua.globals();
     // File access and loading bytecode, which can crash the interpreter.

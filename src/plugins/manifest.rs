@@ -263,6 +263,10 @@ pub struct ActionDef {
     pub per_item: bool,
     /// Ask before running, with this text.
     pub confirm: Option<String>,
+    /// Open a dialog holding the options and the results `show_table` sends,
+    /// which can stop, restart or leave the job running in the background.
+    #[serde(default)]
+    pub results: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -434,6 +438,17 @@ fn validate(manifest: &Manifest) -> Result<(), String> {
             .check()
             .map_err(|error| format!("action \"{}\": {error}", action.id))?;
         }
+        if action.results
+            && (action.mode != RunMode::Job
+                || action.per_item
+                || action.form == FormMode::Dynamic
+                || action.confirm.is_some())
+        {
+            return Err(format!(
+                "action \"{}\": results needs mode = \"job\", no per_item or confirm, and a static form or none",
+                action.id
+            ));
+        }
         if action.per_item && action.mode != RunMode::Job {
             return Err(format!(
                 "action \"{}\": per_item needs mode = \"job\"",
@@ -536,6 +551,19 @@ author = "Me"
                 .message
                 .contains("twice")
         );
+        for bad in [
+            "",
+            "mode = \"job\"\nform = \"dynamic\"\n",
+            "mode = \"job\"\nper_item = true\n",
+        ] {
+            let results =
+                format!("{MINIMAL}[[action]]\nid = \"a\"\ntitle = \"A\"\nresults = true\n{bad}");
+            assert!(parse(&results).is_err(), "{bad}");
+        }
+        let results = format!(
+            "{MINIMAL}[[action]]\nid = \"a\"\ntitle = \"A\"\nresults = true\nmode = \"job\"\n"
+        );
+        assert!(parse(&results).is_ok());
         let per_item = format!("{MINIMAL}[[action]]\nid = \"a\"\ntitle = \"A\"\nper_item = true\n");
         assert!(parse(&per_item).is_err());
         let shortcut =

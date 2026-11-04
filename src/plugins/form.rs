@@ -5,6 +5,7 @@
 //! values, so no Lua runs while the dialog is open. `visible_if` and
 //! `enabled_if` are evaluated here for the same reason.
 
+use crate::app::ui::{ButtonKind, DialogButton};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -18,6 +19,15 @@ pub struct Form {
     pub title: Option<String>,
     /// The submit button's text.
     pub submit: Option<String>,
+    /// The submit button removes something for good: draw it red.
+    #[serde(default)]
+    pub danger: bool,
+    /// Other looks for the submit button, depending on the values.
+    #[serde(default)]
+    pub submit_when: Vec<SubmitVariant>,
+    /// There is nothing to submit, as the fields explain: only Close remains.
+    #[serde(default)]
+    pub blocked: bool,
     /// Start from the values used last time.
     #[serde(default)]
     pub remember: bool,
@@ -25,11 +35,31 @@ pub struct Form {
     pub fields: Vec<FieldDef>,
 }
 
+/// The submit button while a condition holds; the first that does wins.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitVariant {
+    pub when: Condition,
+    pub label: String,
+    #[serde(default)]
+    pub danger: bool,
+}
+
+/// One line of a `paths` field.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathRow {
+    pub path: String,
+    pub size: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
     /// Read-only text.
     Info,
+    /// Folders or files an action will affect, with their sizes, in a card.
+    Paths,
     Separator,
     /// A labelled box around `fields`.
     Group,
@@ -49,7 +79,10 @@ pub enum FieldType {
 impl FieldType {
     /// Whether the field holds a value (and so needs an id).
     pub const fn is_input(self) -> bool {
-        !matches!(self, Self::Info | Self::Separator | Self::Group)
+        !matches!(
+            self,
+            Self::Info | Self::Paths | Self::Separator | Self::Group
+        )
     }
 }
 
@@ -152,6 +185,9 @@ pub struct FieldDef {
     pub fields: Vec<Self>,
     #[serde(default)]
     pub mode: PathMode,
+    /// For `paths`.
+    #[serde(default)]
+    pub rows: Vec<PathRow>,
 }
 
 impl FieldDef {
@@ -191,7 +227,9 @@ impl FieldDef {
                 .first()
                 .map_or(Value::Null, |option| Value::from(option.value())),
             FieldType::Text | FieldType::Multiline | FieldType::Path => Value::from(""),
-            FieldType::Info | FieldType::Separator | FieldType::Group => Value::Null,
+            FieldType::Info | FieldType::Paths | FieldType::Separator | FieldType::Group => {
+                Value::Null
+            }
         }
     }
 
@@ -231,7 +269,9 @@ impl FieldDef {
                 Value::Number(number) => Ok(Value::String(number.to_string())),
                 _ => Err("must be text".into()),
             },
-            FieldType::Info | FieldType::Separator | FieldType::Group => Ok(Value::Null),
+            FieldType::Info | FieldType::Paths | FieldType::Separator | FieldType::Group => {
+                Ok(Value::Null)
+            }
         }
     }
 
@@ -439,6 +479,35 @@ pub struct FormState {
     pub busy: bool,
 }
 
+/// The `paths` field: each path on the left, its size lined up on the right.
+fn paths_ui(ui: &mut egui::Ui, rows: &[PathRow]) {
+    crate::app::ui::card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 4.0;
+        let height = ui.spacing().interact_size.y;
+        for row in rows {
+            // A set height: a right-to-left layout would take all there is.
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), height),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if let Some(size) = &row.size {
+                        ui.strong(size);
+                    }
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add(egui::Label::new(row.path.as_str()).truncate())
+                                .on_hover_text(row.path.as_str());
+                        },
+                    );
+                },
+            );
+        }
+    });
+}
+
 impl FormState {
     pub fn new(form: Form, remembered: Option<&Values>) -> Self {
         let values = form.initial_values(remembered);
@@ -452,6 +521,76 @@ impl FormState {
         }
     }
 
+    /// Draws the fields in one row, for a toolbar: radio fields as segmented
+    /// buttons, which need no label of their own.
+    pub fn toolbar_ui(&mut self, ui: &mut egui::Ui) {
+        let fields = std::mem::take(&mut self.form.fields);
+        for field in &fields {
+            if !field.visible(&self.values) {
+                continue;
+            }
+            if field.kind == FieldType::Radio {
+                let current = self
+                    .values
+                    .get(field.id())
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let selected = field
+                    .options
+                    .iter()
+                    .position(|option| option.value() == current)
+                    .unwrap_or(0);
+                let tip = field.help.as_deref().unwrap_or_default();
+                let choices: Vec<(&str, bool, &str)> = field
+                    .options
+                    .iter()
+                    .map(|option| (option.label(), field.enabled(&self.values), tip))
+                    .collect();
+                if let Some(index) = crate::app::ui::segmented_text(ui, &choices, selected) {
+                    self.values.insert(
+                        field.id().to_owned(),
+                        Value::from(field.options[index].value()),
+                    );
+                }
+            } else if field.kind.is_input() {
+                ui.label(field.label());
+                self.input_ui(ui, field);
+            }
+        }
+        self.form.fields = fields;
+    }
+
+    /// What the last check or run had to say, if anything.
+    pub fn message_ui(&self, ui: &mut egui::Ui) {
+        if let Some(message) = &self.message {
+            ui.colored_label(ui.visuals().error_fg_color, message);
+        }
+    }
+
+    /// The submit button's text and kind for the values now.
+    fn submit_button(&self) -> (String, ButtonKind) {
+        let kind = |danger: bool| {
+            if danger {
+                ButtonKind::Danger
+            } else {
+                ButtonKind::Primary
+            }
+        };
+        self.form
+            .submit_when
+            .iter()
+            .find(|variant| variant.when.holds(&self.values))
+            .map_or_else(
+                || {
+                    (
+                        self.form.submit.clone().unwrap_or_else(|| "Run".into()),
+                        kind(self.form.danger),
+                    )
+                },
+                |variant| (variant.label.clone(), kind(variant.danger)),
+            )
+    }
+
     /// Draws the dialog's fields and buttons.
     pub fn ui(&mut self, ui: &mut egui::Ui, default_title: &str) -> Outcome {
         let mut outcome = Outcome::Open;
@@ -461,84 +600,107 @@ impl FormState {
             .clone()
             .unwrap_or_else(|| default_title.to_owned());
         ui.heading(title);
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         let fields = std::mem::take(&mut self.form.fields);
         egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
             .max_height((ui.ctx().content_rect().height() - 200.0).max(160.0))
             .show(ui, |ui| {
-                egui::Grid::new("plugin_form")
-                    .num_columns(2)
-                    .spacing([12.0, 8.0])
-                    .show(ui, |ui| self.fields_ui(ui, &fields));
+                ui.spacing_mut().item_spacing.y = 8.0;
+                self.fields_ui(ui, &fields);
             });
         self.form.fields = fields;
-        if let Some(message) = &self.message {
-            ui.colored_label(ui.visuals().error_fg_color, message);
+        self.message_ui(ui);
+        if self.busy {
+            ui.spinner();
         }
-        ui.separator();
-        ui.horizontal(|ui| {
-            let submit = self.form.submit.clone().unwrap_or_else(|| "Run".into());
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
-                && !ui.ctx().text_edit_focused();
-            if self.busy {
-                ui.spinner();
-            }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new(submit))
-                .clicked()
-                || (enter && !self.busy)
-            {
-                outcome = Outcome::Submit;
-            }
-            if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        let (label, kind) = self.submit_button();
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+            && !ui.ctx().text_edit_focused();
+        let submit = crate::app::ui::DialogButton {
+            label: &label,
+            kind,
+            enabled: !self.busy,
+        };
+        if self.form.blocked {
+            let close = [DialogButton::plain("Close")];
+            if crate::app::ui::dialog_buttons(ui, false, &close).is_some() {
                 outcome = Outcome::Cancel;
             }
-        });
+        } else {
+            let buttons = [submit, DialogButton::plain("Cancel")];
+            match crate::app::ui::dialog_buttons(ui, false, &buttons) {
+                Some(0) => outcome = Outcome::Submit,
+                Some(_) => outcome = Outcome::Cancel,
+                None if enter && !self.busy => outcome = Outcome::Submit,
+                None => {}
+            }
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            outcome = Outcome::Cancel;
+        }
         outcome
     }
 
+    /// Text and lists take the dialog's whole width; runs of inputs between
+    /// them line up in a grid of their own.
     fn fields_ui(&mut self, ui: &mut egui::Ui, fields: &[FieldDef]) {
-        for field in fields {
-            if !field.visible(&self.values) {
-                continue;
-            }
+        let visible: Vec<&FieldDef> = fields
+            .iter()
+            .filter(|field| field.visible(&self.values))
+            .collect();
+        let mut at = 0;
+        while at < visible.len() {
+            let field = visible[at];
             match field.kind {
                 FieldType::Info => {
                     if let Some(text) = field.text.as_deref().filter(|text| !text.is_empty()) {
-                        ui.label("");
-                        ui.add(egui::Label::new(egui::RichText::new(text).weak()).wrap());
-                        ui.end_row();
+                        ui.add(egui::Label::new(text).wrap());
                     }
                 }
+                FieldType::Paths => paths_ui(ui, &field.rows),
                 FieldType::Separator => {
                     ui.separator();
-                    ui.separator();
-                    ui.end_row();
                 }
                 FieldType::Group => {
                     ui.label(egui::RichText::new(field.label()).strong());
-                    ui.label("");
-                    ui.end_row();
                     self.fields_ui(ui, &field.fields);
                 }
                 _ => {
-                    let label = ui.label(field.label());
-                    if let Some(help) = &field.help {
-                        label.on_hover_text(help);
+                    let start = at;
+                    while visible.get(at + 1).is_some_and(|next| next.kind.is_input()) {
+                        at += 1;
                     }
-                    let enabled = field.enabled(&self.values);
-                    ui.add_enabled_ui(enabled, |ui| {
-                        ui.vertical(|ui| {
-                            self.input_ui(ui, field);
-                            if let Some(error) = self.errors.get(field.id()) {
-                                ui.colored_label(ui.visuals().error_fg_color, error);
+                    egui::Grid::new(("plugin_form", field.id()))
+                        .num_columns(2)
+                        .spacing([12.0, 8.0])
+                        .show(ui, |ui| {
+                            for field in &visible[start..=at] {
+                                self.input_row_ui(ui, field);
                             }
                         });
-                    });
-                    ui.end_row();
                 }
             }
+            at += 1;
         }
+    }
+
+    /// A row of the grid: the field's label, then its input and any error.
+    fn input_row_ui(&mut self, ui: &mut egui::Ui, field: &FieldDef) {
+        let label = ui.label(field.label());
+        if let Some(help) = &field.help {
+            label.on_hover_text(help);
+        }
+        let enabled = field.enabled(&self.values);
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.vertical(|ui| {
+                self.input_ui(ui, field);
+                if let Some(error) = self.errors.get(field.id()) {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            });
+        });
+        ui.end_row();
     }
 
     #[allow(clippy::too_many_lines)]
@@ -675,7 +837,7 @@ impl FormState {
                 }
                 result
             }
-            FieldType::Info | FieldType::Separator | FieldType::Group => None,
+            FieldType::Info | FieldType::Paths | FieldType::Separator | FieldType::Group => None,
         };
         if let Some(value) = changed {
             if field.kind != FieldType::Time {

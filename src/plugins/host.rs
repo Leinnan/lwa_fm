@@ -6,12 +6,15 @@ use super::form::{FormState, Outcome, Values};
 use super::jobs::{self, JobSpec};
 use super::keymap::{self, PluginBinding};
 use super::manifest::{FormMode, RunMode, TargetInfo};
+use super::panel::{JobView, PanelClick, PanelOutcome, ResultsPanel};
 use super::permissions::PermissionSet;
 use super::runtime::{Request, Worker};
+use super::table::{RowClick, RowStatus};
 use super::{
     ActionEntry, BarSegment, CallContext, InspectorRow, JobEvent, PluginCode, PluginMsg, Registry,
     Source,
 };
+use crate::app::ui::{DialogButton, dialog_buttons};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -121,6 +124,17 @@ pub struct OpenForm {
     request: u64,
     pub state: Option<FormState>,
     pub error: Option<String>,
+    /// Started from a row of a results dialog.
+    row: Option<RowOrigin>,
+}
+
+/// The row of a results dialog that an action was started from.
+#[derive(Clone)]
+struct RowOrigin {
+    panel: String,
+    path: PathBuf,
+    /// What the row says while the action runs.
+    busy: String,
 }
 
 pub struct Job {
@@ -132,6 +146,8 @@ pub struct Job {
     pub cancel: Arc<AtomicBool>,
     per_item: bool,
     pub waiting: bool,
+    /// A newer run replaced it: nobody needs to hear it ended.
+    quiet: bool,
 }
 
 pub struct FinishedJob {
@@ -172,6 +188,14 @@ pub struct InspectorView<'a> {
     pub state: &'a InspectorState,
 }
 
+/// What starting an action opened, if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Started {
+    Nothing,
+    Form,
+    Results,
+}
+
 #[derive(Default)]
 pub struct PluginHost {
     pub dir: Option<PathBuf>,
@@ -184,6 +208,26 @@ pub struct PluginHost {
     dirty: BTreeMap<PathBuf, Instant>,
     next_id: u64,
     pub form: Option<OpenForm>,
+    /// The results dialogs of actions run so far, shown or in the background.
+    pub panels: Vec<ResultsPanel>,
+    /// The key of the panel on screen.
+    shown_panel: Option<String>,
+    /// The row whose menu is starting an action.
+    pending_row: Option<RowOrigin>,
+    /// The title of the confirmation that row's action will show.
+    pending_title: Option<String>,
+    /// The panel to show again when the open form closes.
+    form_return: Option<String>,
+    /// Jobs started from a row, by job id.
+    row_jobs: Vec<(u64, RowOrigin)>,
+    /// Jobs measuring a row again, by job id.
+    measure_jobs: Vec<(u64, RowOrigin)>,
+    /// Rows whose job has ended while file operations plugins asked for are
+    /// still going: the deleting may be one of them, so new sizes must wait.
+    rows_settling: Vec<RowOrigin>,
+    /// File operations plugins asked for that haven't finished. They report no
+    /// link to the job that asked.
+    file_ops_pending: usize,
     pub jobs: Vec<Job>,
     queued: VecDeque<JobSpec>,
     pub finished: VecDeque<FinishedJob>,
@@ -218,6 +262,12 @@ impl PluginHost {
             plugins: codes.into_iter().map(Plugin::new).collect(),
             ..Self::default()
         }
+    }
+
+    /// A host with the bundled plugins and no folder, for tests.
+    #[cfg(test)]
+    pub fn bundled_only() -> Self {
+        Self::with_plugins(discovery::bundled())
     }
 
     fn watch(&mut self, dir: &Path) {
@@ -354,6 +404,7 @@ impl PluginHost {
     /// Once a frame: reloads edited plugins, starts and stops workers to
     /// match the settings, starts waiting jobs and expires bar contents.
     pub fn poll(&mut self, settings: &SettingsMap) {
+        self.sync_row_statuses();
         self.poll_watcher();
         for index in 0..self.plugins.len() {
             let plugin = &mut self.plugins[index];
@@ -550,22 +601,25 @@ impl PluginHost {
         full_id: &str,
         context: CallContext,
         settings: &SettingsMap,
-    ) -> bool {
+    ) -> Started {
         let Some((plugin_id, action_id)) = Self::split_action(full_id) else {
-            return false;
+            return Started::Nothing;
         };
         self.next_id += 1;
         let request = self.next_id;
+        let row = self.pending_row.take();
+        let title = self.pending_title.take();
+        self.form_return = row.as_ref().map(|row| row.panel.clone());
         let Some(plugin) = self.plugin(plugin_id) else {
             crate::toast!(Error, "No plugin {plugin_id}");
-            return false;
+            return Started::Nothing;
         };
         let Some(worker) = plugin.running() else {
             crate::toast!(Info, "{} isn't running", plugin.code.manifest.name);
-            return false;
+            return Started::Nothing;
         };
         let Some(action) = plugin.code.action(action_id).cloned() else {
-            return false;
+            return Started::Nothing;
         };
         if !action
             .targets
@@ -576,16 +630,21 @@ impl PluginHost {
                 "\u{201c}{}\u{201d} doesn't apply to the selection",
                 action.title
             );
-            return false;
+            return Started::Nothing;
+        }
+        if action.results {
+            self.open_panel(plugin_id, action_id, action, context, settings);
+            return Started::Results;
         }
         let mut form = OpenForm {
             plugin: plugin_id.to_owned(),
             action: action_id.to_owned(),
-            title: action.title.clone(),
+            title: title.unwrap_or_else(|| action.title.clone()),
             context,
             request,
             state: None,
             error: None,
+            row,
         };
         let remembered = settings
             .get(plugin_id)
@@ -623,27 +682,356 @@ impl PluginHost {
                     };
                     form.state = Some(FormState::new(confirm, None));
                 } else {
-                    let context = form.context;
-                    self.dispatch(plugin_id, action_id, context);
-                    return false;
+                    self.form_return = None;
+                    let (context, row) = (form.context, form.row);
+                    let job = self.dispatch(plugin_id, action_id, context);
+                    if let (Some(job), Some(row)) = (job, row) {
+                        self.row_jobs.push((job, row));
+                    }
+                    return Started::Nothing;
                 }
             }
         }
         self.form = Some(form);
-        true
+        Started::Form
+    }
+
+    /// Shows the action's results dialog, making it first if need be. A run
+    /// in progress keeps its folder; otherwise the next run acts on `context`.
+    fn open_panel(
+        &mut self,
+        plugin_id: &str,
+        action_id: &str,
+        action: super::manifest::ActionDef,
+        context: CallContext,
+        settings: &SettingsMap,
+    ) {
+        let key = format!("{plugin_id}.{action_id}");
+        let jobs = &self.jobs;
+        if let Some(panel) = self.panels.iter_mut().find(|panel| panel.key() == key) {
+            if !jobs.iter().any(|job| Some(job.id) == panel.job) {
+                panel.context = context;
+            }
+        } else {
+            let form = super::form::Form {
+                title: Some(action.title.clone()),
+                remember: true,
+                fields: action.fields,
+                ..Default::default()
+            };
+            let remembered = settings
+                .get(plugin_id)
+                .and_then(|settings| settings.remembered.get(action_id));
+            self.panels.push(ResultsPanel {
+                plugin: plugin_id.to_owned(),
+                action: action_id.to_owned(),
+                title: action.title.trim_end_matches('…').to_owned(),
+                context,
+                state: FormState::new(form, remembered),
+                request: None,
+                job: None,
+                results_dir: None,
+                table: None,
+                last_sort: None,
+                last_filter: super::table::SizeFilter::default(),
+            });
+        }
+        self.shown_panel = Some(key);
+    }
+
+    /// Brings back a panel from the status bar, with its folder unchanged.
+    pub fn show_panel(&mut self, key: &str) {
+        self.shown_panel = Some(key.to_owned());
+    }
+
+    /// Forgets a finished panel's results.
+    pub fn discard_panel(&mut self, key: &str) {
+        self.panels.retain(|panel| panel.key() != key);
+        if self.shown_panel.as_deref() == Some(key) {
+            self.shown_panel = None;
+        }
+    }
+
+    /// Whether the panel's latest run hasn't ended.
+    pub fn panel_running(&self, panel: &ResultsPanel) -> bool {
+        self.jobs.iter().any(|job| Some(job.id) == panel.job)
+    }
+
+    /// Hands a job's table to the dialog of its run. Late updates from a run
+    /// that was replaced find no panel.
+    pub fn apply_table(&mut self, plugin: &str, job: Option<u64>, spec: super::table::TableSpec) {
+        if job.is_none() {
+            return;
+        }
+        if let Some(panel) = self
+            .panels
+            .iter_mut()
+            .find(|panel| panel.plugin == plugin && panel.job == job)
+        {
+            panel.show(spec);
+        }
+    }
+
+    /// Run or Restart was pressed: checks the options, then asks the plugin.
+    fn run_panel(&mut self, index: usize) {
+        self.next_id += 1;
+        let request = self.next_id;
+        let panel = &mut self.panels[index];
+        let state = &mut panel.state;
+        match state.form.validate(&state.values) {
+            Ok(values) => {
+                state.values = values;
+                state.errors.clear();
+            }
+            Err(errors) => {
+                state.errors = errors;
+                return;
+            }
+        }
+        let worker = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id() == panel.plugin)
+            .and_then(Plugin::running);
+        let Some(worker) = worker else {
+            state.message = Some("The plugin stopped running.".into());
+            return;
+        };
+        state.busy = true;
+        panel.request = Some(request);
+        let mut context = panel.context.clone();
+        context.values = Some(state.values.clone());
+        worker.request(Request::Validate {
+            request,
+            action: panel.action.clone(),
+            context,
+        });
+    }
+
+    fn panel_validated(
+        &mut self,
+        index: usize,
+        result: Result<BTreeMap<String, String>, String>,
+        settings: &mut SettingsMap,
+    ) {
+        let panel = &mut self.panels[index];
+        panel.request = None;
+        panel.state.busy = false;
+        match result {
+            Ok(errors) if errors.is_empty() => {
+                if panel.state.form.remember {
+                    settings
+                        .entry(panel.plugin.clone())
+                        .or_default()
+                        .remembered
+                        .insert(panel.action.clone(), panel.state.values.clone());
+                }
+                panel.context.values = Some(panel.state.values.clone());
+                let (plugin, action) = (panel.plugin.clone(), panel.action.clone());
+                let context = panel.context.clone();
+                let replaced = panel.job;
+                if let Some(job) = self.jobs.iter_mut().find(|job| Some(job.id) == replaced) {
+                    job.quiet = true;
+                }
+                if let Some(id) = replaced {
+                    self.cancel_job(id);
+                }
+                let job = self.dispatch(&plugin, &action, context);
+                self.panels[index].started(job);
+            }
+            Ok(mut errors) => {
+                panel.state.message = errors.remove("");
+                panel.state.errors = errors;
+            }
+            Err(error) => panel.state.message = Some(error),
+        }
+    }
+
+    /// Draws the dialog on screen and carries out what was pressed in it.
+    pub fn panel_ui(&mut self, ctx: &egui::Context) -> PanelOutcome {
+        let shown = self.shown_panel.as_deref();
+        let Some(index) = self
+            .panels
+            .iter()
+            .position(|panel| Some(panel.key().as_str()) == shown)
+        else {
+            return PanelOutcome::Hide;
+        };
+        let job = self
+            .jobs
+            .iter()
+            .find(|job| Some(job.id) == self.panels[index].job)
+            .map(|job| JobView {
+                waiting: job.waiting,
+                fraction: job.fraction,
+                label: job.label.clone(),
+            });
+        match self.panels[index].ui(ctx, job.as_ref()) {
+            None => PanelOutcome::Open,
+            Some(PanelClick::Run) => {
+                self.run_panel(index);
+                PanelOutcome::Open
+            }
+            Some(PanelClick::Stop) => {
+                if let Some(id) = self.panels[index].job {
+                    self.cancel_job(id);
+                }
+                PanelOutcome::Open
+            }
+            Some(PanelClick::Hide) => PanelOutcome::Hide,
+            Some(PanelClick::Row(RowClick::Open(path))) => PanelOutcome::OpenRow(path),
+            Some(PanelClick::Row(RowClick::MeasureAgain(path))) => {
+                let row = RowOrigin {
+                    panel: self.panels[index].key(),
+                    path,
+                    busy: String::new(),
+                };
+                self.measure_row_again(&row);
+                PanelOutcome::Open
+            }
+            Some(PanelClick::Row(RowClick::Action { path, item })) => {
+                self.pending_row = Some(RowOrigin {
+                    panel: self.panels[index].key(),
+                    path: path.clone(),
+                    busy: item.busy.clone().unwrap_or_else(|| "Working…".to_owned()),
+                });
+                self.pending_title = item.title;
+                PanelOutcome::RowAction {
+                    action: item.action,
+                    path,
+                }
+            }
+        }
+    }
+
+    /// The panel to go back to, once the form opened from it has closed.
+    pub const fn take_form_return(&mut self) -> Option<String> {
+        self.form_return.take()
+    }
+
+    fn set_row_status(&mut self, row: &RowOrigin, status: Option<RowStatus>) {
+        if let Some(table) = self
+            .panels
+            .iter_mut()
+            .find(|panel| panel.key() == row.panel)
+            .and_then(|panel| panel.table.as_mut())
+        {
+            table.set_status(&row.path, status);
+        }
+    }
+
+    /// Runs the table's `refresh_action` for one row, without announcing it.
+    fn measure_row_again(&mut self, row: &RowOrigin) {
+        let Some(panel) = self.panels.iter().find(|panel| panel.key() == row.panel) else {
+            return;
+        };
+        let Some(table) = panel
+            .table
+            .as_ref()
+            .filter(|table| table.has_row(&row.path))
+        else {
+            return;
+        };
+        let Some(action) = table.refresh_action().map(ToOwned::to_owned) else {
+            self.set_row_status(row, None);
+            return;
+        };
+        let plugin = panel.plugin.clone();
+        let context = CallContext {
+            dir: Some(row.path.clone()),
+            ..Default::default()
+        };
+        let job = self.dispatch(&plugin, &action, context);
+        if let Some(id) = job {
+            if let Some(job) = self.jobs.iter_mut().find(|each| each.id == id) {
+                job.quiet = true;
+            }
+            self.measure_jobs.push((id, row.clone()));
+            self.set_row_status(row, Some(RowStatus::Measuring));
+        }
+    }
+
+    /// A plugin asked for a file operation.
+    pub const fn file_op_requested(&mut self) {
+        self.file_ops_pending += 1;
+    }
+
+    /// A file operation ended. Once none a plugin asked for are left, the rows
+    /// that were waiting are measured: their deleting is done.
+    pub fn file_op_finished(&mut self) {
+        self.file_ops_pending = self.file_ops_pending.saturating_sub(1);
+        if self.file_ops_pending == 0 {
+            for row in std::mem::take(&mut self.rows_settling) {
+                self.measure_row_again(&row);
+            }
+        }
+    }
+
+    /// Keeps rows saying whether their job is queued or running.
+    fn sync_row_statuses(&mut self) {
+        for index in 0..self.row_jobs.len() {
+            let (id, row) = self.row_jobs[index].clone();
+            let Some(waiting) = self
+                .jobs
+                .iter()
+                .find(|job| job.id == id)
+                .map(|job| job.waiting)
+            else {
+                continue;
+            };
+            let status = if waiting {
+                RowStatus::Waiting
+            } else {
+                RowStatus::Working(row.busy.clone())
+            };
+            self.set_row_status(&row, Some(status));
+        }
+    }
+
+    /// A job ended: moves on any row it belonged to.
+    fn row_job_finished(&mut self, id: u64, failures: &[String]) {
+        if let Some(index) = self.measure_jobs.iter().position(|(job, _)| *job == id) {
+            let (_, row) = self.measure_jobs.remove(index);
+            // Its update has arrived by now, and cleared the row, or it failed.
+            let status = (!failures.is_empty()).then(|| RowStatus::Failed(failures.join("\n")));
+            self.set_row_status(&row, status);
+        }
+        let Some(index) = self.row_jobs.iter().position(|(job, _)| *job == id) else {
+            return;
+        };
+        let (_, row) = self.row_jobs.remove(index);
+        if !failures.is_empty() {
+            self.set_row_status(&row, Some(RowStatus::Failed(failures.join("\n"))));
+        } else if self.file_ops_pending > 0 {
+            self.rows_settling.push(row);
+        } else {
+            self.measure_row_again(&row);
+        }
+    }
+
+    /// Changes one row of the plugin's results.
+    pub fn apply_row(&mut self, plugin: &str, update: super::table::RowUpdate) {
+        if let Some(table) = self
+            .panels
+            .iter_mut()
+            .filter(|panel| panel.plugin == plugin)
+            .filter_map(|panel| panel.table.as_mut())
+            .find(|table| table.has_row(&update.path))
+        {
+            table.update_row(update);
+        }
     }
 
     /// Runs an action with its (validated) values.
-    fn dispatch(&mut self, plugin_id: &str, action_id: &str, context: CallContext) {
+    fn dispatch(&mut self, plugin_id: &str, action_id: &str, context: CallContext) -> Option<u64> {
         self.next_id += 1;
         let id = self.next_id;
         // The field, not `self.plugin()`, so `self.jobs` stays free.
-        let Some(plugin) = self.plugins.iter().find(|plugin| plugin.id() == plugin_id) else {
-            return;
-        };
-        let Some(action) = plugin.code.action(action_id) else {
-            return;
-        };
+        let plugin = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id() == plugin_id)?;
+        let action = plugin.code.action(action_id)?;
         match action.mode {
             RunMode::Quick => {
                 if let Some(worker) = plugin.running() {
@@ -652,6 +1040,7 @@ impl PluginHost {
                         context,
                     });
                 }
+                None
             }
             RunMode::Job => {
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -670,6 +1059,7 @@ impl PluginHost {
                     cancel: Arc::clone(&cancel),
                     per_item: action.per_item,
                     waiting: true,
+                    quiet: false,
                 });
                 self.queued.push_back(JobSpec {
                     id,
@@ -681,6 +1071,7 @@ impl PluginHost {
                     cancel,
                 });
                 self.start_jobs();
+                Some(id)
             }
         }
     }
@@ -891,6 +1282,14 @@ impl PluginHost {
         result: Result<BTreeMap<String, String>, String>,
         settings: &mut SettingsMap,
     ) {
+        if let Some(index) = self
+            .panels
+            .iter()
+            .position(|panel| panel.request == Some(request))
+        {
+            self.panel_validated(index, result, settings);
+            return;
+        }
         let Some(form) = self.form.as_mut().filter(|form| form.request == request) else {
             return;
         };
@@ -910,8 +1309,12 @@ impl PluginHost {
                 let mut context = form.context.clone();
                 context.values = Some(state.values.clone());
                 let (plugin, action) = (form.plugin.clone(), form.action.clone());
+                let row = form.row.take();
                 self.form = None;
-                self.dispatch(&plugin, &action, context);
+                let job = self.dispatch(&plugin, &action, context);
+                if let (Some(job), Some(row)) = (job, row) {
+                    self.row_jobs.push((job, row));
+                }
             }
             Ok(mut errors) => {
                 state.message = errors.remove("");
@@ -927,27 +1330,32 @@ impl PluginHost {
             return true;
         };
         let mut outcome = Outcome::Open;
-        let modal = egui::Modal::new(egui::Id::new("plugin_form")).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(320.0, 520.0));
-            if let Some(state) = form.state.as_mut() {
-                outcome = state.ui(ui, &form.title);
-            } else if let Some(error) = &form.error {
-                ui.heading(&form.title);
-                ui.colored_label(ui.visuals().error_fg_color, error);
-                if ui.button("Close").clicked() {
-                    outcome = Outcome::Cancel;
+        let modal = egui::Modal::new(egui::Id::new("plugin_form"))
+            .frame(super::super::app::ui::dialog_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(320.0, 560.0));
+                if let Some(state) = form.state.as_mut() {
+                    outcome = state.ui(ui, &form.title);
+                } else if let Some(error) = &form.error {
+                    ui.heading(&form.title);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    let close = [DialogButton::plain("Close")];
+                    if dialog_buttons(ui, false, &close).is_some() {
+                        outcome = Outcome::Cancel;
+                    }
+                } else {
+                    ui.heading(&form.title);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Preparing…");
+                    });
+                    let cancel = [DialogButton::plain("Cancel")];
+                    if dialog_buttons(ui, false, &cancel).is_some() {
+                        outcome = Outcome::Cancel;
+                    }
                 }
-            } else {
-                ui.heading(&form.title);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Preparing…");
-                });
-                if ui.button("Cancel").clicked() {
-                    outcome = Outcome::Cancel;
-                }
-            }
-        });
+            });
         if modal.should_close() {
             outcome = Outcome::Cancel;
         }
@@ -1012,6 +1420,17 @@ impl PluginHost {
                 let job = self.jobs.remove(index);
                 let summary = job_summary(&job, done, skipped, &failures, cancelled);
                 let ok = failures.is_empty();
+                if let Some(panel) = self.panels.iter_mut().find(|panel| panel.job == Some(id))
+                    && !failures.is_empty()
+                {
+                    panel.state.message = Some(failures.join("\n"));
+                }
+                self.row_job_finished(id, &failures);
+                if job.quiet {
+                    log::debug!("{summary}");
+                    self.start_jobs();
+                    return;
+                }
                 if cancelled {
                     crate::toast!(Info, "{summary}");
                 } else if ok {
@@ -1311,6 +1730,7 @@ mod tests {
             cancel: Arc::default(),
             per_item: true,
             waiting: false,
+            quiet: false,
         };
         assert_eq!(
             job_summary(&job, 3, 1, &["x: bad".into()], false),

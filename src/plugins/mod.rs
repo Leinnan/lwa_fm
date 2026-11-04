@@ -16,12 +16,17 @@ pub mod host;
 mod jobs;
 pub mod keymap;
 pub mod manifest;
+pub mod panel;
 pub mod permissions;
 mod runtime;
 mod sandbox;
+pub mod table;
 #[cfg(test)]
 mod tests;
 pub mod ui;
+pub mod usage;
+#[cfg(target_os = "macos")]
+mod usage_bulk;
 
 pub use host::PluginHost;
 pub use host::targets_from_entries as host_targets;
@@ -127,7 +132,21 @@ pub enum AppRequest {
     OpenTerminal(PathBuf),
     FileOp(crate::fileops::FileOp),
     Clipboard(String),
-    Notify { level: NotifyLevel, text: String },
+    Notify {
+        level: NotifyLevel,
+        text: String,
+    },
+    /// A job's results, for the dialog of the run it belongs to.
+    ShowTable {
+        plugin: String,
+        job: Option<u64>,
+        spec: table::TableSpec,
+    },
+    /// A change to one row of the plugin's results.
+    UpdateTableRow {
+        plugin: String,
+        update: table::RowUpdate,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,8 +207,19 @@ pub enum PluginMsg {
 
 /// Hands a message to the UI thread and wakes it.
 pub fn send(message: PluginMsg) {
+    #[cfg(test)]
+    if DISCARD_MESSAGES.get() {
+        return;
+    }
     ActionToPerform::Plugin(Box::new(message)).schedule();
     crate::watcher::request_repaint();
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set on a test's thread when it calls Lua directly, with no app to take
+    /// the messages: the queue is shared, so another test would get them.
+    pub static DISCARD_MESSAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// An action as menus, the palette and shortcuts see it.

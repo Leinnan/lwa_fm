@@ -1,0 +1,30 @@
+api_version = 1
+id = "io.github.leinnan.heic-convert"
+name = "HEIC Converter"
+version = "1.0.0"
+author = "DirFleet"
+description = "Converts HEIC photos to JPEG in one click, or to JPEG, PNG or TIFF at any quality and size."
+# sips on macOS, FFmpeg elsewhere.
+permissions = ["fs.read", "ffmpeg", "process:sips"]
+max_jobs = 1
+
+# One click: `IMG_0001.HEIC` becomes `IMG_0001.jpg` next to it.
+[[action]]
+id = "to_jpeg"
+title = "Convert to JPEG"
+icon = "image"
+context_menu = "entry"
+targets = { kind = "files", ext = ["heic", "heif"] }
+mode = "job"
+per_item = true
+
+# Asks for the format, quality and size first.
+[[action]]
+id = "convert"
+title = "Convert photo…"
+icon = "settings-2"
+context_menu = "entry"
+targets = { kind = "files", ext = ["heic", "heif"] }
+form = "dynamic"
+mode = "job"
+per_item = true

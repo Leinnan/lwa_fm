@@ -20,7 +20,7 @@
 ---@field values table<string, any> Submitted form values.
 ---@field plugin { id: string, name: string, version: string }
 
----@alias FieldType "info"|"separator"|"group"|"text"|"multiline"|"int"|"float"|"bool"|"choice"|"radio"|"time"|"path"
+---@alias FieldType "info"|"paths"|"separator"|"group"|"text"|"multiline"|"int"|"float"|"bool"|"choice"|"radio"|"time"|"path"
 
 ---@class Condition Compares another field's current value.
 ---@field field string
@@ -47,11 +47,15 @@
 ---@field slider boolean? `int`/`float` with `min` and `max`: draw a slider.
 ---@field options (string|string[]|{value: string, label: string})[]? For `choice` and `radio`: `{ "value", "Label" }`.
 ---@field fields Field[]? For `group`.
+---@field rows { path: string, size: string? }[]? For `paths`.
 ---@field mode "file"|"save"|"folder"|nil For `path`.
 
 ---@class Form
 ---@field title string?
 ---@field submit string? The button's text (default "Run").
+---@field danger boolean? The button is red, for what can't be undone.
+---@field submit_when { when: Condition, label: string, danger: boolean? }[]? Another look for the button while a condition holds.
+---@field blocked boolean? There is nothing to submit, as the fields explain: only Close is offered.
 ---@field remember boolean? Start from the values used last time.
 ---@field fields Field[]
 
@@ -104,6 +108,54 @@
 ---@field modified integer
 ---@field readonly boolean
 
+---@class FolderUsage
+---@field bytes integer Disk space taken, with hardlinks counted once (on Windows, adds up file sizes).
+---@field freed integer What deleting the folder would free: `bytes`, less files also linked from outside it.
+---@field files integer
+---@field newest integer? Newest file's modification time, seconds since 1970.
+---@field errors integer Entries that could not be read.
+---@field parts table<string, integer> Bytes of the folders asked for with `subtotals`.
+
+---@class UsageOptions
+---@field newest_skip string[]? Folder names whose files don't count towards `newest`, wherever they are.
+---@field subtotals string[]? Folders directly under the root to add up separately, in the same walk.
+
+---@class UsageManyOptions : UsageOptions
+---@field paths string[]
+---@field on_result fun(path: string, usage: FolderUsage?, error: string?) Called as each folder finishes, in no set order.
+
+---@class TableColumn
+---@field id string
+---@field label string
+---@field kind "text"|"size"|"time"|nil `size` is bytes, `time` is seconds since 1970. Default `text`.
+
+---@class TableRow
+---@field path string? Double-clicking the row opens this folder in a new tab.
+---@field cells table<string, string|number> By column id. A missing cell is blank and sorts last.
+---@field menu TableRowAction[]? More entries for the row's context menu.
+
+---@class TableRowAction
+---@field label string
+---@field action string The full id of an action to start on the row's folder, which should ask before removing anything.
+---@field danger boolean? Draw it as a warning.
+---@field busy string? What the row says while this runs.
+---@field title string? The confirmation's title, shown while the plugin prepares it.
+
+---@class TableRowUpdate
+---@field path string The row to change.
+---@field cells table<string, string|number>? Cells to set; others keep their values.
+---@field clear string[]? Cells to blank.
+---@field remove boolean? The folder is gone: drop the row.
+
+---@class TableOptions
+---@field title string
+---@field subtitle string? `{count}` and `{total}` are filled in from the rows, and follow them.
+---@field refresh_action string? An action of this plugin that measures one folder again, run with the row's folder.
+---@field progress string? What is still happening, such as "Scanning 12 of 136". Leave it out of the last update.
+---@field columns TableColumn[]
+---@field rows TableRow[]?
+---@field sort { column: string, descending: boolean? }?
+
 dirfleet = {}
 
 ---@type string The app's version.
@@ -138,6 +190,9 @@ function dirfleet.path.is_absolute(path) end
 --- `path` when free, else "name (2).ext", "name (3).ext"…
 ---@return string
 function dirfleet.path.unique(path) end
+--- The user's home folder.
+---@return string?
+function dirfleet.path.home() end
 
 dirfleet.fmt = {}
 --- 75 → "1:15", 3725 → "1:02:05".
@@ -165,6 +220,16 @@ function dirfleet.fs.read_dir(path) end
 function dirfleet.fs.read_text(path, max_bytes) end
 ---@return string[]?, string?
 function dirfleet.fs.glob(pattern) end
+--- Walks a folder for its real disk use, without following symlinks or leaving
+--- the filesystem.
+---@param options UsageOptions?
+---@return FolderUsage?, string?
+function dirfleet.fs.usage(path, options) end
+--- `usage` for several folders at once, on threads of its own.
+--- Returns true, or nil and "cancelled".
+---@param options UsageManyOptions
+---@return true?, string?
+function dirfleet.fs.usage_many(options) end
 ---@return true?, string?
 function dirfleet.fs.write_text(path, text) end
 ---@return true?, string?
@@ -181,6 +246,9 @@ function dirfleet.ops.copy(srcs, dst, conflict) end
 function dirfleet.ops.move(srcs, dst, conflict) end
 ---@param paths string|string[]
 function dirfleet.ops.trash(paths) end
+--- Deletes permanently, with no undo. Returns at once: the app reports the outcome.
+---@param paths string|string[]
+function dirfleet.ops.delete(paths) end
 --- `to` is a new name, or an absolute path.
 function dirfleet.ops.rename(from, to) end
 
@@ -218,6 +286,13 @@ function dirfleet.app.select(paths) end
 --- Opens a document with its default app (not programs). Needs "fs.read".
 function dirfleet.app.system_open(path) end
 function dirfleet.app.open_terminal(dir) end
+--- Shows or updates the results in the dialog of the job's action, which needs
+--- `results = true` in plugin.toml. Sorted by clicking the headers.
+---@param options TableOptions
+function dirfleet.app.show_table(options) end
+--- Changes one row of this plugin's results.
+---@param update TableRowUpdate
+function dirfleet.app.update_table_row(update) end
 
 dirfleet.clipboard = {}
 --- Needs "clipboard".

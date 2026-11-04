@@ -210,8 +210,9 @@ impl CommandPalette {
             ui.weak("Up/Down to choose · Enter to run · Esc to close");
         });
         if let Some(action) = action {
-            action.schedule();
+            // Closing first: the action may open a window of its own.
             ActionToPerform::CloseActiveModalWindow.schedule();
+            action.schedule();
         } else if modal.should_close() {
             ActionToPerform::CloseActiveModalWindow.schedule();
         }
