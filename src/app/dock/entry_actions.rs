@@ -84,19 +84,25 @@ impl EntryMenu<'_, '_> {
             && crate::app::assets::kinds::media_kind(Path::new(self.entry.file_name))
                 == Some(crate::app::assets::kinds::MediaKind::Video)
         {
-            ui.menu_button("Thumbnail", |ui| {
+            let select = |ui: &mut Ui| {
                 if ui.button("Select thumbnail…").clicked() {
                     ActionToPerform::SelectThumbnail(Box::new(self.entry.to_entry())).schedule();
                     ui.close();
                 }
-                let path = self.entry.get_path();
-                if crate::app::thumbnail_choice::has(&path)
-                    && ui.button("Reset thumbnail").clicked()
-                {
-                    ActionToPerform::ResetThumbnail(path).schedule();
-                    ui.close();
-                }
-            });
+            };
+            // A submenu only pays off once there is something to reset.
+            let path = self.entry.get_path();
+            if crate::app::thumbnail_choice::has(&path) {
+                ui.menu_button("Thumbnail", |ui| {
+                    select(ui);
+                    if ui.button("Reset thumbnail").clicked() {
+                        ActionToPerform::ResetThumbnail(path).schedule();
+                        ui.close();
+                    }
+                });
+            } else {
+                select(ui);
+            }
         }
         ui.menu_button("More", |ui| {
             ui.menu_button("Move to", |ui| transfer_menu(ui, targets, self.paths, true));

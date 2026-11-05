@@ -3501,7 +3501,7 @@ fn entry_menu_keeps_rare_actions_in_submenus() {
         .get_by_label_contains("sample clip")
         .click_secondary();
     harness.run_steps(4);
-    for label in ["Cut", "Rename", "Thumbnail", "More"] {
+    for label in ["Cut", "Rename", "Select thumbnail…", "More"] {
         assert!(has_label(&harness, label), "{label} is at the top level");
     }
     for label in [
@@ -3510,7 +3510,6 @@ fn entry_menu_keeps_rare_actions_in_submenus() {
         "Duplicate",
         "Copy as path",
         "Delete permanently",
-        "Select thumbnail…",
     ] {
         assert!(!has_label(&harness, label), "{label} is in a submenu");
     }
@@ -3529,9 +3528,6 @@ fn entry_menu_keeps_rare_actions_in_submenus() {
     harness.get_by_label("Move to").click();
     harness.run_steps(4);
     assert!(has_label(&harness, "Choose folder…"), "nested under More");
-    harness.get_by_label("Thumbnail").click();
-    harness.run_steps(4);
-    assert!(has_label(&harness, "Select thumbnail…"));
     harness.key_press(egui::Key::Escape);
     harness.run_steps(4);
 
@@ -3548,6 +3544,42 @@ fn entry_menu_keeps_rare_actions_in_submenus() {
     for label in ["New tab", "New window", "Terminal"] {
         assert!(has_label(&harness, label), "{label} is under Open in");
     }
+    while COMMANDS_QUEUE.pop().is_some() {}
+}
+
+#[test]
+fn entry_menu_uses_a_thumbnail_submenu_only_for_two_options() {
+    let _guard = egui_mev_test::snapshot_lock();
+    let clip = "/virtual/menu/chosen clip.mp4";
+    let menu_harness = || {
+        let mut harness = entry_menu_harness(&[clip], &[0], egui::vec2(1100.0, 720.0));
+        harness
+            .get_by_label_contains("chosen clip")
+            .click_secondary();
+        harness.run_steps(4);
+        harness
+    };
+
+    crate::app::thumbnail_choice::clear(Path::new(clip));
+    let harness = menu_harness();
+    assert!(has_label(&harness, "Select thumbnail…"), "shown directly");
+    assert!(
+        !has_label(&harness, "Thumbnail"),
+        "no submenu for one option"
+    );
+    assert!(!has_label(&harness, "Reset thumbnail"));
+    drop(harness);
+
+    crate::app::thumbnail_choice::set(Path::new(clip), 0, 0, std::time::Duration::from_secs(1));
+    let mut harness = menu_harness();
+    assert!(!has_label(&harness, "Select thumbnail…"), "in the submenu");
+    assert!(!has_label(&harness, "Reset thumbnail"), "in the submenu");
+    harness.get_by_label("Thumbnail").click();
+    harness.run_steps(4);
+    assert!(has_label(&harness, "Select thumbnail…"));
+    assert!(has_label(&harness, "Reset thumbnail"));
+
+    crate::app::thumbnail_choice::clear(Path::new(clip));
     while COMMANDS_QUEUE.pop().is_some() {}
 }
 
