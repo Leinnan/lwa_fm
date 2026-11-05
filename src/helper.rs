@@ -131,21 +131,21 @@ pub trait DataHolder {
 }
 
 fn path_hash<T: 'static>(path: &CurrentPath) -> Id {
-    Id::new(path).with(TypeId::of::<T>())
+    Id::unique(path).with(TypeId::of::<T>())
 }
 
 impl DataHolder for Context {
     fn data_get_persisted<T: 'static + Clone + Default + Any + Send + Sync + SerializableAny>(
         &self,
     ) -> Option<T> {
-        self.data_mut(|data| data.get_persisted::<T>(Id::new(TypeId::of::<T>())))
+        self.data_mut(|data| data.get_persisted::<T>(Id::unique(TypeId::of::<T>())))
     }
 
     fn data_set_persisted<T: 'static + Clone + Default + Any + Send + Sync + SerializableAny>(
         &self,
         value: T,
     ) {
-        self.data_mut(|data| data.insert_persisted(Id::new(TypeId::of::<T>()), value));
+        self.data_mut(|data| data.insert_persisted(Id::unique(TypeId::of::<T>()), value));
     }
 
     fn data_get_path<T: 'static + Clone + Default + Any + SerializableAny + Send + Sync>(
@@ -173,7 +173,7 @@ impl DataHolder for Context {
             if let Some(data) = data.get_persisted::<T>(path_hash::<T>(path)) {
                 return Data::from_local(data);
             }
-            if let Some(data) = data.get_persisted::<T>(Id::new(TypeId::of::<T>())) {
+            if let Some(data) = data.get_persisted::<T>(Id::unique(TypeId::of::<T>())) {
                 return Data::from_settings(data);
             }
             Data::default()
@@ -184,13 +184,13 @@ impl DataHolder for Ui {
     fn data_get_persisted<T: Clone + Default + Any + Send + Sync + SerializableAny>(
         &self,
     ) -> Option<T> {
-        self.data_mut(|data| data.get_persisted::<T>(Id::new(TypeId::of::<T>())))
+        self.data_mut(|data| data.get_persisted::<T>(Id::unique(TypeId::of::<T>())))
     }
     fn data_set_persisted<T: Clone + Default + Any + Send + Sync + SerializableAny>(
         &self,
         value: T,
     ) {
-        self.data_mut(|data| data.insert_persisted(Id::new(TypeId::of::<T>()), value));
+        self.data_mut(|data| data.insert_persisted(Id::unique(TypeId::of::<T>()), value));
     }
 
     fn data_get_path<T: 'static + Clone + Default + Any + SerializableAny + Send + Sync>(
@@ -218,7 +218,7 @@ impl DataHolder for Ui {
             if let Some(data) = data.get_persisted::<T>(path_hash::<T>(path)) {
                 return Data::from_local(data);
             }
-            if let Some(data) = data.get_persisted::<T>(Id::new(TypeId::of::<T>())) {
+            if let Some(data) = data.get_persisted::<T>(Id::unique(TypeId::of::<T>())) {
                 return Data::from_settings(data);
             }
             Data::default()
@@ -270,65 +270,6 @@ impl KeyWithCommandPressed for Context {
 impl KeyWithCommandPressed for Ui {
     fn command_pressed(&self) -> bool {
         self.input(|i| i.modifiers.command)
-    }
-}
-
-/// Converts bytes (as usize) to a human-readable format
-/// Returns a tuple of (value, unit) for flexible formatting
-pub fn format_bytes_detailed(bytes: u64) -> (f64, &'static str) {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB"];
-    const THRESHOLD: f64 = 1024.0;
-
-    if bytes == 0 {
-        return (0.0, "B");
-    }
-
-    let bytes_f64 = bytes as f64;
-    let unit_index = bytes_f64.log(THRESHOLD).floor() as usize;
-    let unit_index = unit_index.min(UNITS.len() - 1);
-
-    let value = bytes_f64 / THRESHOLD.powi(unit_index as i32);
-    (value, UNITS[unit_index])
-}
-
-/// Converts bytes (as usize) to a simplified human-readable string
-/// Examples: "1.5 GB", "256 MB", "1.2 TB", "512 B"
-pub fn format_bytes_simple(bytes: u64) -> String {
-    let (value, unit) = format_bytes_detailed(bytes);
-
-    // Bytes are whole: "0 B", not "0.00 B".
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if value >= 100.0 {
-        format!("{value:.0} {unit}")
-    } else if value >= 10.0 {
-        format!("{value:.1} {unit}")
-    } else {
-        format!("{value:.2} {unit}")
-    }
-}
-
-#[allow(dead_code)]
-/// Converts bytes to a compact format (shorter strings)
-/// Examples: "1.5G", "256M", "1.2T"
-pub fn format_bytes_compact(bytes: u64) -> String {
-    let (value, unit) = format_bytes_detailed(bytes);
-    let short_unit = match unit {
-        "B" => "B",
-        "KB" => "K",
-        "MB" => "M",
-        "GB" => "G",
-        "TB" => "T",
-        "PB" => "P",
-        _ => unit,
-    };
-
-    if value >= 100.0 {
-        format!("{value:.0}{short_unit}")
-    } else if value >= 10.0 {
-        format!("{value:.1}{short_unit}")
-    } else {
-        format!("{value:.2}{short_unit}")
     }
 }
 

@@ -181,7 +181,11 @@ impl App {
             .resizable(true)
             .frame(
                 egui::Frame::new()
-                    .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).sidebar)
+                    .fill(
+                        egui_mev_theme::Theme::of(ctx)
+                            .palette(ctx.global_style().visuals.dark_mode)
+                            .sidebar_bg,
+                    )
                     .inner_margin(8),
             )
             .show(root, |ui| self.locations_ui(ui));

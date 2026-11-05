@@ -202,67 +202,11 @@ pub fn display_name(path: &Path) -> String {
     )
 }
 
+pub use egui_mev_core::history::Origin;
+
 /// Undo and redo history. Generic so the app can keep file operations and
 /// its own edits in one history.
-#[derive(Debug)]
-pub struct UndoStack<T = Undo> {
-    undo: Vec<T>,
-    redo: Vec<T>,
-}
-
-impl<T> Default for UndoStack<T> {
-    fn default() -> Self {
-        Self {
-            undo: Vec::new(),
-            redo: Vec::new(),
-        }
-    }
-}
-
-const MAX_UNDO: usize = 50;
-
-/// Where a finished operation came from, so its inverse lands on the right stack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    User,
-    Undo,
-    Redo,
-}
-
-impl<T> UndoStack<T> {
-    pub fn record(&mut self, origin: Origin, undo: T) {
-        let stack = match origin {
-            Origin::User => {
-                self.redo.clear();
-                &mut self.undo
-            }
-            Origin::Redo => &mut self.undo,
-            Origin::Undo => &mut self.redo,
-        };
-        stack.push(undo);
-        if stack.len() > MAX_UNDO {
-            stack.remove(0);
-        }
-    }
-
-    pub fn pop_undo(&mut self) -> Option<T> {
-        self.undo.pop()
-    }
-
-    pub fn pop_redo(&mut self) -> Option<T> {
-        self.redo.pop()
-    }
-
-    /// The item Ctrl+Z would undo.
-    pub fn peek_undo(&self) -> Option<&T> {
-        self.undo.last()
-    }
-
-    /// The item Ctrl+Y would redo.
-    pub fn peek_redo(&self) -> Option<&T> {
-        self.redo.last()
-    }
-}
+pub type UndoStack<T = Undo> = egui_mev_core::history::UndoStack<T>;
 
 #[cfg(test)]
 mod tests;

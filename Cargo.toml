@@ -27,7 +27,7 @@ default = []
 profiling = ["dep:puffin", "dep:puffin_http", "dep:puffin_egui", "profiling/profile-with-puffin"]
 
 [dependencies]
-lucide-icons = "=1.34.0"
+lucide-icons = "=1.67.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 sled = "0.34"
 mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"] }
@@ -50,14 +50,16 @@ unicode-normalization = "0.1"
 itertools = "0.14.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-eframe = { version = "=0.36.2", default-features = false, features = [
+eframe = { version = "=0.37.0", default-features = false, features = [
     "accesskit",     # Screen-reader support (VoiceOver, Narrator, Orca).
     "default_fonts", # Embed the default egui fonts.
     "wgpu_no_default_features", # WGPU renderer; backends are picked per OS below.
     "persistence",   # Enable restoring app state when restarting the app.
     "wayland",       # To support Linux (and CI)
+    "clipboard",     # Text copy/paste; off without default features since eframe 0.37.
+    "system_fonts",  # Emoji and non-Latin file names through system font fallback.
 ] }
-egui = "=0.36.2"
+egui = "=0.37.0"
 open = "5.3"
 walkdir = "2"
 sysinfo = "0.33"
@@ -71,15 +73,15 @@ ffmpeg-sidecar = { version = "2.4.0", default-features = false }
 sha2 = "0.10"
 rand = "0.8"
 anyhow = "1"
-egui-notify = { path = "vendor/egui-notify" }
 crossbeam = "0.8"
-egui_dock = { version = "=0.21.1", features = ["serde"] }
+# Unreleased egui 0.37 bump (anhosh/egui_dock#354); go back to crates.io once released.
+egui_dock = { git = "https://github.com/crumblingstatue/egui_dock.git", rev = "4bd1dcd90c7a71ed3bf38159f49a2992fa653c2c", features = ["serde"] }
 trash = "5.2"
 arboard = "3.4.1"
 embed_plist = "1.2"
 rayon = "1.10"
 bincode = "=2.0.1"
-egui_taffy = "=0.14.0"
+egui_taffy = "=0.15.0"
 lru = "0.16.3"
 glob = "0.3"
 # Unicode classes beyond case folding and \w/\d/\s (scripts, ages, ...) are rarely used in file names.
@@ -93,6 +95,15 @@ memchr = "2.7"
 fixedbitset = "0.5"
 jpeg-decoder = { version = "0.3", default-features = false }
 raw-window-handle = "0.6"
+# Shared with other egui apps. Every egui_mev_* crate must use the same rev: two revs
+# compile two copies, and their types do not match.
+egui_mev_app = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "571816f8b422af1dc9bed142044d4be8072cabf1", features = ["chrome", "wgpu"] }
+egui_mev_commands = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "571816f8b422af1dc9bed142044d4be8072cabf1" }
+egui_mev_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "571816f8b422af1dc9bed142044d4be8072cabf1" }
+egui_mev_data = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "571816f8b422af1dc9bed142044d4be8072cabf1" }
+egui_mev_tasks = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "571816f8b422af1dc9bed142044d4be8072cabf1" }
+egui_mev_theme = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "571816f8b422af1dc9bed142044d4be8072cabf1", features = ["lucide", "native", "serde"] }
+egui_mev_widgets = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "571816f8b422af1dc9bed142044d4be8072cabf1" }
 
 [patch.crates-io]
 puffin = { git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
@@ -100,7 +111,6 @@ puffin = { git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["dx12"] }
 windows = { version = "0.59", features = [
-    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
@@ -128,7 +138,7 @@ windows = { version = "0.59", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 drag = "=2.1.1"
 wgpu = { version = "30", default-features = false, features = ["metal"] }
-egui-wgpu = { version = "=0.36.2", default-features = false, features = ["macos-window-resize-jitter-fix"] }
+egui-wgpu = { version = "=0.37.0", default-features = false, features = ["macos-window-resize-jitter-fix"] }
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
@@ -141,8 +151,13 @@ systemicons = { git = "https://github.com/Leinnan/systemicons.git" }
 wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
 
 [dev-dependencies]
-egui_kittest = { version = "=0.36.2", features = ["snapshot", "wgpu"] }
-egui-winit = { version = "=0.36.2", features = ["accesskit"] }
+# Harnesses have no system font fallback, so the bundled symbols keep glyphs like the
+# saved-search star drawn the same on every machine. Not for release builds, where
+# these would win over system color emoji.
+egui = { version = "=0.37.0", features = ["monochrome_emoji_fonts"] }
+egui_kittest = { version = "=0.37.0", features = ["snapshot", "wgpu"] }
+egui-winit = { version = "=0.37.0", features = ["accesskit"] }
+egui_mev_test = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "571816f8b422af1dc9bed142044d4be8072cabf1" }
 
 [build-dependencies]
 anyhow = "1.0"

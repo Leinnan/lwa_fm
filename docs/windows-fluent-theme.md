@@ -1,12 +1,12 @@
-# Egui 0.36 and Windows Fluent
+# Egui 0.37 and Windows Fluent
 
-DirFleet pins egui, eframe, egui_extras, egui-winit and egui_kittest to 0.36.2, with egui_dock 0.21.1, egui_taffy 0.14.0 and WGPU 30. Rust 1.95 or newer is required. Cargo.lock is now included for reproducible application builds. Renderer, persistence, image loaders and existing platform features are retained. Present mode moved to WGPU's SurfaceConfig; the existing skip/recreate policy is unchanged.
+DirFleet pins egui, eframe, egui_extras, egui-winit and egui_kittest to 0.37.0, with egui_dock pinned to an unreleased 0.37 revision, egui_taffy 0.15.0 and WGPU 30. Rust 1.95 or newer is required. Cargo.lock is now included for reproducible application builds. Renderer, persistence, image loaders and existing platform features are retained. Present mode moved to WGPU's SurfaceConfig; the existing skip/recreate policy is unchanged.
 
 The notification fork and pinned profiler UI are local dependencies; licenses and revisions are recorded in ../vendor/PROVENANCE.md. The profiler core and HTTP server remain at their original pinned revision. Both default and profiling dependency graphs contain one egui version.
 
-Windows installs both Fluent light and dark styles automatically. Source attribution is in ../src/app/theme/PROVENANCE.md. Other platforms keep their existing style and font setup. Appearance serializes as the existing System, Light or Dark value. System theme changes apply live, and persisted overrides remain authoritative. Accent shades are read once from the Windows registry, with the source blue palette as fallback; accent changes require restart.
+Windows installs both Fluent light and dark styles automatically. The theme comes from `egui_mev_theme` in egui_mev_toolkit, whose docs/provenance.md records its sources. Other platforms keep their existing style and font setup. Appearance serializes as the existing System, Light or Dark value. System theme changes apply live, and persisted overrides remain authoritative. Accent shades are read once from the Windows registry, with the source blue palette as fallback; accent changes require restart.
 
-Fonts prefer Segoe UI Variable/Segoe UI, Segoe UI Semibold and Cascadia Mono/Consolas from WINDIR/Fonts. Missing fonts fall back to egui fonts. Lucide remains its own family. The type scale is 12/14/20 with 13 monospace; standard controls are 32px, navigation rows 36px, control radii 4px, and cards/dialogs 8px. Toolbar reservation follows the current button metrics. Panels, cards, selection, navigation and dock tabs use the same tokens.
+Fonts prefer Segoe UI Variable/Segoe UI, Segoe UI Semibold and Cascadia Mono/Consolas from WINDIR/Fonts. Missing fonts fall back to egui fonts, then to system fonts for glyphs those lack. Lucide remains its own family. The type scale is 12/14/20 with 13 monospace; standard controls are 32px, navigation rows 36px, control radii 4px, and cards/dialogs 8px. Toolbar reservation follows the current button metrics. Panels, cards, selection, navigation and dock tabs use the same tokens.
 
 Native chrome state is skipped by serde. DWM rounded corners, caption fill/text and dark-mode attributes follow the resolved theme. Missing handles are retried; unsupported attributes retain the OS fallback. Client rendering remains opaque.
 

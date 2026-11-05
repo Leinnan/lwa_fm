@@ -130,7 +130,7 @@ impl MyTabViewer<'_> {
         let mut row_results: Vec<RowResult> = Vec::with_capacity(entries_len.min(64));
         let inspector_owns_preview = ui
             .ctx()
-            .data(|data| data.get_temp::<bool>(Id::new("inspector_owns_preview")))
+            .data(|data| data.get_temp::<bool>(Id::unique("inspector_owns_preview")))
             .unwrap_or(false);
         let mut selected_inline_budget: u32 =
             u32::from(self.assets.selected_previews_enabled() && !inspector_owns_preview);
@@ -203,7 +203,7 @@ impl MyTabViewer<'_> {
                 })
             })
             .inner;
-        tab.view.scroll_y = output.state.offset.y;
+        tab.view.scroll_y = output.state.clamped_offset().y;
         tab.view.row_pitch = row_pitch;
         tab.view.row_gap = TILE_GAP;
         tab.view.viewport_height = output.inner_rect.height();
@@ -298,7 +298,7 @@ impl MyTabViewer<'_> {
                 && !(state.selected
                     && ui
                         .ctx()
-                        .data(|data| data.get_temp::<bool>(Id::new("inspector_owns_preview")))
+                        .data(|data| data.get_temp::<bool>(Id::unique("inspector_owns_preview")))
                         .unwrap_or(false)),
             state.selected,
             selected_inline_budget,
@@ -364,7 +364,7 @@ impl MyTabViewer<'_> {
         let galley = text_fit::label(
             ui,
             &("tile_size", size),
-            || crate::helper::format_bytes_simple(size),
+            || egui_mev_core::format::format_bytes(size),
             &font,
             color,
         );

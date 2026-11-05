@@ -19,7 +19,7 @@ use crate::app::ui::{self, Palette};
 use egui::text::{CharIndex, LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Color32, Context, CursorIcon, FontFamily, FontId, Id, Key, Modifiers, Rect, Response, Sense,
-    Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 use lucide_icons::Icon;
 use std::path::{Path, PathBuf};
@@ -195,11 +195,11 @@ fn pill_text(ui: &Ui, chip: &Chip) -> std::sync::Arc<egui::Galley> {
         job.append(
             &format!("{key}:"),
             0.0,
-            TextFormat::simple(font.clone(), palette.secondary),
+            TextFormat::simple(font.clone(), palette.text_weak),
         );
     }
     let (value, value_color) = if value.trim().is_empty() {
-        ("…".to_owned(), palette.secondary)
+        ("…".to_owned(), palette.text_weak)
     } else {
         (value, palette.text)
     };
@@ -226,7 +226,7 @@ fn draw_chip(ui: &mut Ui, id: Id, chip: &Chip, selected: bool) -> Pill {
         let color = if invalid.is_some() || matches!(chip, Chip::Name { exclude: true, .. }) {
             error
         } else {
-            palette.secondary
+            palette.text_weak
         };
         ui.painter()
             .layout_no_wrap(char::from(icon).to_string(), icon_font(13.0), color)
@@ -243,8 +243,8 @@ fn draw_chip(ui: &mut Ui, id: Id, chip: &Chip, selected: bool) -> Pill {
     let remove = ui.interact(remove_rect, id.with("remove"), Sense::click());
 
     let label = chip_label(chip);
-    body.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label.clone()));
-    remove.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("Remove {label}")));
+    body.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, label.clone()));
+    remove.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, format!("Remove {label}")));
 
     if ui.is_rect_visible(rect) {
         let hovered = body.hovered() || remove.hovered();
@@ -273,7 +273,7 @@ fn draw_chip(ui: &mut Ui, id: Id, chip: &Chip, selected: bool) -> Pill {
         let mut x = rect.left() + pad;
         if let Some(icon) = icon {
             let y = rect.center().y - icon.size().y / 2.0;
-            painter.galley(pos2(x, y), icon, palette.secondary);
+            painter.galley(pos2(x, y), icon, palette.text_weak);
             x += icon_width;
         }
         let y = rect.center().y - galley.size().y / 2.0;
@@ -286,7 +286,7 @@ fn draw_chip(ui: &mut Ui, id: Id, chip: &Chip, selected: bool) -> Pill {
             );
             palette.text
         } else {
-            palette.secondary
+            palette.text_weak
         };
         painter.text(
             remove_rect.center(),
@@ -385,12 +385,20 @@ fn parse_extensions(text: &str) -> Vec<String> {
 }
 
 /// A text field that takes focus when the editor opens and reports Enter.
-fn editor_field(ui: &mut Ui, text: &mut String, hint: &str, focus: &mut bool) -> (bool, bool) {
-    let response = ui.add(
-        ui::text_field(ui, text)
-            .hint_text(hint)
-            .desired_width(f32::INFINITY),
-    );
+fn editor_field(
+    ui: &mut Ui,
+    name: &str,
+    text: &mut String,
+    hint: &str,
+    focus: &mut bool,
+) -> (bool, bool) {
+    let response = ui
+        .add(
+            ui::text_field(ui, text)
+                .hint_text(hint)
+                .desired_width(f32::INFINITY),
+        )
+        .accessible_name(name);
     if std::mem::take(focus) {
         response.request_focus();
     }
@@ -490,7 +498,7 @@ fn name_editor(
         SearchTermType::Glob => "e.g. IMG_*.jpg",
         SearchTermType::Regex => "e.g. ^IMG_\\d+",
     };
-    let (_, enter) = editor_field(ui, pattern, hint, focus);
+    let (_, enter) = editor_field(ui, "Name pattern", pattern, hint, focus);
     ui.horizontal(|ui| {
         for (value, label) in [
             (SearchTermType::Plain, "Text"),
@@ -523,13 +531,17 @@ fn size_editor(ui: &mut Ui, cmp: &mut Cmp, editing: &mut Editing) {
                 ] {
                     ui.selectable_value(cmp, value, cmp_words(value));
                 }
-            });
-        let number = ui.add(
-            egui::DragValue::new(&mut editing.size_number)
-                .range(0.0..=f64::from(u32::MAX))
-                .speed(1.0)
-                .max_decimals(1),
-        );
+            })
+            .response
+            .accessible_name("Size comparison");
+        let number = ui
+            .add(
+                egui::DragValue::new(&mut editing.size_number)
+                    .range(0.0..=f64::from(u32::MAX))
+                    .speed(1.0)
+                    .max_decimals(1),
+            )
+            .accessible_name("Size");
         if std::mem::take(&mut editing.focus) {
             number.request_focus();
         }
@@ -544,7 +556,9 @@ fn size_editor(ui: &mut Ui, cmp: &mut Cmp, editing: &mut Editing) {
                 for (unit, label) in [(KB, "KB"), (MB, "MB"), (GB, "GB")] {
                     ui.selectable_value(&mut editing.size_unit, unit, label);
                 }
-            });
+            })
+            .response
+            .accessible_name("Size unit");
     });
 }
 
@@ -556,8 +570,13 @@ fn extension_editor(
     editing: &mut Editing,
     found: &[String],
 ) -> bool {
-    let (changed, enter) =
-        editor_field(ui, &mut editing.text, "e.g. pdf, docx", &mut editing.focus);
+    let (changed, enter) = editor_field(
+        ui,
+        "Extensions",
+        &mut editing.text,
+        "e.g. pdf, docx",
+        &mut editing.focus,
+    );
     if changed {
         *exts = parse_extensions(&editing.text);
     }
@@ -589,7 +608,13 @@ fn folder_editor(
     editing: &mut Editing,
     folders: &[(String, PathBuf)],
 ) -> bool {
-    let (changed, enter) = editor_field(ui, &mut editing.text, "Folder path", &mut editing.focus);
+    let (changed, enter) = editor_field(
+        ui,
+        "Folder path",
+        &mut editing.text,
+        "Folder path",
+        &mut editing.focus,
+    );
     if changed {
         *path = PathBuf::from(editing.text.trim());
     }
@@ -823,7 +848,7 @@ pub fn chip_input(
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 ui.add_sized(
                     vec2(18.0, height),
-                    egui::Label::new(ui::glyph(Icon::Search).size(14.0).color(palette.secondary))
+                    egui::Label::new(ui::glyph(Icon::Search).size(14.0).color(palette.text_weak))
                         .selectable(false),
                 );
                 for (index, chip) in search.chips.iter().enumerate() {
@@ -870,7 +895,7 @@ pub fn chip_input(
                         .id(id)
                         .frame(egui::Frame::NONE)
                         .min_size(vec2(0.0, height))
-                        .vertical_align(egui::Align::Center)
+                        .align(egui::Align2::LEFT_CENTER)
                         .hint_text(hint)
                         .desired_width(width.max(40.0)),
                 );
@@ -901,14 +926,14 @@ pub fn chip_input(
                     let clear = ui
                         .add(
                             egui::Button::new(
-                                ui::glyph(Icon::X).size(14.0).color(palette.secondary),
+                                ui::glyph(Icon::X).size(14.0).color(palette.text_weak),
                             )
                             .frame(false)
                             .min_size(Vec2::splat(height)),
                         )
                         .on_hover_cursor(CursorIcon::PointingHand);
                     clear.widget_info(|| {
-                        WidgetInfo::labeled(WidgetType::Button, true, "Clear search")
+                        WidgetInfo::labeled(egui::Role::Button, true, "Clear search")
                     });
                     if clear.on_hover_text("Clear search").clicked() {
                         action = Some(Action::Clear);

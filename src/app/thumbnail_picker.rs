@@ -92,7 +92,7 @@ impl App {
             .request_overview_frames(ctx, &picker.entry.entry_ref());
         let mut apply = None;
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::SelectThumbnail))
+        let modal = egui::Modal::new(egui::Id::unique(ModalWindow::SelectThumbnail))
             .frame(super::ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 let width = (ctx.content_rect().width() - 64.0).clamp(320.0, 760.0);

@@ -1,26 +1,20 @@
 use std::{borrow::Cow, path::Path};
 
-use egui::{Modal, TextBuffer};
+use egui_mev_commands::{PaletteItem, PaletteResponse};
 
 use crate::{app::dock::CurrentPath, locations::Locations};
 
 use super::commands::ActionToPerform;
 
+/// The palette's items while they are put together, and the palette once open.
 #[derive(Default, Debug, Clone)]
 pub struct CommandPalette {
     pub commands: Vec<ValidAction>,
-    query: String,
-    selected: usize,
-    focus_requested: bool,
+    palette: egui_mev_commands::CommandPalette<ActionToPerform>,
+    opened: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct ValidAction {
-    pub action: ActionToPerform,
-    pub name: Cow<'static, str>,
-    /// Keyboard shortcut shown next to the name.
-    pub shortcut: Option<String>,
-}
+pub type ValidAction = PaletteItem<ActionToPerform>;
 
 pub fn build_for_path(
     current_path: &CurrentPath,
@@ -138,83 +132,22 @@ impl CommandPalette {
         favorites: &Locations,
     ) {
         self.commands = build_for_path(current_path, path, favorites);
-        self.query.clear();
-        self.selected = 0;
-        self.focus_requested = false;
+        self.opened = false;
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
-        let down =
-            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
-        let up =
-            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
-        let enter =
-            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
-        let mut action = None;
-        let modal = Modal::new("Commands".into()).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 460.0));
-            ui.heading("Commands");
-            let edit = ui.add(
-                crate::app::ui::text_field(ui, &mut self.query)
-                    .id(egui::Id::new("command_palette_query"))
-                    .hint_text("Find a command…")
-                    .desired_width(ui.available_width()),
-            );
-            if edit.changed() {
-                self.selected = 0;
+        if !self.opened {
+            self.palette.reopen(std::mem::take(&mut self.commands));
+            self.opened = true;
+        }
+        match self.palette.show(ctx) {
+            PaletteResponse::Open => {}
+            PaletteResponse::Chosen(action) => {
+                // Closing first: the action may open a window of its own.
+                ActionToPerform::CloseActiveModalWindow.schedule();
+                action.schedule();
             }
-            if !self.focus_requested {
-                edit.request_focus();
-                self.focus_requested = true;
-            }
-            ui.separator();
-            let query = self.query.to_lowercase();
-            let commands: Vec<_> = self
-                .commands
-                .iter()
-                .filter(|command| command.name.to_lowercase().contains(&query))
-                .collect();
-            if commands.is_empty() {
-                ui.weak("No matching commands.");
-            } else {
-                if down {
-                    self.selected = (self.selected + 1).min(commands.len() - 1);
-                }
-                if up {
-                    self.selected = self.selected.saturating_sub(1);
-                }
-                self.selected = self.selected.min(commands.len() - 1);
-                egui::ScrollArea::vertical()
-                    .max_height(ctx.content_rect().height() - 180.0)
-                    .show(ui, |ui| {
-                        for (index, command) in commands.iter().enumerate() {
-                            let mut button = egui::Button::new(command.name.as_str())
-                                .selected(index == self.selected);
-                            if let Some(shortcut) = &command.shortcut {
-                                button = button.shortcut_text(shortcut.as_str());
-                            }
-                            let response = ui.add_sized(
-                                [ui.available_width(), crate::app::ui::control_height(ui)],
-                                button,
-                            );
-                            if response.clicked() {
-                                action = Some(command.action.clone());
-                            }
-                        }
-                    });
-                if enter {
-                    action = Some(commands[self.selected].action.clone());
-                }
-            }
-            ui.separator();
-            ui.weak("Up/Down to choose · Enter to run · Esc to close");
-        });
-        if let Some(action) = action {
-            // Closing first: the action may open a window of its own.
-            ActionToPerform::CloseActiveModalWindow.schedule();
-            action.schedule();
-        } else if modal.should_close() {
-            ActionToPerform::CloseActiveModalWindow.schedule();
+            PaletteResponse::Closed => ActionToPerform::CloseActiveModalWindow.schedule(),
         }
     }
 }

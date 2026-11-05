@@ -350,134 +350,149 @@ impl App {
             .searches
             .iter()
             .any(|s| s.name == editor.name.trim() && Some(s.id) != editor.id);
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::EditSavedSearch)).show(ctx, |ui| {
-            ui.set_width((ctx.content_rect().width() - 64.0).clamp(320.0, 560.0));
-            ui.heading(if editor.id.is_some() {
-                "Edit saved search"
-            } else {
-                "Save search"
-            });
-            ui.label("Name");
-            let name =
-                ui.add(ui::text_field(ui, &mut editor.name).desired_width(ui.available_width()));
-            if !editor.focused {
-                editor.focused = true;
-                name.request_focus();
-            }
-            if name_taken {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    "Another saved search has this name.",
+        let modal =
+            egui::Modal::new(egui::Id::unique(ModalWindow::EditSavedSearch)).show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(320.0, 560.0));
+                ui.heading(if editor.id.is_some() {
+                    "Edit saved search"
+                } else {
+                    "Save search"
+                });
+                let label = ui.label("Name");
+                let name = ui
+                    .add(ui::text_field(ui, &mut editor.name).desired_width(ui.available_width()))
+                    .labelled_by(label.id);
+                if !editor.focused {
+                    editor.focused = true;
+                    name.request_focus();
+                }
+                if name_taken {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        "Another saved search has this name.",
+                    );
+                }
+
+                ui.add_space(6.0);
+                ui.label("Find items matching");
+                chip_input(
+                    ui,
+                    egui::Id::unique("saved_search_editor_query"),
+                    &mut editor.query,
+                    "Type words or filters like ext:pdf",
+                    &ChipContext::default(),
                 );
-            }
+                ui.horizontal(|ui| {
+                    let names = editor.query.chips.iter().filter(|c| c.is_name()).count()
+                        + usize::from(!editor.query.value.trim().is_empty());
+                    if names > 1 {
+                        ui.selectable_value(
+                            &mut editor.query.match_mode,
+                            MatchMode::All,
+                            "Match all",
+                        );
+                        ui.selectable_value(
+                            &mut editor.query.match_mode,
+                            MatchMode::Any,
+                            "Match any",
+                        );
+                        ui.separator();
+                    }
+                    ui.checkbox(&mut editor.query.case_sensitive, "Match case");
+                    let mut deep = editor.query.depth > 1;
+                    if ui.checkbox(&mut deep, "Include subfolders").changed() {
+                        editor.query.depth = if deep { 4 } else { 1 };
+                    }
+                });
 
-            ui.add_space(6.0);
-            ui.label("Find items matching");
-            chip_input(
-                ui,
-                egui::Id::new("saved_search_editor_query"),
-                &mut editor.query,
-                "Type words or filters like ext:pdf",
-                &ChipContext::default(),
-            );
-            ui.horizontal(|ui| {
-                let names = editor.query.chips.iter().filter(|c| c.is_name()).count()
-                    + usize::from(!editor.query.value.trim().is_empty());
-                if names > 1 {
-                    ui.selectable_value(&mut editor.query.match_mode, MatchMode::All, "Match all");
-                    ui.selectable_value(&mut editor.query.match_mode, MatchMode::Any, "Match any");
-                    ui.separator();
-                }
-                ui.checkbox(&mut editor.query.case_sensitive, "Match case");
-                let mut deep = editor.query.depth > 1;
-                if ui.checkbox(&mut deep, "Include subfolders").changed() {
-                    editor.query.depth = if deep { 4 } else { 1 };
-                }
-            });
-
-            ui.add_space(6.0);
-            ui.label("Search in");
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(editor.scope == SavedScope::CurrentFolder, "The open folder")
-                    .on_hover_text("Runs in whatever folder the tab shows")
-                    .clicked()
-                {
-                    editor.scope = SavedScope::CurrentFolder;
-                }
-                ui.add_enabled_ui(has_favorites, |ui| {
+                ui.add_space(6.0);
+                ui.label("Search in");
+                ui.horizontal(|ui| {
                     if ui
-                        .selectable_label(editor.scope == SavedScope::Favorites, "Favorites")
+                        .selectable_label(
+                            editor.scope == SavedScope::CurrentFolder,
+                            "The open folder",
+                        )
+                        .on_hover_text("Runs in whatever folder the tab shows")
                         .clicked()
                     {
-                        editor.scope = SavedScope::Favorites;
+                        editor.scope = SavedScope::CurrentFolder;
+                    }
+                    ui.add_enabled_ui(has_favorites, |ui| {
+                        if ui
+                            .selectable_label(editor.scope == SavedScope::Favorites, "Favorites")
+                            .clicked()
+                        {
+                            editor.scope = SavedScope::Favorites;
+                        }
+                    });
+                    if ui
+                        .selectable_label(
+                            matches!(editor.scope, SavedScope::Folders(_)),
+                            "These folders",
+                        )
+                        .clicked()
+                        && !matches!(editor.scope, SavedScope::Folders(_))
+                    {
+                        editor.scope = SavedScope::Folders(Vec::new());
                     }
                 });
-                if ui
-                    .selectable_label(
-                        matches!(editor.scope, SavedScope::Folders(_)),
-                        "These folders",
-                    )
-                    .clicked()
-                    && !matches!(editor.scope, SavedScope::Folders(_))
-                {
-                    editor.scope = SavedScope::Folders(Vec::new());
-                }
-            });
-            if let SavedScope::Folders(folders) = &mut editor.scope {
-                let mut remove = None;
-                for (index, folder) in folders.iter().enumerate() {
+                if let SavedScope::Folders(folders) = &mut editor.scope {
+                    let mut remove = None;
+                    for (index, folder) in folders.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui::icon_button(ui, Icon::X, "Remove folder", false).clicked() {
+                                remove = Some(index);
+                            }
+                            ui.add(egui::Label::new(folder.display().to_string()).truncate());
+                        });
+                    }
+                    if let Some(index) = remove {
+                        folders.remove(index);
+                    }
                     ui.horizontal(|ui| {
-                        if ui::icon_button(ui, Icon::X, "Remove folder", false).clicked() {
-                            remove = Some(index);
+                        let input = ui
+                            .add(
+                                ui::text_field(ui, &mut editor.new_folder)
+                                    .hint_text("Folder path")
+                                    .desired_width((ui.available_width() - 40.0).max(120.0)),
+                            )
+                            .accessible_name("Folder path");
+                        let path = PathBuf::from(editor.new_folder.trim());
+                        let valid = path.is_dir() && !folders.contains(&path);
+                        let add = ui
+                            .add_enabled(valid, egui::Button::new(ui::glyph(Icon::Plus)))
+                            .on_hover_text("Add folder")
+                            .clicked()
+                            || (valid
+                                && input.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                        if add {
+                            folders.push(path);
+                            editor.new_folder.clear();
                         }
-                        ui.add(egui::Label::new(folder.display().to_string()).truncate());
                     });
                 }
-                if let Some(index) = remove {
-                    folders.remove(index);
-                }
-                ui.horizontal(|ui| {
-                    let input = ui.add(
-                        ui::text_field(ui, &mut editor.new_folder)
-                            .hint_text("Folder path")
-                            .desired_width((ui.available_width() - 40.0).max(120.0)),
-                    );
-                    let path = PathBuf::from(editor.new_folder.trim());
-                    let valid = path.is_dir() && !folders.contains(&path);
-                    let add = ui
-                        .add_enabled(valid, egui::Button::new(ui::glyph(Icon::Plus)))
-                        .on_hover_text("Add folder")
-                        .clicked()
-                        || (valid
-                            && input.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                    if add {
-                        folders.push(path);
-                        editor.new_folder.clear();
-                    }
-                });
-            }
 
-            ui.add_space(6.0);
-            let preview = query::format(&editor.query);
-            ui.weak(if preview.is_empty() {
-                "Matches everything".to_owned()
-            } else {
-                format!("Query: {preview}")
+                ui.add_space(6.0);
+                let preview = query::format(&editor.query);
+                ui.weak(if preview.is_empty() {
+                    "Matches everything".to_owned()
+                } else {
+                    format!("Query: {preview}")
+                });
+                ui.separator();
+                let valid = !editor.name.trim().is_empty()
+                    && !name_taken
+                    && !matches!(&editor.scope, SavedScope::Folders(f) if f.is_empty());
+                ui.horizontal(|ui| {
+                    save = ui.add_enabled(valid, egui::Button::new("Save")).clicked();
+                    run = ui
+                        .add_enabled(valid, egui::Button::new("Save and run"))
+                        .clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
             });
-            ui.separator();
-            let valid = !editor.name.trim().is_empty()
-                && !name_taken
-                && !matches!(&editor.scope, SavedScope::Folders(f) if f.is_empty());
-            ui.horizontal(|ui| {
-                save = ui.add_enabled(valid, egui::Button::new("Save")).clicked();
-                run = ui
-                    .add_enabled(valid, egui::Button::new("Save and run"))
-                    .clicked();
-                cancel = ui.button("Cancel").clicked();
-            });
-        });
         if (save || run)
             && let Some(editor) = self.saved_editor.take()
         {

@@ -51,7 +51,7 @@ fn segment_ui(ui: &mut Ui, plugin: &str, segment: &BarSegment) -> Option<String>
     } else if let Some(badge) = &segment.badge {
         let palette = Palette::of(ui);
         egui::Frame::new()
-            .fill(palette.card)
+            .fill(palette.card_bg)
             .corner_radius(8)
             .inner_margin(egui::Margin::symmetric(6, 1))
             .show(ui, |ui| {
@@ -102,7 +102,7 @@ pub fn bar_ui(ui: &mut Ui, views: &[BarView<'_>]) -> Option<String> {
             ui.label(
                 RichText::new(view.name)
                     .small()
-                    .color(Palette::of(ui).secondary),
+                    .color(Palette::of(ui).text_weak),
             );
             if let Some(error) = &view.state.error {
                 ui.label(
@@ -146,7 +146,7 @@ pub fn inspector_ui(ui: &mut Ui, views: &[InspectorView<'_>]) {
                 ui.label(
                     RichText::new(label)
                         .small()
-                        .color(Palette::of(ui).secondary),
+                        .color(Palette::of(ui).text_weak),
                 );
                 ui.add(egui::Label::new(value).wrap());
                 ui.add_space(4.0);
@@ -330,7 +330,7 @@ pub fn settings_page(ui: &mut Ui, host: &mut PluginHost, settings: &mut Settings
                     changed = true;
                 }
                 let (text, detail) = status_text(&plugin.status, on);
-                let label = ui.label(RichText::new(text).small().color(Palette::of(ui).secondary));
+                let label = ui.label(RichText::new(text).small().color(Palette::of(ui).text_weak));
                 if let Some(detail) = detail {
                     label.on_hover_text(detail);
                 }

@@ -880,7 +880,7 @@ impl PluginHost {
             }
             Some(PanelClick::Hide) => PanelOutcome::Hide,
             Some(PanelClick::Row(RowClick::Open(path))) => PanelOutcome::OpenRow(path),
-            Some(PanelClick::Row(RowClick::MeasureAgain(path))) => {
+            Some(PanelClick::Row(RowClick::Refresh(path))) => {
                 let row = RowOrigin {
                     panel: self.panels[index].key(),
                     path,
@@ -889,7 +889,10 @@ impl PluginHost {
                 self.measure_row_again(&row);
                 PanelOutcome::Open
             }
-            Some(PanelClick::Row(RowClick::Action { path, item })) => {
+            Some(PanelClick::Row(RowClick::Action {
+                payload: path,
+                item,
+            })) => {
                 self.pending_row = Some(RowOrigin {
                     panel: self.panels[index].key(),
                     path: path.clone(),
@@ -916,7 +919,7 @@ impl PluginHost {
             .find(|panel| panel.key() == row.panel)
             .and_then(|panel| panel.table.as_mut())
         {
-            table.set_status(&row.path, status);
+            table.set_status(row.path.as_path(), status);
         }
     }
 
@@ -928,7 +931,7 @@ impl PluginHost {
         let Some(table) = panel
             .table
             .as_ref()
-            .filter(|table| table.has_row(&row.path))
+            .filter(|table| table.has_row(row.path.as_path()))
         else {
             return;
         };
@@ -1016,7 +1019,7 @@ impl PluginHost {
             .iter_mut()
             .filter(|panel| panel.plugin == plugin)
             .filter_map(|panel| panel.table.as_mut())
-            .find(|table| table.has_row(&update.path))
+            .find(|table| table.has_row(update.payload.as_path()))
         {
             table.update_row(update);
         }
@@ -1330,7 +1333,7 @@ impl PluginHost {
             return true;
         };
         let mut outcome = Outcome::Open;
-        let modal = egui::Modal::new(egui::Id::new("plugin_form"))
+        let modal = egui::Modal::new(egui::Id::unique("plugin_form"))
             .frame(super::super::app::ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).clamp(320.0, 560.0));

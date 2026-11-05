@@ -141,7 +141,7 @@ impl MyTabViewer<'_> {
         // viewport, rows area), measured from the first drawn row.
         let mut measured: Option<(f32, f32, usize, f32, f32, egui::Rect)> = None;
 
-        tui(ui, Id::new("file_grid").with(tab.id))
+        tui(ui, Id::unique("file_grid").with(tab.id))
             .reserve_available_space()
             .style(taffy::Style {
                 padding: Rect {
@@ -275,7 +275,7 @@ impl MyTabViewer<'_> {
                             // ── Row interaction sense (full row) ──────────
                             let row_response = tui.egui_ui_mut().interact(
                                 row_rect,
-                                Id::new("row_sense_full").with(tab_id).with(row_index),
+                                Id::unique("row_sense_full").with(tab_id).with(row_index),
                                 Sense::click_and_drag(),
                             );
                             let row_response = row_response.on_hover_ui(|ui| {
@@ -695,12 +695,16 @@ fn header_cell_background(
     columns: &ListColumns,
     events: &mut HeaderEvents,
 ) {
-    let response = ui.interact(rect, ui.id().with(("header_cell", column)), Sense::click());
+    let response = ui.interact(
+        rect,
+        ui.scope_id().with(("header_cell", column)),
+        Sense::click(),
+    );
     let sortable = column.sort().is_some();
     let fill = if sortable && response.hovered() {
-        palette.card
+        palette.card_bg
     } else {
-        palette.content
+        palette.panel_bg
     };
     ui.painter().rect_filled(rect, 0.0, fill);
     ui.painter().hline(
@@ -730,7 +734,7 @@ fn header_cell_background(
         let handle = ui
             .interact(
                 handle,
-                ui.id().with(("column_resize", column)),
+                ui.scope_id().with(("column_resize", column)),
                 Sense::click_and_drag(),
             )
             .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);

@@ -467,7 +467,7 @@ impl Workspace {
         };
         ui.spacing_mut().item_spacing = [0.0, 0.0].into();
         DockArea::new(&mut window.dock_state)
-            .id(egui::Id::new(("dock_area", window.id)))
+            .id(egui::Id::unique(("dock_area", window.id)))
             .show_leaf_close_all_buttons(false)
             .show_leaf_collapse_buttons(false)
             .show_add_popup(false)
@@ -719,9 +719,7 @@ mod tests {
     }
     /// Tests that touch the shared command queue run one at a time.
     fn lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::app::dock::tests::SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        egui_mev_test::snapshot_lock()
     }
 
     fn drain() {

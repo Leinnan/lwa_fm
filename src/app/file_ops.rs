@@ -400,7 +400,7 @@ impl App {
             .filter(|(path, name, _)| display_name(path) != *name)
             .count();
         let problems = preview.iter().filter(|(_, _, p)| p.is_some()).count();
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::BatchRename))
+        let modal = egui::Modal::new(egui::Id::unique(ModalWindow::BatchRename))
             .frame(ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).clamp(320.0, 620.0));
@@ -414,15 +414,18 @@ impl App {
                         egui::Grid::new("batch_replace")
                             .num_columns(2)
                             .show(ui, |ui| {
-                                ui.label("Find");
-                                let find = ui.add(ui::text_field(ui, &mut state.find));
+                                let label = ui.label("Find");
+                                let find = ui
+                                    .add(ui::text_field(ui, &mut state.find))
+                                    .labelled_by(label.id);
                                 if !state.focused {
                                     state.focused = true;
                                     find.request_focus();
                                 }
                                 ui.end_row();
-                                ui.label("Replace with");
-                                ui.add(ui::text_field(ui, &mut state.replace));
+                                let label = ui.label("Replace with");
+                                ui.add(ui::text_field(ui, &mut state.replace))
+                                    .labelled_by(label.id);
                                 ui.end_row();
                             });
                     }
@@ -430,11 +433,13 @@ impl App {
                         egui::Grid::new("batch_pattern")
                             .num_columns(2)
                             .show(ui, |ui| {
-                                ui.label("Pattern");
-                                ui.add(ui::text_field(ui, &mut state.pattern));
+                                let label = ui.label("Pattern");
+                                ui.add(ui::text_field(ui, &mut state.pattern))
+                                    .labelled_by(label.id);
                                 ui.end_row();
-                                ui.label("Start at");
-                                ui.add(egui::DragValue::new(&mut state.start).range(0..=100_000));
+                                let label = ui.label("Start at");
+                                ui.add(egui::DragValue::new(&mut state.start).range(0..=100_000))
+                                    .labelled_by(label.id);
                                 ui.end_row();
                             });
                         ui.weak("{name} is the old name, {ext} its extension, {n} a number.");
@@ -450,7 +455,7 @@ impl App {
                             .show(ui, |ui| {
                                 for (path, name, problem) in &preview {
                                     ui.label(display_name(path));
-                                    ui.label("→");
+                                    ui.label(ui::glyph(lucide_icons::Icon::ArrowRight));
                                     match problem {
                                         Some(problem) => {
                                             ui.colored_label(ui.visuals().error_fg_color, name)
@@ -816,9 +821,11 @@ impl App {
             let rect = ctx.content_rect();
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
-                egui::Id::new("external_drop"),
+                egui::Id::unique("external_drop"),
             ));
-            let accent = ui::Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).accent;
+            let accent = egui_mev_theme::Theme::of(ctx)
+                .palette(ctx.global_style().visuals.dark_mode)
+                .accent;
             painter.rect_filled(rect, 0.0, accent.gamma_multiply(0.12));
             painter.rect_stroke(
                 rect.shrink(4.0),
@@ -893,7 +900,7 @@ impl App {
             [one] => display_name(one),
             many => format!("{} items", many.len()),
         };
-        egui::Area::new(egui::Id::new("drag_badge"))
+        egui::Area::new(egui::Id::unique("drag_badge"))
             .fixed_pos(pos + egui::vec2(16.0, 16.0))
             .order(egui::Order::Tooltip)
             .interactable(false)
@@ -972,18 +979,20 @@ impl App {
         let mut cancel = false;
         let original = display_name(&state.path);
         let error = rename_error(&state.path, &original, &state.name);
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::Rename))
+        let modal = egui::Modal::new(egui::Id::unique(ModalWindow::Rename))
             .frame(ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 420.0));
                 ui.heading("Rename");
-                ui.label("New name");
-                let id = egui::Id::new("rename_field");
-                let response = ui.add(
-                    ui::text_field(ui, &mut state.name)
-                        .id(id)
-                        .desired_width(ui.available_width()),
-                );
+                let label = ui.label("New name");
+                let id = egui::Id::unique("rename_field");
+                let response = ui
+                    .add(
+                        ui::text_field(ui, &mut state.name)
+                            .id(id)
+                            .desired_width(ui.available_width()),
+                    )
+                    .labelled_by(label.id);
                 if !state.initialized {
                     state.initialized = true;
                     response.request_focus();
@@ -1039,7 +1048,7 @@ impl App {
         let paths = &self.pending_delete.paths;
         let permanent = self.pending_delete.permanent;
         let empty_trash = self.pending_delete.empty_trash;
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ConfirmDelete))
+        let modal = egui::Modal::new(egui::Id::unique(ModalWindow::ConfirmDelete))
             .frame(ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 440.0));
@@ -1119,7 +1128,7 @@ impl App {
         } else {
             ("Copy", "Move")
         };
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ConfirmDrop))
+        let modal = egui::Modal::new(egui::Id::unique(ModalWindow::ConfirmDrop))
             .frame(ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 460.0));
@@ -1183,7 +1192,7 @@ impl App {
         let target = PathBuf::from(state.input.trim());
         let valid = target.is_dir() && !crate::fs_enum::is_package(&target);
         let verb = if state.moving { "Move" } else { "Copy" };
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ChooseFolder))
+        let modal = egui::Modal::new(egui::Id::unique(ModalWindow::ChooseFolder))
             .frame(ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 520.0));
@@ -1194,9 +1203,10 @@ impl App {
                         many => format!("{} items", many.len()),
                     }
                 ));
-                ui.label("Destination folder");
+                let label = ui.label("Destination folder");
                 let response = ui
-                    .add(ui::text_field(ui, &mut state.input).desired_width(ui.available_width()));
+                    .add(ui::text_field(ui, &mut state.input).desired_width(ui.available_width()))
+                    .labelled_by(label.id);
                 if !state.focused {
                     state.focused = true;
                     response.request_focus();
@@ -1241,7 +1251,7 @@ impl App {
         };
         let mut choice = None;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::Conflict))
+        let modal = egui::Modal::new(egui::Id::unique(ModalWindow::Conflict))
             .frame(ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 460.0));

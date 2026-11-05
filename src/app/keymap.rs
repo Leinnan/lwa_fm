@@ -4,7 +4,10 @@
 //! help overlay, menus and tooltips can show the same key combinations that
 //! actually run. Bindings follow Windows Explorer where it has one.
 
-use egui::{Context, Key, KeyboardShortcut, Modifiers, PointerButton};
+use std::sync::LazyLock;
+
+use egui::{Context, Key, Modifiers, PointerButton};
+use egui_mev_commands::{Binding, HelpSection, Keymap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Command {
@@ -92,19 +95,9 @@ impl Command {
     }
 }
 
-pub struct Binding {
-    pub shortcut: KeyboardShortcut,
-    pub command: Command,
-    /// Whether the shortcut also fires while a text field has focus.
-    pub in_text: bool,
-}
-
-const fn bind(modifiers: Modifiers, key: Key, command: Command, in_text: bool) -> Binding {
-    Binding {
-        shortcut: KeyboardShortcut::new(modifiers, key),
-        command,
-        in_text,
-    }
+const fn bind(modifiers: Modifiers, key: Key, command: Command, in_text: bool) -> Binding<Command> {
+    let binding = Binding::new(modifiers, key, command);
+    if in_text { binding.in_text() } else { binding }
 }
 
 const NONE: Modifiers = Modifiers::NONE;
@@ -114,7 +107,7 @@ const CMD_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
 const CMD_ALT: Modifiers = Modifiers::COMMAND.plus(Modifiers::ALT);
 
 /// All bindings. The first binding of a command is the one shown in menus.
-pub const BINDINGS: &[Binding] = &[
+pub const BINDINGS: &[Binding<Command>] = &[
     bind(ALT, Key::ArrowLeft, Command::Back, false),
     bind(NONE, Key::Backspace, Command::Back, false),
     bind(ALT, Key::ArrowRight, Command::Forward, false),
@@ -195,41 +188,14 @@ pub const VIEW_KEYS: &[(&str, &str)] = &[
     ("Mouse back / forward buttons", "Back / Forward"),
 ];
 
+static KEYMAP: LazyLock<Keymap<Command>> = LazyLock::new(|| Keymap::new(BINDINGS.iter().cloned()));
+
 /// Returns the commands whose shortcuts were pressed this frame and consumes
 /// their key events. Modifiers must match exactly, so Ctrl+Shift+Tab never
 /// also triggers Ctrl+Tab.
 pub fn pressed(ctx: &Context) -> Vec<Command> {
-    let in_text = ctx.text_edit_focused();
-    let mut commands = Vec::new();
-    ctx.input_mut(|input| {
-        if !in_text {
-            let modifiers = input.modifiers;
-            for event in &mut input.events {
-                if let Some(key) = clipboard_key(event, modifiers) {
-                    *event = key;
-                }
-            }
-        }
-        for binding in BINDINGS {
-            if in_text && !binding.in_text {
-                continue;
-            }
-            let KeyboardShortcut {
-                modifiers,
-                logical_key,
-            } = binding.shortcut;
-            let before = input.events.len();
-            input.events.retain(|event| {
-                !matches!(
-                    event,
-                    egui::Event::Key { key, modifiers: pressed_modifiers, pressed: true, .. }
-                        if *key == logical_key && pressed_modifiers.matches_exact(modifiers)
-                )
-            });
-            if input.events.len() != before && !commands.contains(&binding.command) {
-                commands.push(binding.command);
-            }
-        }
+    let mut commands = KEYMAP.pressed(ctx);
+    ctx.input(|input| {
         if input.pointer.button_pressed(PointerButton::Extra1) {
             commands.push(Command::Back);
         }
@@ -240,43 +206,14 @@ pub fn pressed(ctx: &Context) -> Vec<Command> {
     commands
 }
 
-/// The key press behind a clipboard event. egui-winit turns Ctrl+X, Ctrl+C,
-/// Ctrl+V and, on Windows, Shift+Delete, Ctrl+Insert and Shift+Insert into
-/// `Cut` / `Copy` / `Paste` without the key event, so outside text fields
-/// they are turned back into keys for the table above.
-const fn clipboard_key(event: &egui::Event, modifiers: Modifiers) -> Option<egui::Event> {
-    let (key, modifiers) = match event {
-        egui::Event::Cut if cfg!(windows) && modifiers.shift && !modifiers.command => {
-            (Key::Delete, Modifiers::SHIFT)
-        }
-        egui::Event::Cut => (Key::X, modifiers),
-        egui::Event::Copy => (Key::C, modifiers.plus(CMD)),
-        egui::Event::Paste(_) => (Key::V, CMD),
-        _ => return None,
-    };
-    Some(egui::Event::Key {
-        key,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers,
-    })
-}
-
 /// The first shortcut bound to `command`, formatted for this platform.
 pub fn shortcut_text(ctx: &Context, command: Command) -> Option<String> {
-    BINDINGS
-        .iter()
-        .find(|binding| binding.command == command)
-        .map(|binding| ctx.format_shortcut(&binding.shortcut))
+    KEYMAP.shortcut_text(ctx, &command)
 }
 
-/// A tooltip like "Back (Alt+Left)".
+/// A tooltip like "Back  Alt+Left".
 pub fn tooltip(ctx: &Context, command: Command) -> String {
-    shortcut_text(ctx, command).map_or_else(
-        || command.label().to_owned(),
-        |shortcut| format!("{} ({shortcut})", command.label()),
-    )
+    KEYMAP.tooltip(ctx, command.label(), &command)
 }
 
 /// A menu entry that runs `command` and shows its shortcut, so menus and the
@@ -320,38 +257,20 @@ pub fn menu_toggle(ui: &mut egui::Ui, command: Command, checked: bool) {
 /// Every shortcut as a settings row with key caps: the Settings → Keyboard
 /// page and the shortcut overlay show the same list.
 pub fn shortcut_rows(ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
-    crate::app::ui::settings_group(ui, "Application", |group| {
-        let mut shown: Vec<&str> = Vec::new();
-        for binding in BINDINGS {
-            let label = binding.command.label();
-            if shown.contains(&label) {
-                continue;
-            }
-            shown.push(label);
-            // Drawn right to left, so the first (menu) shortcut ends up first.
-            let keys: Vec<String> = BINDINGS
-                .iter()
-                .filter(|other| other.command.label() == label)
-                .map(|other| ctx.format_shortcut(&other.shortcut))
-                .rev()
-                .collect();
-            group.row(label, None, |ui| crate::app::ui::key_caps(ui, &keys));
-        }
-    });
-    crate::app::ui::settings_group(ui, "Files", |group| {
-        for (keys, action) in VIEW_KEYS {
-            let keys: Vec<String> = keys.rsplit(", ").map(str::to_owned).collect();
-            group.row(action, None, |ui| crate::app::ui::key_caps(ui, &keys));
-        }
-    });
+    let sections = [
+        HelpSection::from_keymap(ui.ctx(), "Application", &KEYMAP, |command| {
+            Some(command.label().into())
+        }),
+        HelpSection::from_keys("Files", VIEW_KEYS),
+    ];
+    egui_mev_commands::shortcut_rows(ui, &sections);
     crate::plugins::shortcut_rows(ui);
 }
 
 /// Draws the keyboard shortcut overlay. Returns `true` when it should close.
 pub fn help_ui(ctx: &Context) -> bool {
     let mut close = false;
-    let modal = egui::Modal::new(egui::Id::new("keyboard_shortcuts")).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("keyboard_shortcuts")).show(ctx, |ui| {
         ui.set_width((ctx.content_rect().width() - 64.0).clamp(300.0, 560.0));
         ui.heading("Keyboard shortcuts");
         egui::ScrollArea::vertical()

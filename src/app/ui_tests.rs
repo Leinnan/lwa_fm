@@ -56,20 +56,17 @@ fn fixture(appearance: Appearance, grid: bool, inspector: bool) -> App {
 fn draw(root: &mut egui::Ui, app: &mut App) {
     let ctx = &root.ctx().clone();
     let initialized = ctx
-        .data(|data| data.get_temp::<bool>(egui::Id::new("fixture_initialized")))
+        .data(|data| data.get_temp::<bool>(egui::Id::unique("fixture_initialized")))
         .unwrap_or(false);
     if !initialized {
-        let mut fonts = egui::FontDefinitions::default();
-        ui::register_icons(&mut fonts);
-        ctx.set_fonts(fonts);
         ui::configure_test(
             ctx,
-            ctx.data(|data| data.get_temp::<bool>(egui::Id::new("fluent_fixture")))
+            ctx.data(|data| data.get_temp::<bool>(egui::Id::unique("fluent_fixture")))
                 .unwrap_or(false),
         );
         if let Some(tab) = app.tabs.get_current_tab() {
             tab.selection.set_rows(
-                ctx.data(|data| data.get_temp::<Vec<usize>>(egui::Id::new("initial_selection")))
+                ctx.data(|data| data.get_temp::<Vec<usize>>(egui::Id::unique("initial_selection")))
                     .unwrap_or_else(|| vec![1]),
             );
             ctx.data_set_path(
@@ -80,7 +77,7 @@ fn draw(root: &mut egui::Ui, app: &mut App) {
                 },
             );
         }
-        ctx.data_mut(|data| data.insert_temp(egui::Id::new("fixture_initialized"), true));
+        ctx.data_mut(|data| data.insert_temp(egui::Id::unique("fixture_initialized"), true));
         return;
     }
     app.assets.begin_frame();
@@ -93,16 +90,14 @@ fn draw(root: &mut egui::Ui, app: &mut App) {
 
 fn draw_fluent(root: &mut egui::Ui, app: &mut App) {
     root.ctx()
-        .data_mut(|data| data.insert_temp(egui::Id::new("fluent_fixture"), true));
+        .data_mut(|data| data.insert_temp(egui::Id::unique("fluent_fixture"), true));
     draw(root, app);
 }
 
 #[cfg(windows)]
 #[test]
 fn fluent_windows_grids_compact_settings_and_appearance_switching() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut snapshots = egui_kittest::SnapshotResults::new();
     for (suffix, appearance) in [("dark", Appearance::Dark), ("light", Appearance::Light)] {
         for (layout, size, grid) in [
@@ -111,7 +106,7 @@ fn fluent_windows_grids_compact_settings_and_appearance_switching() {
             ("compact", egui::vec2(640.0, 420.0), false),
         ] {
             let mut harness = Harness::builder()
-                .with_options(ui::snapshot_options())
+                .with_options(egui_mev_test::snapshot_options())
                 .with_size(size)
                 .build_ui_state(draw_fluent, fixture(appearance, grid, true));
             harness.run_steps(12);
@@ -120,7 +115,7 @@ fn fluent_windows_grids_compact_settings_and_appearance_switching() {
         let mut app = fixture(appearance, false, false);
         app.display_modal = Some(ModalWindow::Settings);
         let mut harness = Harness::builder()
-            .with_options(ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::vec2(1100.0, 720.0))
             .build_ui_state(draw_fluent, app);
         harness.run_steps(12);
@@ -130,7 +125,7 @@ fn fluent_windows_grids_compact_settings_and_appearance_switching() {
         snapshots.add(harness.try_snapshot(format!("fluent_settings_appearance_{suffix}")));
     }
     let mut harness = Harness::builder()
-        .with_options(ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw_fluent, fixture(Appearance::Dark, false, true));
     harness.run_steps(12);
@@ -145,12 +140,10 @@ fn fluent_windows_grids_compact_settings_and_appearance_switching() {
 
 #[test]
 fn fluent_keyboard_search_dialogs_and_split_panes_survive_theme_changes() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut harness = Harness::builder()
-        .with_options(ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw_fluent, fixture(Appearance::Dark, false, true));
     harness.run_steps(12);
@@ -235,9 +228,7 @@ fn fluent_keyboard_search_dialogs_and_split_panes_survive_theme_changes() {
 
 #[test]
 fn full_window_appearances_and_compact_layouts() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut snapshots = egui_kittest::SnapshotResults::new();
     for (name, appearance, size, grid) in [
         (
@@ -278,7 +269,7 @@ fn full_window_appearances_and_compact_layouts() {
         ),
     ] {
         let mut harness = Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(size)
             .build_ui_state(draw, fixture(appearance, grid, true));
         harness.run_steps(12);
@@ -288,9 +279,7 @@ fn full_window_appearances_and_compact_layouts() {
 }
 #[test]
 fn search_settings_and_overlay_snapshots() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut snapshots = egui_kittest::SnapshotResults::new();
     let mut app = fixture(Appearance::Dark, false, false);
     app.tabs.get_current_tab().expect("tab").search = Some(Search {
@@ -301,7 +290,7 @@ fn search_settings_and_overlay_snapshots() {
         ..Default::default()
     });
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -317,7 +306,7 @@ fn search_settings_and_overlay_snapshots() {
     let mut app = fixture(Appearance::Light, false, false);
     app.display_modal = Some(ModalWindow::Settings);
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -339,7 +328,7 @@ fn search_settings_and_overlay_snapshots() {
     let mut app = fixture(Appearance::Dark, false, false);
     app.display_modal = Some(ModalWindow::Settings);
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(640.0, 420.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -347,7 +336,7 @@ fn search_settings_and_overlay_snapshots() {
     let mut app = fixture(Appearance::Dark, false, false);
     app.tabs.window_mut().inspector_overlay = true;
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(640.0, 420.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -356,9 +345,7 @@ fn search_settings_and_overlay_snapshots() {
 }
 #[test]
 fn selection_follows_paths_across_sort_filter_and_deletion() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let ctx = egui::Context::default();
     let mut app = fixture(Appearance::Dark, false, true);
     let tab = app.tabs.get_current_tab().expect("tab");
@@ -391,9 +378,7 @@ fn selection_follows_paths_across_sort_filter_and_deletion() {
 }
 #[test]
 fn auto_collapse_keeps_preferences_and_toggle_opens_overlay() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let ctx = egui::Context::default();
     let mut app = fixture(Appearance::Dark, false, true);
     let mut output = ctx.run_ui(
@@ -417,9 +402,7 @@ fn auto_collapse_keeps_preferences_and_toggle_opens_overlay() {
 
 #[test]
 fn inspector_selection_states_and_split_panes() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut snapshots = egui_kittest::SnapshotResults::new();
     for (name, indices) in [
         ("dirfleet_inspector_empty", Vec::<usize>::new()),
@@ -427,12 +410,12 @@ fn inspector_selection_states_and_split_panes() {
         ("dirfleet_inspector_folder", vec![0usize]),
     ] {
         let mut harness = Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::vec2(1100.0, 720.0))
             .build_ui_state(
                 move |root, app| {
                     root.ctx().data_mut(|data| {
-                        data.insert_temp(egui::Id::new("initial_selection"), indices.clone())
+                        data.insert_temp(egui::Id::unique("initial_selection"), indices.clone())
                     });
                     draw(root, app);
                 },
@@ -456,7 +439,7 @@ fn inspector_selection_states_and_split_panes() {
             nodes[0],
         ));
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -466,9 +449,7 @@ fn inspector_selection_states_and_split_panes() {
 
 #[test]
 fn inspector_preview_loading_ready_and_failure() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut snapshots = egui_kittest::SnapshotResults::new();
     for (name, state) in [
         ("dirfleet_preview_loading", 0),
@@ -477,7 +458,7 @@ fn inspector_preview_loading_ready_and_failure() {
     ] {
         let mut assets = assets::AssetManager::default();
         let mut harness = Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::vec2(320.0, 300.0))
             .build_ui(|root| {
                 ui::configure_test(root.ctx(), false);
@@ -517,11 +498,9 @@ fn inspector_preview_loading_ready_and_failure() {
 
 #[test]
 fn appearance_change_keeps_file_labels_visible() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, fixture(Appearance::Dark, false, true));
     harness.run_steps(12);
@@ -532,11 +511,9 @@ fn appearance_change_keeps_file_labels_visible() {
 
 #[test]
 fn keyboard_selection_and_search_follow_the_active_pane() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, fixture(Appearance::Dark, false, true));
     harness.run_steps(12);
@@ -589,9 +566,7 @@ fn keyboard_selection_and_search_follow_the_active_pane() {
 
 #[test]
 fn command_palette_supports_keyboard_choice() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut app = fixture(Appearance::Dark, false, false);
     app.display_modal = Some(ModalWindow::Commands);
@@ -600,7 +575,7 @@ fn command_palette_supports_keyboard_choice() {
         ActionToPerform::ToggleInspector.into(),
     ];
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -627,11 +602,9 @@ fn command_palette_supports_keyboard_choice() {
 /// would share the main window's panel ids.)
 #[test]
 fn second_window_draws_takes_its_commands_and_closes() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
-    let shown = egui::Id::new("shown_window");
+    let shown = egui::Id::unique("shown_window");
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(
@@ -682,11 +655,9 @@ fn second_window_draws_takes_its_commands_and_closes() {
 
 #[test]
 fn path_editor_takes_focus_and_compact_overlay_dismisses() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(640.0, 420.0))
         .build_ui_state(draw, fixture(Appearance::Dark, false, true));
     harness.run_steps(12);
@@ -698,7 +669,7 @@ fn path_editor_takes_focus_and_compact_overlay_dismisses() {
     harness.run_steps(2);
     assert_eq!(
         ctx.memory(egui::Memory::focused),
-        Some(egui::Id::new(("path_editor", id)))
+        Some(egui::Id::unique(("path_editor", id)))
     );
     while COMMANDS_QUEUE.pop().is_some() {}
     harness.key_press(egui::Key::Escape);
@@ -729,13 +700,13 @@ fn path_editor_harness(
     tab.path_edit = Some(info);
     let id = tab.id;
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(900.0, 560.0))
         .build_ui_state(draw, app);
     harness.run_steps(4);
     harness
         .ctx
-        .memory_mut(|memory| memory.request_focus(egui::Id::new(("path_editor", id))));
+        .memory_mut(|memory| memory.request_focus(egui::Id::unique(("path_editor", id))));
     harness.run_steps(4);
     harness
 }
@@ -769,9 +740,7 @@ fn path_editor_folder(name: &str) -> PathBuf {
 #[test]
 fn path_editor_enter_opens_the_typed_path_not_the_hovered_row() {
     use crate::app::directory_path_info::DirectoryPathInfo;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let root = path_editor_folder("hover");
     let mut harness = path_editor_harness(Appearance::Dark, DirectoryPathInfo::build(&root));
     while COMMANDS_QUEUE.pop().is_some() {}
@@ -788,9 +757,7 @@ fn path_editor_enter_opens_the_typed_path_not_the_hovered_row() {
 #[test]
 fn path_editor_arrow_keys_choose_the_row_enter_opens() {
     use crate::app::directory_path_info::DirectoryPathInfo;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let root = path_editor_folder("arrows");
     let mut harness = path_editor_harness(Appearance::Dark, DirectoryPathInfo::build(&root));
     while COMMANDS_QUEUE.pop().is_some() {}
@@ -808,9 +775,7 @@ fn path_editor_arrow_keys_choose_the_row_enter_opens() {
 #[test]
 fn path_editor_tab_completes_keeps_focus_and_lists_the_next_level() {
     use crate::app::directory_path_info::DirectoryPathInfo;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let root = path_editor_folder("tab");
     let mut harness = path_editor_harness(Appearance::Dark, DirectoryPathInfo::build(&root));
     let ctx = harness.ctx.clone();
@@ -835,9 +800,7 @@ fn path_editor_tab_completes_keeps_focus_and_lists_the_next_level() {
 #[test]
 fn path_editor_click_navigates_and_command_click_opens_a_tab() {
     use crate::app::directory_path_info::DirectoryPathInfo;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let root = path_editor_folder("click");
     let mut harness = path_editor_harness(Appearance::Dark, DirectoryPathInfo::build(&root));
     while COMMANDS_QUEUE.pop().is_some() {}
@@ -864,9 +827,7 @@ fn path_editor_click_navigates_and_command_click_opens_a_tab() {
 #[test]
 fn path_editor_closes_when_pressed_outside_and_stays_when_pressed_inside() {
     use crate::app::directory_path_info::DirectoryPathInfo;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let root = Path::new("/virtual/Projects/DirFleet");
     let mut harness = path_editor_harness(
         Appearance::Dark,
@@ -895,7 +856,7 @@ fn path_editor_closes_when_pressed_outside_and_stays_when_pressed_inside() {
     let id = harness.state_mut().tabs.get_current_tab().expect("tab").id;
     let field = harness
         .ctx
-        .read_response(egui::Id::new(("path_editor", id)))
+        .read_response(egui::Id::unique(("path_editor", id)))
         .expect("path field")
         .rect
         .center();
@@ -910,9 +871,7 @@ fn path_editor_closes_when_pressed_outside_and_stays_when_pressed_inside() {
 #[test]
 fn path_editor_scrolls_the_chosen_row_into_view() {
     use crate::app::directory_path_info::DirectoryPathInfo;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let names: Vec<String> = (0..40).map(|i| format!("Folder {i:02}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let root = Path::new("/virtual/Projects/DirFleet");
@@ -934,9 +893,7 @@ fn path_editor_scrolls_the_chosen_row_into_view() {
 #[test]
 fn path_editor_dropdown_snapshots() {
     use crate::app::directory_path_info::DirectoryPathInfo;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut snapshots = egui_kittest::SnapshotResults::new();
     let root = Path::new("/virtual/Projects/DirFleet");
     let names = [
@@ -990,9 +947,7 @@ fn path_editor_dropdown_snapshots() {
 
 #[test]
 fn keyboard_selects_and_renames_without_hovering_the_list() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 720.0))
@@ -1053,14 +1008,12 @@ fn keyboard_selects_and_renames_without_hovering_the_list() {
 
 #[test]
 fn settings_switches_restore_defaults_and_close() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut app = fixture(Appearance::Dark, false, false);
     app.display_modal = Some(ModalWindow::Settings);
     let mut harness = Harness::builder()
-        .with_options(ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(4);
@@ -1077,6 +1030,7 @@ fn settings_switches_restore_defaults_and_close() {
         unit: egui::MouseWheelUnit::Point,
         delta: egui::vec2(0.0, -400.0),
         phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
         modifiers: egui::Modifiers::NONE,
     });
     harness.run_steps(4);
@@ -1118,9 +1072,7 @@ fn cursor_shown(harness: &mut Harness<'_, App>) -> (usize, bool) {
 
 #[test]
 fn keyboard_moves_keep_the_cursor_in_view() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     for grid in [false, true] {
         let mut harness = Harness::builder()
@@ -1199,9 +1151,7 @@ fn keyboard_moves_keep_the_cursor_in_view() {
 #[test]
 fn navigation_keeps_your_place() {
     use super::dock::ScrollRequest;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut app = long_fixture(false);
     let tab = app.tabs.get_current_tab().expect("tab");
@@ -1243,12 +1193,10 @@ fn navigation_keeps_your_place() {
 
 #[test]
 fn keyboard_cursor_ring_snapshot() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut harness = Harness::builder()
-        .with_options(ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, fixture(Appearance::Dark, false, false));
     harness.run_steps(6);
@@ -1278,9 +1226,7 @@ fn pill_labels(harness: &mut Harness<'_, App>) -> Vec<String> {
 
 #[test]
 fn search_pills_remove_edit_and_clear_with_mouse_and_keyboard() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut app = fixture(Appearance::Dark, false, false);
     let search = Search {
@@ -1292,7 +1238,7 @@ fn search_pills_remove_edit_and_clear_with_mouse_and_keyboard() {
     tab.search = Some(search);
     tab.search_committed.clone_from(&tab.search);
     let mut harness = Harness::builder()
-        .with_options(ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, app);
     harness.run_steps(4);
@@ -1386,9 +1332,7 @@ fn search_pills_remove_edit_and_clear_with_mouse_and_keyboard() {
 
 #[test]
 fn search_edits_undo_redo_and_back_restores_them() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let ctx = egui::Context::default();
     let mut app = fixture(Appearance::Dark, false, false);
@@ -1432,9 +1376,7 @@ fn search_edits_undo_redo_and_back_restores_them() {
 
 #[test]
 fn saved_searches_save_update_delete_and_undo() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let ctx = egui::Context::default();
     let mut app = fixture(Appearance::Dark, false, false);
@@ -1486,9 +1428,7 @@ fn saved_searches_save_update_delete_and_undo() {
 #[test]
 fn sidebar_sections_collapse_and_reorder() {
     use crate::app::settings::SidebarSection;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 720.0))
@@ -1525,13 +1465,11 @@ fn sidebar_sections_collapse_and_reorder() {
 
 #[test]
 fn saved_search_sidebar_and_editor_snapshots() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut snapshots = egui_kittest::SnapshotResults::new();
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw, fixture(Appearance::Dark, false, false));
     harness.run_steps(4);
@@ -1573,9 +1511,7 @@ fn saved_search_sidebar_and_editor_snapshots() {
 /// both views, and Ctrl-dragging adds to the selection.
 #[test]
 fn dragging_on_empty_space_selects_items() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     for grid in [false, true] {
         let mut harness = Harness::builder()
@@ -1622,9 +1558,7 @@ fn dragging_on_empty_space_selects_items() {
 /// resizes it; both are remembered.
 #[test]
 fn list_columns_can_be_added_and_resized() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1100.0, 720.0))
@@ -1778,9 +1712,7 @@ fn bar_controls(harness: &Harness<'_, App>) -> Vec<(String, String, egui::Rect)>
 
 #[test]
 fn top_bar_fits_at_minimum_width() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     for fluent in [false, true] {
         for width in [480.0, 800.0] {
             for path in bar_paths() {
@@ -1813,9 +1745,7 @@ fn top_bar_fits_at_minimum_width() {
 
 #[test]
 fn top_bar_targets_are_large_enough() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     // WCAG 2.5.8: at least 24 by 24.
     for fluent in [false, true] {
         for path in bar_paths() {
@@ -1840,9 +1770,7 @@ fn top_bar_targets_are_large_enough() {
 
 #[test]
 fn top_bar_controls_are_named() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let private_use = |c: char| ('\u{E000}'..='\u{F8FF}').contains(&c);
     for fluent in [false, true] {
         for width in [480.0, 1024.0] {
@@ -1864,9 +1792,7 @@ fn top_bar_controls_are_named() {
 
 #[test]
 fn top_bar_names_hidden_folders_and_marks_the_shown_panels() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let deep = &bar_paths()[0];
     // Wide enough for the whole path: no "…".
     let harness = bar_harness(deep, false, false, 2560.0);
@@ -1926,27 +1852,25 @@ fn theme_tokens_meet_contrast() {
         let ctx = egui::Context::default();
         ui::configure_test(&ctx, fluent);
         for dark in [false, true] {
-            let p = ui::Palette::for_context(&ctx, dark);
+            let p = egui_mev_theme::Theme::of(&ctx).palette(dark);
             let at = format!("fluent {fluent}, dark {dark}");
-            assert!(contrast(p.text, p.toolbar) >= 4.5, "text ({at})");
+            assert!(contrast(p.text, p.toolbar_bg) >= 4.5, "text ({at})");
             assert!(
-                contrast(p.secondary, p.toolbar) >= 4.5,
+                contrast(p.text_weak, p.toolbar_bg) >= 4.5,
                 "secondary text ({at})"
             );
             assert!(
-                contrast(p.secondary, p.card) >= 4.5,
+                contrast(p.text_weak, p.card_bg) >= 4.5,
                 "secondary on fields ({at})"
             );
-            assert!(contrast(p.accent, p.toolbar) >= 3.0, "focus ring ({at})");
+            assert!(contrast(p.accent, p.toolbar_bg) >= 3.0, "focus ring ({at})");
         }
     }
 }
 
 #[test]
 fn toolbar_search_field_opens_takes_typing_and_closes_with_escape() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let mut harness = bar_harness(&bar_paths()[0], false, false, 1100.0);
     let ctx = harness.ctx.clone();
@@ -1990,9 +1914,7 @@ fn toolbar_search_field_opens_takes_typing_and_closes_with_escape() {
 
 #[test]
 fn breadcrumbs_keep_their_size_when_hovered() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     for fluent in [false, true] {
         let mut harness = bar_harness(&bar_paths()[0], false, fluent, 1100.0);
         let rects = |harness: &Harness<'_, App>| {
@@ -2017,14 +1939,12 @@ fn breadcrumbs_keep_their_size_when_hovered() {
 /// where they were. The delete dialog uses the same button row.
 #[test]
 fn dropping_items_on_a_folder_asks_first() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut snapshots = egui_kittest::SnapshotResults::new();
     let mut harness = Harness::builder()
-        .with_options(ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1100.0, 720.0))
         .build_ui_state(draw_fluent, fixture(Appearance::Dark, false, false));
     harness.run_steps(12);
@@ -2114,11 +2034,8 @@ fn plugin_harness(app: App) -> Harness<'static, App> {
         .build_ui_state(
             |root, app: &mut App| {
                 let ctx = root.ctx().clone();
-                let id = egui::Id::new("fonts_set");
+                let id = egui::Id::unique("fonts_set");
                 if !ctx.data(|data| data.get_temp::<bool>(id).unwrap_or(false)) {
-                    let mut fonts = egui::FontDefinitions::default();
-                    ui::register_icons(&mut fonts);
-                    ctx.set_fonts(fonts);
                     ui::configure_test(&ctx, false);
                     ctx.data_mut(|data| data.insert_temp(id, true));
                     return;
@@ -2163,9 +2080,7 @@ fn running_plugins(dir: &Path) -> Harness<'static, App> {
 #[cfg(unix)]
 #[test]
 fn commands_window_opens_plugin_forms() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let dir = std::env::temp_dir()
         .canonicalize()
@@ -2426,9 +2341,7 @@ fn jobs_end(harness: &mut Harness<'_, App>) {
 #[cfg(unix)]
 #[test]
 fn results_dialog_runs_in_the_background() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let (mut harness, base, one, _) = slow_harness("background");
 
@@ -2535,9 +2448,7 @@ fn results_dialog_runs_in_the_background() {
 #[cfg(unix)]
 #[test]
 fn results_dialog_stops_and_restarts() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let (mut harness, base, one, two) = slow_harness("restart");
 
@@ -2633,9 +2544,7 @@ fn results_dialog_stops_and_restarts() {
 #[cfg(unix)]
 #[test]
 fn results_dialog_filters_by_size() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let (mut harness, base, one, _) = slow_harness("filter");
     open_slow(&mut harness, &one);
@@ -2789,9 +2698,7 @@ fn fixture_base(name: &str) -> PathBuf {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn row_menu_asks_then_removes_and_updates_the_row() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let base = fixture_base("row_menu");
     let project = base.join("games/menu_project");
@@ -2919,9 +2826,7 @@ fn row_menu_asks_then_removes_and_updates_the_row() {
 #[cfg(unix)]
 #[test]
 fn row_menu_keeps_the_rust_clean_checks() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let base = fixture_base("row_checks");
     std::fs::write(
@@ -2986,9 +2891,7 @@ fn row_menu_keeps_the_rust_clean_checks() {
 #[cfg(unix)]
 #[test]
 fn row_menu_waits_for_the_scan() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let (mut harness, base, one, _) = slow_harness("row_wait");
     open_slow(&mut harness, &one);
@@ -3075,9 +2978,7 @@ fn confirm_row(harness: &mut Harness<'_, App>, row: &str) {
 #[cfg(unix)]
 #[test]
 fn rows_show_what_is_happening_to_them() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let (mut harness, base, one, _) = slow_harness("row_status");
     let sub = one.join("sub");
@@ -3182,9 +3083,7 @@ fn rows_show_what_is_happening_to_them() {
 fn results_dialog_scanning_snapshots() {
     use crate::plugins::panel::JobView;
     use crate::plugins::table::RowStatus;
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut snapshots = egui_kittest::SnapshotResults::new();
     for (name, size) in [
         ("plugin_results_busy", egui::vec2(1100.0, 720.0)),
@@ -3208,15 +3107,12 @@ fn results_dialog_scanning_snapshots() {
             label: "IDEAS/slowo".into(),
         };
         let mut harness = Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(size)
             .build_ui(move |ui| {
                 let ctx = ui.ctx().clone();
-                let id = egui::Id::new("fonts_set");
+                let id = egui::Id::unique("fonts_set");
                 if !ctx.data(|data| data.get_temp::<bool>(id).unwrap_or(false)) {
-                    let mut fonts = egui::FontDefinitions::default();
-                    ui::register_icons(&mut fonts);
-                    ctx.set_fonts(fonts);
                     ui::configure_test(&ctx, false);
                     ctx.data_mut(|data| data.insert_temp(id, true));
                     return;
@@ -3284,9 +3180,7 @@ fn results_panel_fixture(progress: Option<&str>) -> crate::plugins::panel::Resul
 #[cfg(not(windows))]
 #[test]
 fn results_dialog_snapshot() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
     let panel = results_panel_fixture(None);
     let mut app = fixture(Appearance::Dark, false, false);
@@ -3294,7 +3188,7 @@ fn results_dialog_snapshot() {
     app.plugins.show_panel("test.slow.scan");
     app.display_modal = Some(ModalWindow::PluginResults);
     let mut harness = Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(egui::vec2(1000.0, 700.0))
         .build_ui_state(draw, app);
     harness.run_steps(12);
@@ -3310,9 +3204,7 @@ fn results_dialog_snapshot() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn folder_usage_and_rust_clean_through_the_app() {
-    let _guard = dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     while COMMANDS_QUEUE.pop().is_some() {}
 
     let base = std::env::temp_dir()

@@ -1,52 +1,14 @@
 //! Keyboard shortcuts for plugin actions: the manifest's default or the
 //! user's own, never one the app already uses.
 
-use egui::{Context, Key, KeyboardShortcut, Modifiers};
+use egui::{Context, KeyboardShortcut};
+use egui_mev_commands::Shortcut;
 
 /// Parses `Ctrl+Alt+M`, `Shift+F5` and the like. `Ctrl` means Cmd on macOS.
 pub fn parse_shortcut(text: &str) -> Result<KeyboardShortcut, String> {
-    let mut modifiers = Modifiers::NONE;
-    let mut key = None;
-    for part in text.split('+').map(str::trim) {
-        match part.to_ascii_lowercase().as_str() {
-            "ctrl" | "cmd" | "command" | "mod" => modifiers |= Modifiers::COMMAND,
-            "alt" | "option" => modifiers |= Modifiers::ALT,
-            "shift" => modifiers |= Modifiers::SHIFT,
-            "" => return Err(format!("\"{text}\" is not a shortcut")),
-            _ => {
-                if key.is_some() {
-                    return Err(format!("\"{text}\" names more than one key"));
-                }
-                key = Some(
-                    Key::from_name(part)
-                        .or_else(|| Key::from_name(&part.to_ascii_uppercase()))
-                        .ok_or_else(|| format!("unknown key \"{part}\" in \"{text}\""))?,
-                );
-            }
-        }
-    }
-    let key = key.ok_or_else(|| format!("\"{text}\" has no key"))?;
-    let function_key = matches!(
-        key,
-        Key::F1
-            | Key::F2
-            | Key::F3
-            | Key::F4
-            | Key::F5
-            | Key::F6
-            | Key::F7
-            | Key::F8
-            | Key::F9
-            | Key::F10
-            | Key::F11
-            | Key::F12
-    );
-    if modifiers.is_none() && !function_key {
-        return Err(format!(
-            "\"{text}\" needs Ctrl or Alt, so typing a name still works"
-        ));
-    }
-    Ok(KeyboardShortcut::new(modifiers, key))
+    Shortcut::parse(text)
+        .map(|shortcut| shortcut.0)
+        .map_err(|error| error.to_string())
 }
 
 /// The built-in command that already uses `shortcut`, if any.
@@ -97,6 +59,7 @@ pub fn pressed(ctx: &Context, bindings: &[PluginBinding]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::{Key, Modifiers};
 
     #[test]
     fn parses_shortcuts() {

@@ -4,7 +4,6 @@
 //! by one.
 
 use super::App;
-use super::ui::Palette;
 use std::time::Duration;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -43,12 +42,12 @@ impl App {
                 ctx.request_repaint_after(Duration::from_secs(1));
             }
         }
-        let palette = Palette::for_context(&ctx, ctx.global_style().visuals.dark_mode);
+        let palette = egui_mev_theme::Theme::of(&ctx).palette(ctx.global_style().visuals.dark_mode);
         egui::Panel::top("disk_access")
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(palette.toolbar)
+                    .fill(palette.toolbar_bg)
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(root, |ui| {

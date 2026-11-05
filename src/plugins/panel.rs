@@ -66,7 +66,7 @@ impl ResultsPanel {
         if let Some(table) = self.table.as_mut() {
             table.update(spec);
         } else {
-            let mut table = TableView::new(spec);
+            let mut table = super::table::view(spec);
             if let Some(order) = self.last_sort {
                 table.apply_sort(order);
             }
@@ -161,7 +161,7 @@ impl ResultsPanel {
                     .desired_width(160.0)
                     .desired_height(6.0),
             );
-            let secondary = Palette::of(ui).secondary;
+            let secondary = Palette::of(ui).text_weak;
             ui.add(egui::Label::new(RichText::new(text).color(secondary)).truncate());
         });
     }
@@ -194,7 +194,7 @@ impl ResultsPanel {
             ui.add_space(4.0);
         }
         if let Some(note) = self.other_folder_note() {
-            ui.label(RichText::new(note).color(Palette::of(ui).secondary));
+            ui.label(RichText::new(note).color(Palette::of(ui).text_weak));
             ui.add_space(4.0);
         }
         if let Some(table) = self.table.as_mut() {
@@ -236,7 +236,7 @@ impl ResultsPanel {
         let mut click = None;
         // Esc or a click outside then closes that menu, not the dialog too.
         let popup_open = egui::Popup::is_any_open(ctx);
-        let modal = egui::Modal::new(egui::Id::new("plugin_results"))
+        let modal = egui::Modal::new(egui::Id::unique("plugin_results"))
             .frame(app_ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).clamp(480.0, 980.0));

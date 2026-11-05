@@ -92,10 +92,10 @@ pub static SLED_DIRS: LazyLock<sled::Db> = LazyLock::new(|| {
             .expect("Failed to open a temporary directory cache");
     }
     let path = crate::paths::project_dirs().expect("");
-    if !path.data_dir().exists() {
-        std::fs::create_dir_all(path.data_dir()).expect("Failed to create data directory");
+    if !path.data_dir.exists() {
+        std::fs::create_dir_all(&path.data_dir).expect("Failed to create data directory");
     }
-    let dir = path.data_dir().join("dirs");
+    let dir = path.data_dir.join("dirs");
     // Another running copy of the app holds the database's lock. This copy
     // then caches listings in memory only, for as long as it runs.
     sled::open(&dir).unwrap_or_else(|error| {

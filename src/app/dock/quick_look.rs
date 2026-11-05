@@ -31,12 +31,12 @@ impl MyTabViewer<'_> {
         let name = entry.file_name.to_owned();
         let path = entry.full_path_string();
         let mut close = false;
-        egui::Area::new(egui::Id::new("quick_look").with(tab.id))
+        egui::Area::new(egui::Id::unique("quick_look").with(tab.id))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
-                    .fill(Palette::of(ui).card)
+                    .fill(Palette::of(ui).card_bg)
                     .inner_margin(16)
                     .show(ui, |ui| {
                         ui.set_max_width(target.x);

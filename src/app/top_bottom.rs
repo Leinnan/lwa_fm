@@ -104,9 +104,8 @@ impl App {
         let (rect, background) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), side), egui::Sense::click());
         let editable = tab.current_path.single_path().is_some() && !tab.current_path.is_trash();
-        background.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, editable, "Edit path")
-        });
+        background
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, editable, "Edit path"));
         let background = background
             .on_hover_text(keymap::tooltip(ui.ctx(), Command::FocusAddress))
             .on_hover_cursor(egui::CursorIcon::Text);
@@ -117,14 +116,14 @@ impl App {
         if !editing {
             let palette = Palette::of(ui);
             let stroke = if background.hovered() {
-                palette.secondary
+                palette.text_weak
             } else {
                 palette.border
             };
             ui.painter().rect(
                 rect,
                 ui::control_radius(ui),
-                palette.card,
+                palette.card_bg,
                 egui::Stroke::new(1.0_f32, stroke),
                 egui::StrokeKind::Inside,
             );
@@ -198,7 +197,11 @@ impl App {
             .exact_size(height)
             .frame(
                 egui::Frame::new()
-                    .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).toolbar)
+                    .fill(
+                        egui_mev_theme::Theme::of(ctx)
+                            .palette(ctx.global_style().visuals.dark_mode)
+                            .toolbar_bg,
+                    )
                     .inner_margin(margin),
             )
             .show(root, |ui| {
@@ -299,7 +302,7 @@ impl App {
             return;
         };
         if tab.search.is_none() {
-            ctx.data_mut(|data| data.remove::<bool>(egui::Id::new(("search_focus", tab.id))));
+            ctx.data_mut(|data| data.remove::<bool>(egui::Id::unique(("search_focus", tab.id))));
             return;
         }
         let tab_id = tab.id;
@@ -309,14 +312,18 @@ impl App {
         let was_searching = tab.is_searching();
         let favorites = ctx.data_get_persisted::<Locations>().unwrap_or_default();
         let has_favorites = !favorites.locations.is_empty();
-        let field_id = egui::Id::new(("search_field", tab_id));
+        let field_id = egui::Id::unique(("search_field", tab_id));
         let (extensions, folders) = search_suggestions(ctx, tab, field_id);
         let search = tab.search.as_mut().expect("search exists");
         egui::Panel::top("search_row")
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).toolbar)
+                    .fill(
+                        egui_mev_theme::Theme::of(ctx)
+                            .palette(ctx.global_style().visuals.dark_mode)
+                            .toolbar_bg,
+                    )
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(root, |ui| {
@@ -521,7 +528,11 @@ impl App {
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).toolbar)
+                    .fill(
+                        egui_mev_theme::Theme::of(ctx)
+                            .palette(ctx.global_style().visuals.dark_mode)
+                            .toolbar_bg,
+                    )
                     .inner_margin(egui::Margin::symmetric(12, 4)),
             )
             .show(root, |ui| {
@@ -549,7 +560,7 @@ impl App {
                         let text = if bytes > 0 {
                             format!(
                                 "{selected} selected · {}",
-                                crate::helper::format_bytes_simple(bytes)
+                                egui_mev_core::format::format_bytes(bytes)
                             )
                         } else {
                             format!("{selected} selected")
@@ -743,12 +754,12 @@ fn more_menu(ui: &mut Ui, tab: &TabData, more: MoreMenu<'_>) {
 fn toolbar_search_field(ui: &mut Ui, tab: &mut TabData, out: &mut SearchBarOutput) {
     let ctx = ui.ctx().clone();
     let hint = format!("Search {}", tab.current_path.get_name_from_path());
-    let field_id = egui::Id::new(("search_field", tab.id));
+    let field_id = egui::Id::unique(("search_field", tab.id));
     if tab.search.is_none() {
         let mut idle = Search::default();
         let input = chip_input::chip_input(
             ui,
-            egui::Id::new(("search_field_idle", tab.id)),
+            egui::Id::unique(("search_field_idle", tab.id)),
             &mut idle,
             &hint,
             &chip_input::ChipContext {
@@ -799,7 +810,7 @@ fn search_input(
     (extensions, folders): (&[String], &[(String, PathBuf)]),
     out: &mut SearchBarOutput,
 ) {
-    let field_id = egui::Id::new(("search_field", tab_id));
+    let field_id = egui::Id::unique(("search_field", tab_id));
     let input = chip_input::chip_input(
         ui,
         field_id,
@@ -822,7 +833,7 @@ fn search_input(
         return;
     };
     let ctx = ui.ctx();
-    let flag = egui::Id::new(("search_focus", tab_id));
+    let flag = egui::Id::unique(("search_focus", tab_id));
     if !ctx
         .data(|data| data.get_temp::<bool>(flag))
         .unwrap_or(false)
@@ -897,7 +908,7 @@ fn wrap_unless_room(ui: &mut Ui, width: f32) {
 /// Names a combo box for screen readers, which otherwise only hear its value.
 fn labelled_combo(response: &egui::Response, label: &str, selected: &str) {
     response.widget_info(|| {
-        let mut info = egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, label);
+        let mut info = egui::WidgetInfo::labeled(egui::Role::ComboBox, true, label);
         info.current_text_value = Some(selected.to_owned());
         info
     });

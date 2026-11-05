@@ -624,19 +624,16 @@ fn snapshot_harness<'a>(
     mut draw: impl FnMut(&mut egui::Ui) + 'a,
 ) -> egui_kittest::Harness<'a> {
     egui_kittest::Harness::builder()
-        .with_options(crate::app::ui::snapshot_options())
+        .with_options(egui_mev_test::snapshot_options())
         .with_size(size)
         .build_ui(move |ui| {
             let ctx = ui.ctx().clone();
             if !ctx.data(|data| {
-                data.get_temp::<bool>(egui::Id::new("fonts_set"))
+                data.get_temp::<bool>(egui::Id::unique("fonts_set"))
                     .unwrap_or(false)
             }) {
-                let mut fonts = egui::FontDefinitions::default();
-                crate::app::ui::register_icons(&mut fonts);
-                ctx.set_fonts(fonts);
                 crate::app::ui::configure_test(&ctx, false);
-                ctx.data_mut(|data| data.insert_temp(egui::Id::new("fonts_set"), true));
+                ctx.data_mut(|data| data.insert_temp(egui::Id::unique("fonts_set"), true));
                 return;
             }
             egui::Frame::new()
@@ -653,9 +650,7 @@ fn snapshot_harness<'a>(
 /// Plugins settings page.
 #[test]
 fn plugin_ui_snapshots() {
-    let _guard = crate::app::dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let mut snapshots = egui_kittest::SnapshotResults::new();
 
     let segment = |json: serde_json::Value| -> super::BarSegment {
@@ -693,7 +688,12 @@ fn plugin_ui_snapshots() {
     let form = vm.handler(&["actions", "convert", "form"]).expect("form");
     let context = CallContext {
         targets: vec![TargetInfo {
-            path: "C:/videos/holiday.mov".into(),
+            path: if cfg!(windows) {
+                "C:/videos/holiday.mov"
+            } else {
+                "/videos/holiday.mov"
+            }
+            .into(),
             is_dir: false,
             size: 1,
             modified: 0,
@@ -1180,9 +1180,7 @@ fn folder_usage_table_rows() {
 #[cfg(not(windows))]
 #[test]
 fn plugin_table_snapshot() {
-    let _guard = crate::app::dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let spec: super::table::TableSpec = serde_json::from_value(serde_json::json!({
         "title": "Folder Usage: Documents",
         "subtitle": "3 projects, 201.0 GB",
@@ -1478,9 +1476,7 @@ fn remove_folder_trashes_by_default_and_refuses_home() {
 #[cfg(not(windows))]
 #[test]
 fn plugin_remove_confirmation_snapshot() {
-    let _guard = crate::app::dock::tests::SNAPSHOT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = egui_mev_test::snapshot_lock();
     let form: super::form::Form = serde_json::from_value(serde_json::json!({
         "title": "Remove slavic_castles?",
         "submit": "Move to Trash",
@@ -1502,4 +1498,104 @@ fn plugin_remove_confirmation_snapshot() {
     });
     harness.run_steps(4);
     harness.snapshot("plugin_remove_confirmation");
+}
+
+/// Plugins write these specs in Lua, so their keys are a public API: this reads
+/// everything `docs/plugins.md` documents, through the same conversion the host uses.
+#[test]
+fn documented_form_and_table_keys_keep_working() {
+    use mlua::LuaSerdeExt as _;
+    let lua = mlua::Lua::new();
+    let form: super::form::Form = lua
+        .from_value(
+            lua.load(
+                r#"{
+                    title = "Remove?", submit = "Move", remember = true, danger = true,
+                    blocked = false,
+                    submit_when = { { when = { field = "how", equals = "delete" },
+                                      label = "Delete", danger = true } },
+                    fields = {
+                        { type = "info", text = "It goes." },
+                        { type = "paths", rows = { { path = "/a/b", size = "1 GB" },
+                                                   { path = "/a/c" } } },
+                        { type = "separator" },
+                        { type = "group", label = "More", fields = {
+                            { id = "name", type = "text", placeholder = "x", required = true,
+                              help = "tip" },
+                            { id = "notes", type = "multiline", default = "a" },
+                        } },
+                        { id = "n", type = "int", min = 0, max = 9, step = 1, slider = true },
+                        { id = "f", type = "float", enabled = false },
+                        { id = "b", type = "bool", label = "On",
+                          visible_if = { field = "n", not_equals = 1 } },
+                        { id = "how", type = "radio", options = { { "move", "Move" }, "delete" } },
+                        { id = "c", type = "choice",
+                          options = { { value = "v", label = "Label" } },
+                          enabled_if = { field = "how", ["in"] = { "move" } } },
+                        { id = "t", type = "time", min = 0, max = 60 },
+                        { id = "p", type = "path", mode = "folder" },
+                    },
+                }"#,
+            )
+            .eval::<Value>()
+            .expect("lua"),
+        )
+        .expect("form");
+    form.check().expect("valid form");
+    assert!(form.danger && form.remember && !form.blocked);
+    assert_eq!(form.submit_when[0].label, "Delete");
+    assert_eq!(form.fields[1].rows[0].size.as_deref(), Some("1 GB"));
+    assert_eq!(form.fields[1].rows[1].path, "/a/c");
+
+    let spec: super::table::TableSpec = lua
+        .from_value(
+            lua.load(
+                r#"{
+                    title = "Sizes", subtitle = "{count}, {total}", progress = "1 of 2",
+                    refresh_action = "my.name.measure",
+                    columns = { { id = "name", label = "Name" },
+                                { id = "size", label = "Size", kind = "size" },
+                                { id = "when", label = "Changed", kind = "time" } },
+                    rows = { { path = "/a/b", cells = { name = "b", size = 1024, when = 1700000000 },
+                               menu = { { label = "Remove", action = "my.name.remove", danger = true,
+                                          busy = "Removing…", title = "Remove b?" } } } },
+                    sort = { column = "size", descending = true },
+                }"#,
+            )
+            .eval::<Value>()
+            .expect("lua"),
+        )
+        .expect("table");
+    spec.check().expect("valid table");
+    let table = super::table::TableView::new(spec);
+    assert!(table.has_row(Path::new("/a/b")));
+    assert_eq!(table.refresh_action(), Some("my.name.measure"));
+
+    let update: super::table::RowUpdate = lua
+        .from_value(
+            lua.load(
+                r#"{ path = "/a/b", cells = { size = 1 }, clear = { "when" }, remove = false }"#,
+            )
+            .eval::<Value>()
+            .expect("lua"),
+        )
+        .expect("update");
+    assert!(!update.remove);
+
+    // A misspelt key is an error for the plugin's author, not silently ignored.
+    for spec in [
+        r#"{ fields = {}, colour = "red" }"#,
+        r#"{ fields = { { type = "text", id = "x", colour = "red" } } }"#,
+    ] {
+        let value = lua.load(spec).eval::<Value>().expect("lua");
+        assert!(
+            lua.from_value::<super::form::Form>(value).is_err(),
+            "{spec}"
+        );
+    }
+    let value = lua
+        .load(r#"{ title = "t", columns = {}, colour = "red" }"#)
+        .eval::<Value>()
+        .expect("lua");
+    assert!(lua.from_value::<super::table::TableSpec>(value).is_err());
 }

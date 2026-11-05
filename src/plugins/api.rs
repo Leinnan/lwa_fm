@@ -238,7 +238,7 @@ fn fmt_table(lua: &Lua) -> mlua::Result<Table> {
     )?;
     table.set(
         "size",
-        lua.create_function(|_, bytes: u64| Ok(crate::helper::format_bytes_simple(bytes)))?,
+        lua.create_function(|_, bytes: u64| Ok(egui_mev_core::format::format_bytes(bytes)))?,
     )?;
     Ok(table)
 }

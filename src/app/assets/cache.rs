@@ -294,7 +294,7 @@ pub(super) fn thumbnail_cache_dir() -> PathBuf {
 pub(super) fn thumbnail_cache_base_dir() -> PathBuf {
     crate::paths::project_dirs().map_or_else(
         || std::env::temp_dir().join(crate::consts::APP_ID),
-        |dirs| dirs.cache_dir().to_path_buf(),
+        |dirs| dirs.cache_dir,
     )
 }
 

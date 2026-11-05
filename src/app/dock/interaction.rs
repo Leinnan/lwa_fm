@@ -2,8 +2,9 @@
 //! views select, open and navigate the same way.
 use super::{MyTabViewer, RowResult, TabData, ViewHeader, ViewState};
 use crate::app::file_ops::{DraggedPaths, folder_drop_target};
-use crate::app::selection::{SelectMods, Selection};
 use egui::{Id, Key, Modifiers, Pos2, Rect, Ui};
+use egui_mev_core::selection::{SelectMods, Selection};
+use egui_mev_widgets::select_mods;
 
 /// How long typed characters keep extending the type-to-select prefix.
 const TYPE_TO_SELECT_TIMEOUT: f64 = 1.0;
@@ -33,7 +34,7 @@ impl MyTabViewer<'_> {
         header: &ViewHeader,
         row_results: &[RowResult],
     ) {
-        let mods = SelectMods::from_modifiers(ui.input(|i| i.modifiers));
+        let mods = select_mods(ui.input(|i| i.modifiers));
         let mut clicked: Option<(usize, SelectMods)> = None;
         let mut select_for_menu = None;
         // Recycle Bin rows show where items came from; they can't be opened,
@@ -121,7 +122,7 @@ impl MyTabViewer<'_> {
     /// Dragging across empty space selects every item the rectangle
     /// touches; with Ctrl or Shift held they are added to the selection.
     fn drag_select(ui: &Ui, tab: &mut TabData, background: &egui::Response, mods: SelectMods) {
-        let id = Id::new("drag_select").with(tab.id);
+        let id = Id::unique("drag_select").with(tab.id);
         let Some(area) = tab.view.rows_area else {
             return;
         };
@@ -212,7 +213,7 @@ impl MyTabViewer<'_> {
         });
 
         if let Some(key) = key {
-            let mods = SelectMods::from_modifiers(modifiers);
+            let mods = select_mods(modifiers);
             let current = tab.selection.cursor().filter(|&row| row < len);
             let target = |from: usize| -> Option<usize> {
                 Some(match key {
@@ -288,7 +289,7 @@ impl MyTabViewer<'_> {
         if typed.is_empty() {
             return;
         }
-        let id = Id::new("type_to_select").with(self.active_tab);
+        let id = Id::unique("type_to_select").with(self.active_tab);
         let mut state: TypeToSelect = ui.data(|d| d.get_temp(id)).unwrap_or_default();
         let continuing = now - state.last_input < TYPE_TO_SELECT_TIMEOUT;
         if !continuing {

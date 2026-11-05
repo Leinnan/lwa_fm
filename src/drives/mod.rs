@@ -6,7 +6,6 @@
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-mod monitor;
 // Mount-table parsing and filters are plain functions, compiled everywhere
 // so their tests run on every platform.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -15,8 +14,6 @@ mod unix;
 mod windows;
 
 use std::path::{Path, PathBuf};
-
-pub use monitor::Monitor;
 
 /// One mounted volume as shown in the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,6 +1,7 @@
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Color32, Context, FontId, FontSelection, Galley, Id, TextFormat, Ui, WidgetText};
 use egui_dock::TabViewer;
+use egui_mev_widgets::text_fit;
 use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu_collator::{Collator, CollatorBorrowed};
 use icu_locale_core::Locale;
@@ -17,13 +18,13 @@ use super::commands::ActionToPerform;
 use crate::app::commands::TabAction;
 use crate::app::dir_handling::WatcherSpecsCache;
 use crate::app::history::History;
-use crate::app::selection::Selection;
 use crate::app::top_bottom::TopDisplayPath;
 use crate::app::{DisplayType, Search};
 use crate::data::files::{EntryRef, Listing};
 use crate::data::time::ElapsedTime;
 use crate::helper::DataHolder;
 use crate::locations::Locations;
+use egui_mev_core::selection::Selection;
 use std::cell::RefCell;
 
 mod columns;
@@ -32,7 +33,6 @@ mod grid_view;
 mod interaction;
 mod list_view;
 mod quick_look;
-mod text_fit;
 mod workspace;
 
 pub use columns::kind_label;
@@ -102,7 +102,7 @@ struct TextCacheStyle {
 fn ensure_text_cache_style(ui: &Ui) {
     static NEXT_CONTEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let context_id = ui.ctx().data_mut(|data| {
-        *data.get_temp_mut_or_insert_with(egui::Id::new("text_cache_context"), || {
+        *data.get_temp_mut_or_insert_with(egui::Id::unique("text_cache_context"), || {
             NEXT_CONTEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         })
     });
@@ -206,7 +206,7 @@ pub fn populate_sizes_pool(components: impl Iterator<Item = u64>, ui: &Context) 
                 continue;
             }
             let galley = WidgetText::LayoutJob(Arc::new(LayoutJob::simple_singleline(
-                crate::helper::format_bytes_simple(component),
+                egui_mev_core::format::format_bytes(component),
                 FontId::default(),
                 ui.global_style().visuals.weak_text_color(),
             )))
@@ -495,13 +495,13 @@ struct PopupOpened(pub Id, pub usize);
 
 impl Default for PopupOpened {
     fn default() -> Self {
-        Self(Id::new(0), usize::MAX)
+        Self(Id::unique(0), usize::MAX)
     }
 }
 
 /// Where egui memory keeps the tab's open row menu.
 fn popup_memory_id(tab: TabId) -> Id {
-    Id::new(("popup_opened", tab))
+    Id::unique(("popup_opened", tab))
 }
 
 impl ViewState {
@@ -986,12 +986,7 @@ struct ViewHeader {
 /// Tells assistive technology what a row or tile is.
 fn describe_entry(response: &egui::Response, entry: &EntryRef<'_>, selected: bool) {
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            true,
-            selected,
-            entry.file_name,
-        )
+        egui::WidgetInfo::selected(egui::Role::Button, true, selected, entry.file_name)
     });
 }
 
@@ -1060,7 +1055,7 @@ impl MyTabViewer<'_> {
         let Some(path) = tab.current_path.single_path() else {
             return false;
         };
-        let id = Id::new(("access_denied", tab.id, Arc::as_ptr(&tab.listing)));
+        let id = Id::unique(("access_denied", tab.id, Arc::as_ptr(&tab.listing)));
         ui.data_mut(|data| {
             *data.get_temp_mut_or_insert_with(id, || {
                 std::fs::read_dir(&path)
@@ -1104,7 +1099,7 @@ impl MyTabViewer<'_> {
         // Registered before the rows, so rows (added later) win the hit test.
         let background = ui.interact(
             ui.available_rect_before_wrap(),
-            Id::new("view_background").with(tab_id),
+            Id::unique("view_background").with(tab_id),
             egui::Sense::click_and_drag(),
         );
         if !tab.load.is_loading() && tab.visible_entries.is_empty() && !tab.is_searching() {
@@ -1113,7 +1108,7 @@ impl MyTabViewer<'_> {
         Some(ViewHeader {
             background,
             tab_id,
-            tab_popup_id: Id::new(tab_id).with(1500),
+            tab_popup_id: Id::unique(tab_id).with(1500),
             opened_popup,
             scroll,
             favorites: ui.data_get_persisted::<Locations>().unwrap_or_default(),
@@ -1191,7 +1186,7 @@ impl TabViewer for MyTabViewer<'_> {
     }
 
     fn id(&mut self, tab: &mut Self::Tab) -> Id {
-        Id::new(*tab)
+        Id::unique(*tab)
     }
 
     // Returns the current `tab`'s title.
@@ -1266,8 +1261,6 @@ pub mod tests {
     use image::{Rgba, RgbaImage};
     use std::cell::RefCell;
     use std::sync::OnceLock;
-
-    pub static SNAPSHOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn tile_preview_policy_keeps_hover_and_caps_selected_entries() {
@@ -1494,16 +1487,14 @@ pub mod tests {
 
     #[test]
     fn large_list_only_lays_out_virtualized_file_names() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         FILE_NAME_LAYOUT_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
         let entries: Vec<DirEntry> = (0..10_000)
             .map(|index| DirEntry::test_new(&format!("/virtual/file_{index:05}.txt")))
             .collect();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(900.0, 500.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1524,9 +1515,7 @@ pub mod tests {
     /// `cargo test --release perf_ -- --ignored --nocapture`.
     /// `LWA_PERF_N` overrides the entry count (default 100k).
     fn perf_frame_time(display_type: DisplayType, select_all: bool) {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let count = crate::app::perf_tests::perf_count(100_000);
         let entries: Vec<DirEntry> = (0..count)
             .map(|index| DirEntry::test_new(&format!("/virtual/file_{index:06}.txt")))
@@ -1534,7 +1523,7 @@ pub mod tests {
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let selection: Option<Vec<usize>> = select_all.then(|| (0..count).collect());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(1100.0, 720.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| {
@@ -1590,12 +1579,10 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_wide() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(900.0, 500.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1614,12 +1601,10 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_narrow() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(350.0, 500.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1634,9 +1619,7 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_long_names() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         // Duplicate entries so we get more rows and more truncation to render.
         let entries = make_entries();
         let all: Vec<DirEntry> = entries
@@ -1657,7 +1640,7 @@ pub mod tests {
 
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(400.0, 600.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1672,9 +1655,7 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_empty_tab() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let tab = TabData::from_path(std::path::Path::new("src"));
         let my_tabs = {
             let mut tabs = Workspace::from_tabs(vec![tab]);
@@ -1684,7 +1665,7 @@ pub mod tests {
 
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(700.0, 400.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1697,12 +1678,10 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_icons_wide() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(960.0, 620.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1715,12 +1694,10 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_icons_narrow() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(420.0, 620.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1733,12 +1710,10 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_icons_long_names() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(620.0, 700.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1751,12 +1726,10 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_icons_mixed_thumbnails() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(820.0, 520.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1769,9 +1742,7 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_icons_empty_tab() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let mut tab = TabData::from_path(fixture_root());
         tab.display_type = DisplayType::Icons;
         let my_tabs = {
@@ -1782,7 +1753,7 @@ pub mod tests {
 
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(720.0, 420.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| draw_frame(ui, my_tabs, &assets),
@@ -1795,12 +1766,10 @@ pub mod tests {
 
     #[test]
     fn test_dock_view_icons_selected() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
-            .with_options(crate::app::ui::snapshot_options())
+            .with_options(egui_mev_test::snapshot_options())
             .with_size(egui::Vec2::new(960.0, 620.0))
             .build_ui_state(
                 |ui, my_tabs: &mut Workspace| {
@@ -1831,9 +1800,7 @@ pub mod tests {
 
     #[test]
     fn closing_lone_tab_of_split_pane_keeps_the_rest() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let (mut tabs, [a, b, c]) = split_tabs();
         tabs.apply_tab_requests(TabRequests {
             close: vec![c, c],
@@ -1847,9 +1814,7 @@ pub mod tests {
     /// twice and panic once the pane was gone.
     #[test]
     fn middle_click_closes_lone_tab_of_split_pane() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let (tabs, [a, b, _]) = split_tabs();
         let assets = RefCell::new(crate::app::assets::AssetManager::default());
         let mut harness = egui_kittest::Harness::builder()
@@ -1885,9 +1850,7 @@ pub mod tests {
 
     #[test]
     fn closed_tab_releases_its_watchers_and_load() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let (mut tabs, [_, _, c]) = split_tabs();
         let folder = std::env::temp_dir();
         let mut watchers = crate::watcher::DirectoryWatchers::default();
@@ -1907,9 +1870,7 @@ pub mod tests {
 
     #[test]
     fn close_others_across_split_panes() {
-        let _guard = SNAPSHOT_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = egui_mev_test::snapshot_lock();
         let (mut tabs, [a, b, c]) = split_tabs();
         tabs.apply_tab_requests(TabRequests {
             close_others: Some(b),

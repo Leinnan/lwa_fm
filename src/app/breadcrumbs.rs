@@ -11,6 +11,7 @@ use super::{
 };
 use crate::{helper::DataHolder as _, locations::Locations};
 use egui::{Response, Ui, text::LayoutJob};
+use egui_mev_widgets::fit;
 use lucide_icons::Icon;
 use std::{
     path::{Path, PathBuf},
@@ -84,62 +85,6 @@ fn volume_anchor(names: &[&str]) -> (usize, Anchor) {
     }
 }
 
-/// Which crumbs to draw.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Fit {
-    /// Indices of the crumbs drawn, in order.
-    pub shown: Vec<usize>,
-    /// Indices of the crumbs behind "…".
-    pub hidden: Vec<usize>,
-    /// The anchor shows only its icon.
-    pub compact_anchor: bool,
-}
-
-/// Fits crumbs of `widths` into `available`. The current folder is kept
-/// longest, then its nearest parents, then the anchor (first by dropping its
-/// name, then entirely). `compact_anchor` is the anchor's width as an icon,
-/// `ellipsis` the width of "…" and `sep` the width of one chevron.
-pub fn fit(widths: &[f32], compact_anchor: f32, ellipsis: f32, sep: f32, available: f32) -> Fit {
-    let n = widths.len();
-    let all = |compact| Fit {
-        shown: (0..n).collect(),
-        hidden: Vec::new(),
-        compact_anchor: compact,
-    };
-    if n == 0 {
-        return all(false);
-    }
-    let total = sep.mul_add((n - 1) as f32, widths.iter().sum::<f32>());
-    if total <= available || n == 1 {
-        return all(false);
-    }
-    let compact_total = total - widths[0] + compact_anchor.min(widths[0]);
-    if compact_total <= available {
-        return all(true);
-    }
-    let mut used = compact_anchor + sep + ellipsis + sep + widths[n - 1];
-    if used > available {
-        // Only the current folder: everything else goes behind "…".
-        return Fit {
-            shown: vec![n - 1],
-            hidden: (0..n - 1).collect(),
-            compact_anchor: false,
-        };
-    }
-    let mut first = n - 1;
-    while first > 1 && used + sep + widths[first - 1] <= available {
-        first -= 1;
-        used += sep + widths[first];
-    }
-    let mut shown = vec![0];
-    shown.extend(first..n);
-    Fit {
-        shown,
-        hidden: (1..first).collect(),
-        compact_anchor: true,
-    }
-}
-
 pub(super) fn home_dir() -> Option<&'static str> {
     static HOME: OnceLock<Option<String>> = OnceLock::new();
     HOME.get_or_init(|| {
@@ -162,7 +107,7 @@ fn crumb_job(ui: &Ui, crumb: &Crumb, current: bool, compact: bool) -> LayoutJob 
     let color = if current {
         ui.visuals().strong_text_color()
     } else {
-        palette.secondary
+        palette.text_weak
     };
     let mut job = LayoutJob::default();
     // The name sits 6 points after the anchor's icon.
@@ -288,7 +233,7 @@ fn crumb_button(ui: &mut Ui, crumb: &Crumb, job: LayoutJob) -> Response {
             .truncate(),
     );
     let name = crumb_name(crumb);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
     let response = response.on_hover_text(&crumb.path);
     let new_tab =
         response.middle_clicked() || (response.clicked() && ui.input(|i| i.modifiers.command));
@@ -321,15 +266,15 @@ fn chevron(ui: &mut Ui, tab: &TabData, parent: &Crumb, next: Option<&Crumb>) {
                 egui::Button::new(
                     ui::glyph(Icon::ChevronRight)
                         .size(12.0)
-                        .color(Palette::of(ui).secondary),
+                        .color(Palette::of(ui).text_weak),
                 )
                 .frame_when_inactive(false),
             )
         })
         .inner;
     let name = format!("Folders in {}", crumb_name(parent));
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
-    let children_id = egui::Id::new(("breadcrumb_children", &parent.path));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &name));
+    let children_id = egui::Id::unique(("breadcrumb_children", &parent.path));
     let menu = egui::Popup::menu(&response).show(|ui| {
         // Read the folder once when the menu opens, not every frame.
         let children = ui.data_mut(|data| {

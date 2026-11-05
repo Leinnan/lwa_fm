@@ -108,12 +108,12 @@ pub fn plugins_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("DIRFLEET_PLUGINS_DIR") {
         return Some(PathBuf::from(dir));
     }
-    crate::paths::project_dirs().map(|dirs| dirs.config_dir().join("plugins"))
+    crate::paths::project_dirs().map(|dirs| dirs.config_dir.join("plugins"))
 }
 
 /// Where plugins' `storage` lives.
 pub fn data_dir() -> Option<PathBuf> {
-    crate::paths::project_dirs().map(|dirs| dirs.data_dir().join("plugin-data"))
+    crate::paths::project_dirs().map(|dirs| dirs.data_dir.join("plugin-data"))
 }
 
 /// A folder that has a `plugin.toml` but couldn't be loaded.

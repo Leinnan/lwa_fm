@@ -1,7 +1,4 @@
-use super::{
-    App,
-    ui::{Palette, PanelLayout},
-};
+use super::{App, ui::PanelLayout};
 use egui::{Shadow, Ui};
 impl App {
     pub(crate) fn central_panel(&mut self, root: &mut Ui) {
@@ -16,7 +13,7 @@ impl App {
                 .inspector_view(ctx)
                 .is_some_and(|view| view.paths.len() == 1);
         ctx.data_mut(|data| {
-            data.insert_temp(egui::Id::new("inspector_owns_preview"), owns_preview)
+            data.insert_temp(egui::Id::unique("inspector_owns_preview"), owns_preview)
         });
         // Reserve the right panel first, then resolve its content after dock interactions.
         let inspector_rect = if layout.inspector {
@@ -27,7 +24,9 @@ impl App {
                 .frame(
                     egui::Frame::new()
                         .fill(
-                            Palette::for_context(ctx, ctx.global_style().visuals.dark_mode).sidebar,
+                            egui_mev_theme::Theme::of(ctx)
+                                .palette(ctx.global_style().visuals.dark_mode)
+                                .sidebar_bg,
                         )
                         .inner_margin(12),
                 )
@@ -50,7 +49,7 @@ impl App {
             )
             .show(root, |ui| self.tabs.ui(ui, &mut self.assets));
         if let Some(rect) = inspector_rect {
-            egui::Area::new("inspector_content".into())
+            egui::Area::new(egui::Id::unique("inspector_content"))
                 .fixed_pos(rect.min)
                 .order(egui::Order::Middle)
                 .movable(false)

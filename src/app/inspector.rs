@@ -125,7 +125,7 @@ impl App {
             return;
         }
         if self.tabs.window().sidebar_overlay {
-            let modal = egui::Modal::new("sidebar_overlay".into()).show(ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::unique("sidebar_overlay")).show(ctx, |ui| {
                 ui.vertical(|ui| {
                     ui.set_width(260.0);
                     ui.set_max_height(ctx.content_rect().height() - 80.0);
@@ -140,7 +140,7 @@ impl App {
                 self.tabs.window_mut().sidebar_overlay = false;
             }
         } else if self.tabs.window().inspector_overlay {
-            let modal = egui::Modal::new("inspector_overlay".into()).show(ctx, |ui| {
+            let modal = egui::Modal::new(egui::Id::unique("inspector_overlay")).show(ctx, |ui| {
                 ui.vertical(|ui| {
                     ui.set_width(300.0);
                     ui.set_max_height(ctx.content_rect().height() - 80.0);
@@ -204,7 +204,7 @@ fn detail(ui: &mut Ui, label: &str, value: &str) {
         ui.label(
             egui::RichText::new(label)
                 .small()
-                .color(Palette::of(ui).secondary),
+                .color(Palette::of(ui).text_weak),
         );
         ui.add(egui::Label::new(value).wrap());
     });
@@ -247,7 +247,7 @@ fn folder_disk_size(path: &std::path::Path) -> u64 {
 
 /// "Size" for a folder: computed on request, since walking a large tree is slow.
 fn folder_size_row(ui: &mut Ui, path: &std::path::Path) {
-    let id = egui::Id::new(("folder_size", path));
+    let id = egui::Id::unique(("folder_size", path));
     let state: Option<FolderSize> = ui.data(|d| d.get_temp(id));
     match state {
         None => {
@@ -319,7 +319,7 @@ impl App {
             if bytes > 0 {
                 ui.label(format!(
                     "Files total {}",
-                    crate::helper::format_bytes_simple(bytes)
+                    egui_mev_core::format::format_bytes(bytes)
                 ));
             }
             ui.add_space(4.0);

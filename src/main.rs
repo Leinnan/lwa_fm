@@ -43,36 +43,6 @@ embed_plist::embed_info_plist!("../static/Info.plist");
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn parse_present_mode() -> wgpu::PresentMode {
-    let mut args = std::env::args();
-    while let Some(arg) = args.next() {
-        if arg == "--present-mode"
-            && let Some(val) = args.next()
-        {
-            return match val.to_lowercase().as_str() {
-                "fifo" => wgpu::PresentMode::Fifo,
-                "mailbox" => wgpu::PresentMode::Mailbox,
-                "immediate" => wgpu::PresentMode::Immediate,
-                "auto-no-vsync" => wgpu::PresentMode::AutoNoVsync,
-                _ => {
-                    eprintln!("Unknown present mode '{val}', using AutoVsync");
-                    wgpu::PresentMode::AutoVsync
-                }
-            };
-        }
-    }
-    if let Ok(val) = std::env::var("LWA_FM_PRESENT_MODE") {
-        return match val.to_lowercase().as_str() {
-            "fifo" => wgpu::PresentMode::Fifo,
-            "mailbox" => wgpu::PresentMode::Mailbox,
-            "immediate" => wgpu::PresentMode::Immediate,
-            "auto-no-vsync" => wgpu::PresentMode::AutoNoVsync,
-            _ => wgpu::PresentMode::AutoVsync,
-        };
-    }
-    wgpu::PresentMode::AutoVsync
-}
-
 fn main() -> anyhow::Result<()> {
     paths::migrate_legacy_paths();
 
@@ -82,12 +52,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(feature = "profiling")]
     profiler::start_puffin_server();
 
-    let present_mode = parse_present_mode();
-    if present_mode != wgpu::PresentMode::AutoVsync {
-        log::info!("Using present mode: {present_mode:?}");
-    }
-
-    let native_options = eframe::NativeOptions {
+    let mut native_options = eframe::NativeOptions {
         persistence_path: paths::settings_file(),
         viewport: egui::ViewportBuilder::default()
             .with_app_id(consts::APP_ID)
@@ -97,10 +62,6 @@ fn main() -> anyhow::Result<()> {
             )
             .with_min_inner_size([640.0, 420.0]),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
-            surface: eframe::egui_wgpu::SurfaceConfig {
-                present_mode,
-                ..eframe::egui_wgpu::SurfaceConfig::HIGH_THROUGHPUT
-            },
             on_surface_status: std::sync::Arc::new(|status| {
                 #[cfg(feature = "profiling")]
                 puffin::profile_scope!("lwa_fm::surface::error", &format!("{status:?}"));
@@ -117,6 +78,10 @@ fn main() -> anyhow::Result<()> {
         },
         ..Default::default()
     };
+    egui_mev_app::gpu::apply(
+        &mut native_options,
+        egui_mev_app::gpu::present_mode("LWA_FM_PRESENT_MODE"),
+    );
 
     eframe::run_native(
         APP_NAME,

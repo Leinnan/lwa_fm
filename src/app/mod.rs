@@ -10,6 +10,7 @@ use crate::{app::settings::ApplicationSettings, locations::Location};
 use command_palette::CommandPalette;
 use commands::{ActionToPerform, ModalWindow};
 use egui::TextBuffer;
+use egui_mev_widgets::{ToastKind, Toasts};
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -48,11 +49,8 @@ mod path_editor;
 #[cfg(test)]
 mod perf_tests;
 mod plugins_ui;
-pub mod selection;
 mod settings;
 mod side_panel;
-#[cfg(any(windows, test))]
-mod theme;
 pub mod thumbnail_choice;
 mod thumbnail_picker;
 mod top_bottom;
@@ -73,28 +71,46 @@ static BG_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
         .expect("Failed to create background thread pool")
 });
 
-pub static TOASTS: std::sync::LazyLock<egui::mutex::RwLock<egui_notify::Toasts>> =
-    std::sync::LazyLock::new(|| {
-        egui::mutex::RwLock::new(
-            egui_notify::Toasts::new().with_anchor(egui_notify::Anchor::TopRight),
-        )
-    });
+/// Toasts waiting for the next frame. `toast!` runs on threads without a `Context` too.
+static PENDING_TOASTS: std::sync::Mutex<Vec<(ToastKind, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub fn queue_toast(kind: ToastKind, text: String) {
+    PENDING_TOASTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((kind, text));
+    crate::watcher::request_repaint();
+}
+
+fn show_toasts(ctx: &egui::Context) {
+    let pending = std::mem::take(
+        &mut *PENDING_TOASTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for (kind, text) in pending {
+        Toasts::push(ctx, text, kind);
+    }
+    Toasts::show(ctx);
+}
+
 #[macro_export]
 macro_rules! toast{
         (Basic, $($format:expr),+) => {
-            $crate::app::TOASTS.write().basic(format!($($format),+));
+            $crate::app::queue_toast(egui_mev_widgets::ToastKind::Info, format!($($format),+));
         };
         (Info, $($format:expr),+) => {
-            $crate::app::TOASTS.write().info(format!($($format),+));
+            $crate::app::queue_toast(egui_mev_widgets::ToastKind::Info, format!($($format),+));
         };
         (Warning, $($format:expr),+) => {
-            $crate::app::TOASTS.write().warning(format!($($format),+));
+            $crate::app::queue_toast(egui_mev_widgets::ToastKind::Warn, format!($($format),+));
         };
         (Error, $($format:expr),+) => {
-            $crate::app::TOASTS.write().error(format!($($format),+));
+            $crate::app::queue_toast(egui_mev_widgets::ToastKind::Error, format!($($format),+));
         };
         (Success, $($format:expr),+) => {
-            $crate::app::TOASTS.write().success(format!($($format),+));
+            $crate::app::queue_toast(egui_mev_widgets::ToastKind::Ok, format!($($format),+));
         };
     }
 
@@ -103,7 +119,7 @@ macro_rules! toast{
 pub struct App {
     #[cfg(windows)]
     #[serde(skip)]
-    chrome: theme::win32::WindowChrome,
+    chrome: egui_mev_app::NativeChrome,
     user_locations: Locations,
     /// Mounted drives, kept current by a background monitor.
     #[serde(skip)]
@@ -604,7 +620,7 @@ impl Default for App {
             #[cfg(target_os = "macos")]
             disk_access: disk_access::DiskAccessPrompt::default(),
             #[cfg(windows)]
-            chrome: theme::win32::WindowChrome::default(),
+            chrome: egui_mev_app::NativeChrome::new(egui_mev_theme::AccentShades::system()),
             user_locations: Locations::get_user_dirs(),
             tabs: crate::app::dock::Workspace::new(&get_starting_path()),
             open_tabs: Vec::new(),
@@ -640,14 +656,14 @@ impl Default for App {
 }
 
 impl App {
-    fn load_locations(&mut self) {
-        self.drives = drives_ui::DrivesState::start();
+    fn load_locations(&mut self, ctx: &egui::Context) {
+        self.drives = drives_ui::DrivesState::start(ctx);
         self.sync_drive_targets();
         self.user_locations = Locations::get_user_dirs();
     }
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        setup_custom_fonts(&cc.egui_ctx);
+        ui::install_theme(&cc.egui_ctx);
         crate::watcher::set_repaint_context(&cc.egui_ctx);
 
         #[cfg(debug_assertions)]
@@ -660,7 +676,7 @@ impl App {
         if let Some(storage) = cc.storage {
             let mut value: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
 
-            value.load_locations();
+            value.load_locations(&cc.egui_ctx);
             value.tabs = restore_tabs(std::mem::take(&mut value.windows), &value.open_tabs);
             value.sync_drive_targets();
             value.assets = AssetManager::default();
@@ -679,7 +695,7 @@ impl App {
         }
 
         let mut app = Self::default();
-        app.load_locations();
+        app.load_locations(&cc.egui_ctx);
         app.plugins = crate::plugins::PluginHost::start();
         #[cfg(target_os = "macos")]
         {
@@ -1216,7 +1232,7 @@ impl App {
                     tab.path_edit =
                         Some(DirectoryPathInfo::build(&path).with_shortcuts(favorites, recent));
                     ctx.memory_mut(|memory| {
-                        memory.request_focus(egui::Id::new(("path_editor", tab.id)));
+                        memory.request_focus(egui::Id::unique(("path_editor", tab.id)));
                     });
                 }
             }
@@ -1340,7 +1356,7 @@ impl App {
                     TabAction::FilterChanged.schedule_tab(tab.id);
                 } else {
                     // The search panel re-requests focus when the flag is gone.
-                    let id = egui::Id::new(("search_focus", tab.id));
+                    let id = egui::Id::unique(("search_focus", tab.id));
                     ctx.data_mut(|data| data.remove::<bool>(id));
                 }
             }
@@ -1350,7 +1366,7 @@ impl App {
                 };
                 if tab.path_edit.is_some() {
                     ctx.memory_mut(|memory| {
-                        memory.request_focus(egui::Id::new(("path_editor", tab.id)));
+                        memory.request_focus(egui::Id::unique(("path_editor", tab.id)));
                     });
                 } else {
                     ActionToPerform::ToggleTopEdit.schedule();
@@ -1561,7 +1577,7 @@ impl App {
         });
         if self.focused_window == id {
             Self::drag_badge(&ctx);
-            TOASTS.write().show(&ctx);
+            show_toasts(&ctx);
         }
     }
 
@@ -1651,7 +1667,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         #[cfg(windows)]
-        self.chrome.sync(frame, ctx.theme());
+        self.chrome.sync(ctx, frame);
 
         #[cfg(feature = "profiling")]
         crate::profiler::profiler_window(&ctx, &mut self.profiler_visible);
@@ -1671,61 +1687,6 @@ impl eframe::App for App {
         #[cfg(feature = "profiling")]
         self.frame_tracker.end_frame();
     }
-}
-
-fn setup_custom_fonts(ctx: &egui::Context) {
-    #[cfg(windows)]
-    {
-        theme::configure(ctx, theme::Config::platform());
-    }
-    #[cfg(not(windows))]
-    {
-        // Start with the default fonts (we will be adding to them rather than replacing them).
-        let mut fonts = egui::FontDefinitions::default();
-        ui::register_icons(&mut fonts);
-        if let Ok((regular, semibold)) = get_fonts() {
-            fonts.font_data.insert(
-                "regular".to_owned(),
-                egui::FontData::from_owned(regular).into(),
-            );
-            fonts.font_data.insert(
-                "semibold".to_owned(),
-                egui::FontData::from_owned(semibold).into(),
-            );
-
-            // Put my font first (highest priority) for proportional text:
-            fonts
-                .families
-                .entry(egui::FontFamily::Proportional)
-                .or_default()
-                .insert(0, "regular".to_owned());
-            fonts
-                .families
-                .entry(egui::FontFamily::Name("semibold".into()))
-                .or_default()
-                .insert(0, "semibold".to_owned());
-
-            // Put my font as last fallback for monospace:
-            fonts
-                .families
-                .entry(egui::FontFamily::Monospace)
-                .or_default()
-                .push("regular".to_owned());
-        }
-        ctx.set_fonts(fonts);
-        ui::configure(ctx);
-    }
-}
-
-#[cfg(not(windows))]
-fn get_fonts() -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-    let font_path = std::path::Path::new("/System/Library/Fonts");
-
-    let regular = std::fs::read(font_path.join("SFNS.ttf"))
-        .or_else(|_| std::fs::read(font_path.join("SFNSRounded.ttf")))?;
-    let semibold = std::fs::read(font_path.join("SFCompact.ttf"))?;
-
-    Ok((regular, semibold))
 }
 
 /// Tabs to open at startup: a folder given on the command line, otherwise

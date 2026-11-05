@@ -22,8 +22,8 @@ include = [
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-egui = { version = "=0.36.2", default-features = false }
-egui_extras = { version = "=0.36.2", features = ["serde"] }
+egui = { version = "=0.37.0", default-features = false }
+egui_extras = { version = "=0.37.0", features = ["serde"] }
 indexmap = { version = "2.13.0", features = ["serde"] }
 log = "0.4.29"
 log-once = "0.4"
@@ -36,7 +36,7 @@ vec1 = "1.12"
 web-time = "1.1"
 
 [dev-dependencies]
-eframe = { version = "=0.36.2", features = [
+eframe = { version = "=0.37.0", features = [
     "default_fonts",
     "glow",
     "persistence",

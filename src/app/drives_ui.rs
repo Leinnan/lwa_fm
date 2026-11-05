@@ -16,9 +16,11 @@ use super::{
     file_ops::escape_pressed,
     ui::{self, Palette},
 };
+use egui_mev_core::format::format_bytes;
+use egui_mev_tasks::Poller;
+
 use crate::{
-    drives::{self, Drive, Monitor},
-    helper::format_bytes_simple,
+    drives::{self, Drive},
     locations::Locations,
     toast,
 };
@@ -26,10 +28,15 @@ use crate::{
 /// How long an ejected drive stays hidden while the OS finishes removing it.
 const EJECTED_GRACE: Duration = Duration::from_secs(10);
 
+/// Listing drives costs a few cheap system calls, so a short poll notices plugged
+/// and pulled drives (and keeps free space current) without per-OS device
+/// notification plumbing.
+const DRIVE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
 #[derive(Default)]
 pub struct DrivesState {
     pub list: Vec<Drive>,
-    monitor: Option<Monitor>,
+    monitor: Option<Poller<Vec<Drive>>>,
     /// Drives whose eject is running in the background.
     ejecting: HashSet<PathBuf>,
     /// Drives ejected moments ago: hidden, and their disappearance is no
@@ -41,10 +48,15 @@ pub struct DrivesState {
 
 impl DrivesState {
     /// List the drives now and keep watching for changes.
-    pub fn start() -> Self {
+    pub fn start(ctx: &Context) -> Self {
         let list = drives::list();
         Self {
-            monitor: Some(Monitor::start(list.clone())),
+            monitor: Some(Poller::start(
+                ctx,
+                DRIVE_POLL_INTERVAL,
+                list.clone(),
+                drives::list,
+            )),
             list,
             ..Default::default()
         }
@@ -127,7 +139,7 @@ impl App {
         self.drives
             .ejected
             .retain(|_, when| when.elapsed() < EJECTED_GRACE);
-        let Some(latest) = self.drives.monitor.as_ref().and_then(Monitor::latest) else {
+        let Some(latest) = self.drives.monitor.as_ref().and_then(Poller::latest) else {
             return;
         };
         let (added, removed) = drives::diff(&self.drives.list, &latest);
@@ -187,7 +199,7 @@ impl App {
         }
         ui.separator();
         if drive.total > 0 {
-            ui.weak(format!("{} free", format_bytes_simple(drive.available)))
+            ui.weak(format!("{} free", format_bytes(drive.available)))
                 .on_hover_text(drive_tooltip(drive));
         }
         if drive.ejectable() {
@@ -376,7 +388,7 @@ impl App {
         let running = self.file_ops.running_on(&drive.mount).len();
         let mut confirmed = false;
         let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new(ModalWindow::ConfirmEject))
+        let modal = egui::Modal::new(egui::Id::unique(ModalWindow::ConfirmEject))
             .frame(super::ui::dialog_frame(ctx))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 440.0));
@@ -474,7 +486,7 @@ fn eject_button(ui: &Ui, rect: egui::Rect, drive: &Drive, ejecting: bool, show: 
     let button = ui
         .interact(
             rect,
-            ui.id().with(("eject", &drive.mount)),
+            ui.scope_id().with(("eject", &drive.mount)),
             egui::Sense::click(),
         )
         .on_hover_text(drive.eject_label());
@@ -488,7 +500,7 @@ fn eject_button(ui: &Ui, rect: egui::Rect, drive: &Drive, ejecting: bool, show: 
             egui::Align2::CENTER_CENTER,
             char::from(lucide_icons::Icon::Eject),
             egui::FontId::new(13.0, egui::FontFamily::Name("lucide".into())),
-            Palette::of(ui).secondary,
+            Palette::of(ui).text_weak,
         );
     }
     button.clicked()
@@ -499,8 +511,8 @@ fn drive_tooltip(drive: &Drive) -> String {
     if drive.total > 0 {
         text = format!(
             "{text}\n{} free of {}",
-            format_bytes_simple(drive.available),
-            format_bytes_simple(drive.total)
+            format_bytes(drive.available),
+            format_bytes(drive.total)
         );
     }
     if !drive.file_system.is_empty() {

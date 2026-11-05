@@ -50,7 +50,7 @@ pub fn show(
     show_hidden: bool,
     ui: &mut Ui,
 ) -> bool {
-    let id = egui::Id::new(("path_editor", index));
+    let id = egui::Id::unique(("path_editor", index));
     let focused = ui.memory(|memory| memory.has_focus(id));
     if focused && info.take_select_all() {
         select_all(ui.ctx(), id, &info.text_input);
@@ -85,6 +85,7 @@ pub fn show(
                     .lock_focus(true)
                     .desired_width(ui.available_width()),
             )
+            .accessible_name("Folder path")
         })
         .inner;
     // It also draws the focus ring in that color, so put the accent back.
@@ -232,7 +233,7 @@ const fn one_line(mut job: LayoutJob, max_width: f32) -> LayoutJob {
 /// The folder being listed and how many of its folders are shown.
 fn header(ui: &mut Ui, label: &str, count: Option<&str>) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), egui::Sense::hover());
-    let weak = Palette::of(ui).secondary;
+    let weak = Palette::of(ui).text_weak;
     let font = egui::TextStyle::Small.resolve(ui.style());
     let right = rect.right() - SIDE_PADDING;
     let count_width = count.map_or(0.0, |count| {
@@ -305,7 +306,7 @@ fn rows(ui: &mut Ui, info: &mut DirectoryPathInfo, scroll_to: Option<f32>) -> Op
             }
         }
     });
-    info.scroll_offset = output.state.offset.y;
+    info.scroll_offset = output.state.clamped_offset().y;
     clicked
 }
 
@@ -317,12 +318,7 @@ fn row(ui: &mut Ui, row: &Row<'_>) -> Response {
         egui::Sense::click(),
     );
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            true,
-            row.selected,
-            row.name,
-        )
+        egui::WidgetInfo::selected(egui::Role::Button, true, row.selected, row.name)
     });
     if row.selected || response.hovered() {
         ui.painter().rect_filled(
@@ -345,7 +341,7 @@ fn row(ui: &mut Ui, row: &Row<'_>) -> Response {
         if row.selected {
             palette.text
         } else {
-            palette.secondary
+            palette.text_weak
         },
     );
     let font = egui::TextStyle::Body.resolve(ui.style());
@@ -377,7 +373,7 @@ fn row(ui: &mut Ui, row: &Row<'_>) -> Response {
             LayoutJob::simple_singleline(
                 location.clone(),
                 egui::TextStyle::Small.resolve(ui.style()),
-                palette.secondary,
+                palette.text_weak,
             ),
             room,
         );
@@ -388,7 +384,7 @@ fn row(ui: &mut Ui, row: &Row<'_>) -> Response {
                 rect.center().y - galley.size().y / 2.0,
             ),
             galley,
-            palette.secondary,
+            palette.text_weak,
         );
     }
     response

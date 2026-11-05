@@ -16,7 +16,7 @@ use crate::{
 
 use super::{
     commands::ActionToPerform,
-    ui::{self, Appearance, Palette},
+    ui::{self, Appearance},
 };
 
 /// The pages of the settings dialog.
@@ -293,52 +293,54 @@ impl ApplicationSettings {
     ) {
         let size = dialog_size(ctx);
         let narrow = size.x < NARROW_WIDTH;
-        let palette = Palette::for_context(ctx, ctx.global_style().visuals.dark_mode);
+        let palette = egui_mev_theme::Theme::of(ctx).palette(ctx.global_style().visuals.dark_mode);
         let frame = egui::Frame::popup(&ctx.global_style())
-            .fill(palette.sidebar)
+            .fill(palette.sidebar_bg)
             .inner_margin(0);
-        let modal = Modal::new("Settings".into()).frame(frame).show(ctx, |ui| {
-            ui.set_min_size(size);
-            ui.set_max_size(size);
-            self.header(ui);
-            if narrow {
-                self.tabs(ui);
-            }
-            let body = ui.available_rect_before_wrap();
-            let page = if narrow {
-                body
-            } else {
-                let nav = egui::Rect::from_min_max(
-                    body.min,
-                    egui::pos2(body.left() + NAV_WIDTH, body.bottom()),
+        let modal = Modal::new(egui::Id::unique("Settings"))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_min_size(size);
+                ui.set_max_size(size);
+                self.header(ui);
+                if narrow {
+                    self.tabs(ui);
+                }
+                let body = ui.available_rect_before_wrap();
+                let page = if narrow {
+                    body
+                } else {
+                    let nav = egui::Rect::from_min_max(
+                        body.min,
+                        egui::pos2(body.left() + NAV_WIDTH, body.bottom()),
+                    );
+                    let mut nav_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(nav.shrink2(vec2(8.0, 4.0)))
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    self.nav(&mut nav_ui);
+                    egui::Rect::from_min_max(egui::pos2(nav.right(), body.top()), body.max)
+                };
+                let radius = ui::card_radius(ui);
+                ui.painter().rect_filled(
+                    page,
+                    egui::CornerRadius {
+                        nw: if narrow { 0 } else { radius },
+                        ne: 0,
+                        sw: if narrow { radius } else { 0 },
+                        se: radius,
+                    },
+                    palette.panel_bg,
                 );
-                let mut nav_ui = ui.new_child(
+                let mut page_ui = ui.new_child(
                     egui::UiBuilder::new()
-                        .max_rect(nav.shrink2(vec2(8.0, 4.0)))
+                        .max_rect(page)
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                 );
-                self.nav(&mut nav_ui);
-                egui::Rect::from_min_max(egui::pos2(nav.right(), body.top()), body.max)
-            };
-            let radius = ui::card_radius(ui);
-            ui.painter().rect_filled(
-                page,
-                egui::CornerRadius {
-                    nw: if narrow { 0 } else { radius },
-                    ne: 0,
-                    sw: if narrow { radius } else { 0 },
-                    se: radius,
-                },
-                palette.content,
-            );
-            let mut page_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(page)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            );
-            self.page(&mut page_ui, plugins);
-            ui.allocate_rect(body, egui::Sense::hover());
-        });
+                self.page(&mut page_ui, plugins);
+                ui.allocate_rect(body, egui::Sense::hover());
+            });
         self.appearance.apply(ctx);
         if modal.should_close() {
             ActionToPerform::CloseActiveModalWindow.schedule();
@@ -726,8 +728,7 @@ impl ApplicationSettings {
             };
             let button = egui::Button::new((ui::glyph(Icon::RotateCcw).size(13.0), label));
             let response = ui.add(button);
-            response
-                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
             if response
                 .on_hover_text("Reset the settings on this page")
                 .clicked()

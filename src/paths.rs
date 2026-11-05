@@ -2,16 +2,17 @@
 use std::path::{Path, PathBuf};
 
 use directories::{BaseDirs, ProjectDirs};
+use egui_mev_app::AppPaths;
 
 use crate::consts::{APP_ID, APP_NAME};
 
-pub fn project_dirs() -> Option<ProjectDirs> {
-    ProjectDirs::from_path(PathBuf::from(APP_ID))
+pub fn project_dirs() -> Option<AppPaths> {
+    AppPaths::discover(APP_ID, None)
 }
 
 /// The file eframe saves the settings to.
 pub fn settings_file() -> Option<PathBuf> {
-    project_dirs().map(|dirs| dirs.data_dir().join("app.ron"))
+    project_dirs().map(|dirs| dirs.data_dir.join("app.ron"))
 }
 
 /// Moves files from the folders older versions used. Must run before anything
@@ -23,28 +24,28 @@ pub fn migrate_legacy_paths() {
     };
     let mut moves = Vec::new();
     if let Some(old) = eframe::storage_dir(APP_NAME) {
-        moves.push((old.join("app.ron"), dirs.data_dir().join("app.ron")));
+        moves.push((old.join("app.ron"), dirs.data_dir.join("app.ron")));
     }
     if let Some(old) = ProjectDirs::from("com", "Crayen", "Files2") {
-        moves.push((old.data_dir().join("dirs"), dirs.data_dir().join("dirs")));
+        moves.push((old.data_dir().join("dirs"), dirs.data_dir.join("dirs")));
     }
     if let Some(old) = ProjectDirs::from("io", "github.leinnan", "dirfleet") {
         moves.extend([
             (
                 old.config_dir().join("plugins"),
-                dirs.config_dir().join("plugins"),
+                dirs.config_dir.join("plugins"),
             ),
             (
                 old.data_dir().join("plugin-data"),
-                dirs.data_dir().join("plugin-data"),
+                dirs.data_dir.join("plugin-data"),
             ),
             (
                 old.data_local_dir().join("ffmpeg"),
-                dirs.data_local_dir().join("ffmpeg"),
+                dirs.data_local_dir.join("ffmpeg"),
             ),
             (
                 old.cache_dir().join("thumbnails"),
-                dirs.cache_dir().join("thumbnails"),
+                dirs.cache_dir.join("thumbnails"),
             ),
         ]);
     }
@@ -179,9 +180,20 @@ mod tests {
     #[test]
     fn every_folder_is_named_after_the_id() {
         let dirs = project_dirs().expect("home folder");
-        assert_eq!(dirs.project_path(), Path::new(APP_ID));
         let file = settings_file().expect("settings file");
-        assert!(file.starts_with(dirs.data_dir()));
+        assert!(file.starts_with(&dirs.data_dir));
         assert!(file.ends_with("app.ron"));
+    }
+
+    /// Users' settings, plugins and caches stay where earlier versions left them.
+    #[test]
+    fn folders_are_the_ones_earlier_versions_used() {
+        let dirs = project_dirs().expect("home folder");
+        let earlier = ProjectDirs::from_path(PathBuf::from(APP_ID)).expect("home folder");
+        assert_eq!(earlier.project_path(), Path::new(APP_ID));
+        assert_eq!(dirs.config_dir, earlier.config_dir());
+        assert_eq!(dirs.data_dir, earlier.data_dir());
+        assert_eq!(dirs.data_local_dir, earlier.data_local_dir());
+        assert_eq!(dirs.cache_dir, earlier.cache_dir());
     }
 }

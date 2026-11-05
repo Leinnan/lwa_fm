@@ -181,8 +181,9 @@ impl App {
             .frame(
                 egui::Frame::new()
                     .fill(
-                        super::ui::Palette::for_context(&ctx, ctx.global_style().visuals.dark_mode)
-                            .toolbar,
+                        egui_mev_theme::Theme::of(&ctx)
+                            .palette(ctx.global_style().visuals.dark_mode)
+                            .toolbar_bg,
                     )
                     .inner_margin(egui::Margin::symmetric(12, 3)),
             )
