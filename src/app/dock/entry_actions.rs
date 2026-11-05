@@ -340,7 +340,7 @@ impl MyTabViewer<'_> {
                 }
                 ui.label(entry.full_path_string());
             }
-            Preview::Fallback => {
+            Preview::Fallback | Preview::Paused => {
                 ui.label(entry.full_path_string());
             }
         }

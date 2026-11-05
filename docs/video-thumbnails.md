@@ -29,8 +29,11 @@ The implementation lives in `src/app/assets.rs` and `src/app/assets/`: `media.rs
 
 ## Choosing a video's thumbnail
 
-You can right-click a single video and choose **Select thumbnail…**. A dialog then shows the frames of the video's 240 px overview, and the frame you pick replaces the default poster at 5% of the video. **Reset thumbnail** in the same menu, and **Use default** in the dialog, go back to the default. The animated overview stays the same either way.
+You can right-click a single video and choose **Select thumbnail…**. A dialog then shows a large preview next to a contact sheet of the video's frames, and the frame you pick replaces the default poster at 5% of the video. **Reset thumbnail** in the same menu, and **Reset to default** in the dialog, go back to the default. The animated overview stays the same either way.
 
+- **Which frames are offered.** The picker doesn't use the overview. `thumbnail_timeline.rs` lays out 16 positions from the start of the video to 95% of it with quadratic spacing, because a thumbnail usually comes from the opening: in a one-hour video the first few are at about 0:00, 0:15, 1:01 and 2:17. The current pick is extracted first, then the default frame, then the rest earliest first.
+- **Looking closer.** The `+` after a frame, or **More frames** under the preview, adds up to four evenly spaced frames across that gap, and these are extracted next. The new gaps can be filled again until frames would be closer than 100 ms or one video frame. The last `+` covers the stretch up to the end of the video. Filled-in frames aren't listed again when the dialog reopens, though extracting them again is a disk hit.
+- **How frames are extracted.** The picker runs one `media::chosen_poster` job at a time at 480 px, so a requested gap only waits for the frame in progress. Each frame is saved like a chosen poster, so reopening the dialog on an unchanged video needs no FFmpeg for the initial frames. A session holds at most 64 frames and 48 MiB of decoded pixels, plus the same again in textures. A frame that fails is removed and counted in the dialog.
 - **Where choices are saved.** `thumbnail_choice.rs` stores each pick in the `thumbnail_choice` sled tree. A pick is keyed by canonical path, along with the timestamp in milliseconds and the file's revision and size. Renames and moves made in the app take the pick with them. If the file's revision or size changes, the pick is ignored and the default poster comes back. The **Reset all** button under Settings → Previews clears every pick.
 - **How the thumbnail is made.** When a video has a pick, the Windows Shell poster is skipped, because it can't show a chosen frame. `media::chosen_poster` then tries these sources in order:
   1. A small memory cache.
@@ -40,6 +43,10 @@ You can right-click a single video and choose **Select thumbnail…**. A dialog 
 
   A frame cut from an overview is saved to its own poster file once.
 - **Updating thumbnails after a change.** The texture key for a video with a pick ends in `_t{ms}`, so changing the pick never shows the old texture. After the dialog applies a pick, the frame that's already decoded is handed to the poster cache, so the new thumbnail appears without running FFmpeg.
+
+## Animation behind dialogs
+
+While any modal window is open, animated previews stop in every window: `request_animated_preview` returns the frame already on screen without advancing it, and doesn't register the preview as wanted. That also cancels overview jobs in flight, so they can't hold the single FFmpeg slot while the dialog needs it. A partly built overview starts over the next time it is wanted. The sidebar and inspector overlays don't count as modal windows.
 
 ## Getting FFmpeg
 

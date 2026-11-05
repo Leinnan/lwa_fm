@@ -76,6 +76,8 @@ impl MyTabViewer<'_> {
                                 ui.label("No preview for this item.");
                                 ui.weak(reason);
                             }
+                            // Behind a dialog, which will be closed to see this.
+                            Preview::Paused => {}
                             Preview::Fallback => {
                                 ui.label(if entry_is_dir(tab, row) {
                                     "This is a folder. Press Enter to open it."

@@ -186,6 +186,11 @@ pub(super) fn render_preview(
                 ui.small(format!("Retrying in {} seconds", delay.as_secs().max(1)));
             }
         }
+        Preview::Paused => {
+            if let Some(texture) = assets.request_entry_texture(&entry.entry_ref()) {
+                ui.add(egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(64.0)));
+            }
+        }
         Preview::Fallback => {
             if let Some(texture) = assets.request_entry_texture(&entry.entry_ref()) {
                 ui.add(egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(64.0)));

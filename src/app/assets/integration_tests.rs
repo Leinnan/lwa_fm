@@ -460,6 +460,55 @@ fn real_disk_poster_reuse_preserves_timestamp_and_avoids_first_decode() {
 
 #[test]
 #[ignore = "requires FFmpeg; run with --ignored --test-threads=1"]
+fn real_picker_frames_come_earliest_first_and_reopen_without_ffmpeg() {
+    use super::super::{MediaBackend, PICKER_EDGE, SystemMediaBackend};
+    use crate::app::thumbnail_timeline::FrameTimeline;
+    let fixture = Fixture::new();
+    let source = fixture.video("picker.mp4", "testsrc2=size=320x180:rate=30", "20");
+    let cancel = AtomicBool::new(false);
+    let backend = SystemMediaBackend;
+    let timing = backend.picker_timing(&source, &cancel).expect("timing");
+    let duration = timing.duration.expect("duration");
+    assert!((duration - 20.0).abs() < 0.5);
+    let mut timeline = FrameTimeline::<()>::default();
+    timeline.start(
+        Some(duration),
+        timing.frame_rate,
+        sample_times(duration)[0],
+        None,
+    );
+    let order: Vec<u64> = std::iter::from_fn(|| timeline.next_job()).collect();
+    assert!(order[1..].is_sorted(), "earliest first after the default");
+    assert!(order[1] < 1_000, "starts right at the beginning");
+    let frames: Vec<_> = order
+        .iter()
+        .map(|at| {
+            backend
+                .picker_frame(&source, Duration::from_millis(*at), &cancel)
+                .expect("frame")
+        })
+        .collect();
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.width.max(frame.height) as u32 <= PICKER_EDGE)
+    );
+    let differs = frames.windows(2).any(|pair| pair[0].rgba != pair[1].rgba);
+    assert!(differs, "frames must show different moments");
+    // Reopening the dialog finds them on disk.
+    flush_cache();
+    CHOSEN.lock().expect("chosen poster cache").clear();
+    let before = process::PROCESS_COUNT.load(Ordering::Relaxed);
+    for at in &order {
+        backend
+            .picker_frame(&source, Duration::from_millis(*at), &cancel)
+            .expect("cached frame");
+    }
+    assert_eq!(process::PROCESS_COUNT.load(Ordering::Relaxed), before);
+}
+
+#[test]
+#[ignore = "requires FFmpeg; run with --ignored --test-threads=1"]
 fn real_chosen_thumbnail_comes_from_the_overview_without_ffmpeg() {
     let fixture = Fixture::new();
     let source = fixture.video("chosen.mp4", "testsrc2=size=320x180:rate=30", "20");

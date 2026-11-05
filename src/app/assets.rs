@@ -24,6 +24,7 @@ use image::{Delay, Frame, RgbaImage};
 use lru::LruCache;
 
 use crate::app::thumbnail_choice;
+use crate::app::thumbnail_timeline::{FrameTimeline, Gap};
 #[cfg(test)]
 use crate::data::files::DirEntry;
 use crate::data::files::EntryRef;
@@ -70,6 +71,9 @@ static QUEUE_WAIT_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 const LIST_THUMBNAIL_EDGE: u32 = 64;
 /// The whole budget for one image thumbnail or video poster.
 const THUMBNAIL_DEADLINE: Duration = Duration::from_secs(5);
+/// Size of the thumbnail picker's frames. Barely slower to extract than small
+/// ones, keeps the large preview sharp and suits any thumbnail size once chosen.
+const PICKER_EDGE: u32 = media::MAX_EDGE;
 pub use kinds::VIDEO_EXTS;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -171,8 +175,6 @@ impl DecodedAnimation {
 struct AnimatedPreview {
     frames: Vec<DecodedImage>,
     frame_delays: Vec<Duration>,
-    /// Where in the source each frame is, for the thumbnail picker.
-    source_timestamps: Vec<Duration>,
     started_at: Instant,
     last_used: Instant,
     byte_len: usize,
@@ -188,7 +190,6 @@ impl AnimatedPreview {
         Self {
             frames: decoded.frames,
             frame_delays: decoded.frame_delays,
-            source_timestamps: decoded.source_timestamps,
             started_at: now,
             last_used: now,
             byte_len,
@@ -248,6 +249,26 @@ trait MediaBackend: Send + Sync {
         cancel: &AtomicBool,
         task: &mut Option<Box<VideoTask>>,
     ) -> Result<PreviewStep, MediaError>;
+    /// The length and frame rate the thumbnail picker lays its frames out by.
+    fn picker_timing(
+        &self,
+        source: &SourceKey,
+        cancel: &AtomicBool,
+    ) -> Result<VideoTiming, MediaError>;
+    /// One frame for the thumbnail picker.
+    fn picker_frame(
+        &self,
+        source: &SourceKey,
+        at: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<DecodedImage, MediaError>;
+}
+
+/// What the thumbnail picker needs to know about a video.
+#[derive(Debug, Clone, Copy)]
+struct VideoTiming {
+    duration: Option<f64>,
+    frame_rate: Option<f64>,
 }
 
 struct SystemMediaBackend;
@@ -264,6 +285,39 @@ impl MediaBackend for SystemMediaBackend {
         let _access_time = crate::access_time::PreserveAccessTime::new(&source.path);
         task.get_or_insert_with(|| Box::new(VideoTask::new(source.clone(), spec, kind)))
             .step(cancel)
+    }
+
+    fn picker_timing(
+        &self,
+        source: &SourceKey,
+        cancel: &AtomicBool,
+    ) -> Result<VideoTiming, MediaError> {
+        let _access_time = crate::access_time::PreserveAccessTime::new(&source.path);
+        let info = media::probe(source, cancel, Instant::now() + THUMBNAIL_DEADLINE)?;
+        Ok(VideoTiming {
+            duration: info.duration,
+            frame_rate: info.frame_rate,
+        })
+    }
+
+    fn picker_frame(
+        &self,
+        source: &SourceKey,
+        at: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<DecodedImage, MediaError> {
+        let _access_time = crate::access_time::PreserveAccessTime::new(&source.path);
+        // Sources without a revision skip the disk cache, as everywhere else.
+        let cache_path = (source.revision != 0).then(|| {
+            cache::chosen_poster_cache_path(
+                &source.path,
+                PICKER_EDGE,
+                source.revision,
+                source.size,
+                at.as_millis() as u64,
+            )
+        });
+        media::chosen_poster(source, PICKER_EDGE, at, cache_path, cancel)
     }
 }
 
@@ -299,6 +353,16 @@ enum AssetJob {
         spec: PreviewSpec,
         task: Option<Box<VideoTask>>,
     },
+    /// `at` is the frame to extract, or `None` to look up the video's timing.
+    Picker {
+        source_path: PathBuf,
+        request_key: String,
+        source_revision: u128,
+        source_size: u64,
+        request_id: u64,
+        cancel: Arc<AtomicBool>,
+        at: Option<u64>,
+    },
 }
 
 impl AssetJob {
@@ -306,14 +370,16 @@ impl AssetJob {
         match self {
             Self::Thumbnail { request_id, .. }
             | Self::SystemIcon { request_id, .. }
-            | Self::AnimatedPreview { request_id, .. } => *request_id,
+            | Self::AnimatedPreview { request_id, .. }
+            | Self::Picker { request_id, .. } => *request_id,
         }
     }
     fn request_key(&self) -> &str {
         match self {
             Self::Thumbnail { request_key, .. }
             | Self::SystemIcon { request_key, .. }
-            | Self::AnimatedPreview { request_key, .. } => request_key,
+            | Self::AnimatedPreview { request_key, .. }
+            | Self::Picker { request_key, .. } => request_key,
         }
     }
 }
@@ -686,6 +752,18 @@ enum AssetJobResult {
         request_id: u64,
         animation: DecodedAnimation,
     },
+    /// Failures go to the picker's session, never to the backoff table.
+    PickerTiming {
+        request_key: String,
+        request_id: u64,
+        result: Result<VideoTiming, MediaError>,
+    },
+    PickerFrame {
+        request_key: String,
+        request_id: u64,
+        at: u64,
+        result: Result<DecodedImage, MediaError>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -755,29 +833,42 @@ pub struct AssetManager {
     dwell: HashMap<String, Instant>,
     selected_previews_enabled: bool,
     selected_preview_key: Option<String>,
+    previews_paused: bool,
     workers: Vec<thread::JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
     frame_uploads: usize,
     upload_time: Duration,
     last_asset_activity: Instant,
-    /// Every frame of the overview shown by the thumbnail picker, as
-    /// textures, with the overview's key, how many frames it had and
-    /// whether it was complete when they were uploaded.
-    picker_frames: Option<(String, usize, bool, Vec<OverviewFrame>)>,
+    /// The open thumbnail picker's frames and the work left on them.
+    picker: Option<PickerSession>,
 }
 
-/// One frame of a video's overview, offered as its thumbnail.
-#[derive(Clone)]
-pub struct OverviewFrame {
+/// A frame offered as a video's thumbnail.
+pub struct PickerFrame {
     pub texture: TextureHandle,
-    pub timestamp: Duration,
+    /// Handed to the poster cache when this frame is chosen.
+    image: DecodedImage,
 }
 
-pub enum OverviewFrames {
-    /// Still extracting; holds the frames found so far.
-    Pending(Vec<OverviewFrame>),
-    Ready(Vec<OverviewFrame>),
-    Unavailable(String),
+#[derive(Debug, Clone, Copy)]
+enum PickerJob {
+    Timing,
+    Frame(u64),
+}
+
+/// Extracts one frame at a time, so a frame the user just asked for only ever
+/// waits for the one in progress.
+struct PickerSession {
+    path: PathBuf,
+    /// Asset key up to the part naming the job.
+    key_base: String,
+    revision: u128,
+    size: u64,
+    current: Option<Duration>,
+    timing_known: bool,
+    error: Option<String>,
+    running: Option<(String, PickerJob)>,
+    timeline: FrameTimeline<PickerFrame>,
 }
 
 /// Memory a texture takes on the GPU (RGBA8).
@@ -800,6 +891,8 @@ pub enum Preview {
         retry_after: Option<Duration>,
     },
     Fallback,
+    /// Animation is paused and no frame is uploaded yet: show the poster.
+    Paused,
 }
 
 impl AssetManager {
@@ -879,10 +972,11 @@ impl AssetManager {
             dwell: HashMap::new(),
             selected_previews_enabled: false,
             selected_preview_key: None,
+            previews_paused: false,
             workers,
             shutdown,
             last_asset_activity: Instant::now(),
-            picker_frames: None,
+            picker: None,
         }
     }
 
@@ -931,10 +1025,15 @@ impl AssetManager {
                 media::WRITES_FAILED.load(AtomicOrdering::Relaxed)
             )
         );
+        let picker_job = self
+            .picker
+            .as_ref()
+            .and_then(|session| session.running.as_ref())
+            .map(|(key, _)| key);
         let obsolete: HashSet<_> = self
             .requests
             .keys()
-            .filter(|key| !self.desired_assets.contains(*key))
+            .filter(|key| !self.desired_assets.contains(*key) && picker_job != Some(*key))
             .cloned()
             .collect();
         self.cancel_requests(&obsolete);
@@ -983,6 +1082,10 @@ impl AssetManager {
     }
     pub const fn selected_previews_enabled(&self) -> bool {
         self.selected_previews_enabled
+    }
+    /// While paused, animated previews hold still and start no work.
+    pub const fn set_previews_paused(&mut self, paused: bool) {
+        self.previews_paused = paused;
     }
 
     pub fn set_active_directory(&mut self, path: Option<&Path>) {
@@ -1089,6 +1192,8 @@ impl AssetManager {
                     self.put_animation(request_key, preview);
                 }
                 AssetJobResult::Cancelled { .. } => {}
+                picker @ (AssetJobResult::PickerTiming { .. }
+                | AssetJobResult::PickerFrame { .. }) => self.picker_job_result(ctx, picker),
             }
             ctx.request_repaint();
         }
@@ -1336,91 +1441,251 @@ impl AssetManager {
         }
     }
 
-    /// Every frame of a video's overview, for choosing its thumbnail. Call
-    /// each frame while the picker shows; [`Self::close_overview_frames`]
-    /// releases the textures.
-    pub fn request_overview_frames(
-        &mut self,
-        ctx: &Context,
-        entry: &EntryRef<'_>,
-    ) -> OverviewFrames {
-        const PICKER_EDGE: u32 = 240;
-        let spec = PreviewSpec::new(PICKER_EDGE);
-        let key = format!(
-            "{}#{}:{}#overview_v7_px{}",
-            entry.full_path_string(),
-            entry.meta.source_revision,
-            entry.meta.size,
-            spec.max_edge
-        );
-        // Starts or keeps the overview job alive, like a focused preview.
-        self.dwell.entry(key.clone()).or_insert_with(|| {
-            Instant::now()
-                .checked_sub(PREVIEW_DWELL)
-                .unwrap_or_else(Instant::now)
+    /// Starts offering frames of `entry` as its thumbnail; `current` is the
+    /// frame chosen so far. Call [`Self::picker_pump`] each frame until
+    /// [`Self::picker_close`].
+    pub fn picker_open(&mut self, entry: &EntryRef<'_>, current: Option<Duration>) {
+        self.picker_close();
+        self.picker = Some(PickerSession {
+            path: entry.get_path(),
+            key_base: format!(
+                "{}#{}:{}",
+                entry.full_path_string(),
+                entry.meta.source_revision,
+                entry.meta.size
+            ),
+            revision: entry.meta.source_revision,
+            size: entry.meta.size,
+            current,
+            timing_known: false,
+            error: None,
+            running: None,
+            timeline: FrameTimeline::default(),
         });
-        if let Preview::Unavailable { reason, .. } = self.request_animated_preview(
-            ctx,
-            entry,
-            PreviewIntent::Focused,
-            AnimatedSourceKind::Video,
-            spec,
-        ) && !self.animations.contains(&key)
-        {
-            return OverviewFrames::Unavailable(reason);
-        }
-        let current = self.picker_frames.as_ref().filter(|(old, ..)| *old == key);
-        let Some(animation) = self.animations.peek(&key) else {
-            // Evicted from the preview cache: the uploaded frames remain.
-            return match current {
-                Some((_, _, true, frames)) => OverviewFrames::Ready(frames.clone()),
-                Some((_, _, false, frames)) => OverviewFrames::Pending(frames.clone()),
-                None => OverviewFrames::Pending(Vec::new()),
-            };
-        };
-        let complete = animation.complete;
-        let count = animation.frames.len();
-        if current.is_none_or(|(_, old_count, old_complete, _)| {
-            *old_count != count || *old_complete != complete
-        }) {
-            let frames = animation
-                .frames
-                .iter()
-                .zip(&animation.source_timestamps)
-                .enumerate()
-                .map(|(index, (frame, timestamp))| OverviewFrame {
-                    texture: ctx.load_texture(
-                        format!("{key}#picker{index}"),
-                        ColorImage::from_rgba_unmultiplied(
-                            [frame.width, frame.height],
-                            &frame.rgba,
-                        ),
-                        TextureOptions::LINEAR,
-                    ),
-                    timestamp: *timestamp,
-                })
-                .collect();
-            self.picker_frames = Some((key, count, complete, frames));
-        }
-        let frames = self
-            .picker_frames
-            .as_ref()
-            .map(|(.., frames)| frames.clone())
-            .unwrap_or_default();
-        if complete {
-            OverviewFrames::Ready(frames)
-        } else {
-            OverviewFrames::Pending(frames)
+    }
+
+    pub fn picker_close(&mut self) {
+        if let Some((key, _)) = self.picker.take().and_then(|session| session.running) {
+            self.cancel_requests(&std::iter::once(key).collect());
         }
     }
 
-    pub fn close_overview_frames(&mut self) {
-        self.picker_frames = None;
+    /// Starts the next job of the picker unless one is still running.
+    pub fn picker_pump(&mut self) {
+        let Some(session) = self.picker.as_mut() else {
+            return;
+        };
+        if let Some((key, job)) = &session.running {
+            if self.requests.contains_key(key) {
+                return;
+            }
+            // Cancelled, say because the file changed: this must not stall the rest.
+            match *job {
+                PickerJob::Timing => {
+                    session.timing_known = true;
+                    session.error = Some("The video could not be read.".to_owned());
+                }
+                PickerJob::Frame(at) => session.timeline.fail(at),
+            }
+            session.running = None;
+        }
+        let job = if session.timing_known {
+            match session.timeline.next_job() {
+                Some(at) => PickerJob::Frame(at),
+                None => return,
+            }
+        } else {
+            PickerJob::Timing
+        };
+        let (at, name) = match job {
+            PickerJob::Timing => (None, "probe".to_owned()),
+            PickerJob::Frame(at) => (Some(at), at.to_string()),
+        };
+        let key = format!("{}#pickerframe_{name}", session.key_base);
+        let path = session.path.clone();
+        let (revision, size) = (session.revision, session.size);
+        session.running = Some((key.clone(), job));
+        let (request_id, cancel) = self.start_request(
+            &key,
+            Some(SourceKey::from_normalized(&path, revision, size)),
+        );
+        let directory = path.parent().map(directory_key);
+        let enqueue = self.preview_scheduler.enqueue(
+            AssetJob::Picker {
+                source_path: path,
+                request_key: key.clone(),
+                source_revision: revision,
+                source_size: size,
+                request_id,
+                cancel,
+                at,
+            },
+            AssetJobClass::HoveredPreview,
+            directory,
+        );
+        self.clear_evicted_requests(enqueue.evicted);
+        if enqueue.accepted {
+            self.pending.insert(key);
+            self.last_asset_activity = Instant::now();
+        } else {
+            self.requests.remove(&key);
+        }
+    }
+
+    /// The frames of the open picker.
+    pub fn picker_timeline(&self) -> Option<&FrameTimeline<PickerFrame>> {
+        self.picker.as_ref().map(|session| &session.timeline)
+    }
+
+    /// Why the open picker has no frames to offer, if so.
+    pub fn picker_error(&self) -> Option<&str> {
+        self.picker.as_ref()?.error.as_deref()
+    }
+
+    /// Whether the open picker is still working out what it can offer.
+    pub fn picker_waiting_for_timing(&self) -> bool {
+        self.picker
+            .as_ref()
+            .is_some_and(|session| !session.timing_known)
+    }
+
+    /// Adds more frames across `gap` to the open picker.
+    pub fn picker_fill_gap(&mut self, gap: Gap) {
+        if let Some(session) = self.picker.as_mut() {
+            session.timeline.fill(gap);
+        }
+    }
+
+    /// Gives the open picker `ready` finished frames of a one-hour video, one
+    /// frame in progress that never ends, and the rest queued.
+    #[cfg(test)]
+    pub fn picker_fill_for_test(&mut self, ctx: &Context, ready: usize) {
+        // The harness has drawn a frame by now, which started the real lookup.
+        if let Some((key, _)) = self.picker.as_mut().and_then(|s| s.running.take()) {
+            self.cancel_requests(&std::iter::once(key).collect());
+        }
+        let session = self.picker.as_mut().expect("open picker");
+        session.timing_known = true;
+        session.error = None;
+        session.timeline = FrameTimeline::default();
+        session.timeline.start(
+            Some(3600.0),
+            Some(30.0),
+            Duration::from_secs(180),
+            session.current,
+        );
+        for index in 0..ready {
+            let at = session.timeline.next_job().expect("frame");
+            let shade = (32 + index * 16).min(255) as u8;
+            let image = DecodedImage {
+                name: format!("picker-{at}"),
+                width: 16,
+                height: 9,
+                rgba: [shade, 96, 255 - shade, 255].repeat(16 * 9).into(),
+            };
+            let texture = ctx.load_texture(
+                image.name.clone(),
+                ColorImage::from_rgba_unmultiplied([16, 9], &image.rgba),
+                TextureOptions::LINEAR,
+            );
+            let bytes = image.byte_len();
+            session
+                .timeline
+                .finish(at, PickerFrame { texture, image }, bytes);
+        }
+        let at = session.timeline.next_job().expect("frame in progress");
+        let key = format!("{}#pickerframe_{at}", session.key_base);
+        session.running = Some((key.clone(), PickerJob::Frame(at)));
+        self.start_request(&key, None);
+    }
+
+    fn picker_job_result(&mut self, ctx: &Context, result: AssetJobResult) {
+        match result {
+            AssetJobResult::PickerTiming {
+                request_key,
+                result,
+                ..
+            } => self.picker_timing_done(&request_key, result),
+            AssetJobResult::PickerFrame {
+                request_key,
+                at,
+                result,
+                ..
+            } => self.picker_frame_done(ctx, &request_key, at, result),
+            _ => {}
+        }
+    }
+
+    fn picker_job_done(&mut self, key: &str) -> Option<&mut PickerSession> {
+        let session = self.picker.as_mut()?;
+        let (running, _) = session.running.as_ref()?;
+        if running != key {
+            return None;
+        }
+        session.running = None;
+        Some(session)
+    }
+
+    fn picker_timing_done(&mut self, key: &str, result: Result<VideoTiming, MediaError>) {
+        let Some(session) = self.picker_job_done(key) else {
+            return;
+        };
+        session.timing_known = true;
+        match result {
+            Ok(timing) => {
+                let default_at = timing
+                    .duration
+                    .map_or(Duration::ZERO, |duration| media::sample_times(duration)[0]);
+                session.timeline.start(
+                    timing.duration,
+                    timing.frame_rate,
+                    default_at,
+                    session.current,
+                );
+            }
+            Err(error) => session.error = Some(error.message),
+        }
+    }
+
+    fn picker_frame_done(
+        &mut self,
+        ctx: &Context,
+        key: &str,
+        at: u64,
+        result: Result<DecodedImage, MediaError>,
+    ) {
+        if self.picker_job_done(key).is_none() {
+            return;
+        }
+        let started = Instant::now();
+        let frame = result.ok().map(|image| PickerFrame {
+            texture: ctx.load_texture(
+                key,
+                ColorImage::from_rgba_unmultiplied([image.width, image.height], &image.rgba),
+                TextureOptions::LINEAR,
+            ),
+            image,
+        });
+        if frame.is_some() {
+            self.upload_time += started.elapsed();
+            self.frame_uploads += 1;
+            self.total_uploads += 1;
+        }
+        let Some(session) = self.picker.as_mut() else {
+            return;
+        };
+        match frame {
+            Some(frame) => {
+                let bytes = frame.image.byte_len();
+                session.timeline.finish(at, frame, bytes);
+            }
+            None => session.timeline.fail(at),
+        }
     }
 
     /// The thumbnail frame of `path` changed to `at` (`None`: the default).
-    /// Drops the old thumbnails, and hands the chosen frame from the picker's
-    /// overview to the poster cache so it shows without extracting it again.
+    /// Drops the old thumbnails, and hands the chosen frame from the open
+    /// picker to the poster cache so it shows without extracting it again.
     pub fn thumbnail_choice_changed(
         &mut self,
         path: &Path,
@@ -1429,13 +1694,9 @@ impl AssetManager {
         at: Option<Duration>,
     ) {
         let chosen = at.and_then(|at| {
-            let (key, ..) = self.picker_frames.as_ref()?;
-            let animation = self.animations.peek(key)?;
-            let index = animation
-                .source_timestamps
-                .iter()
-                .position(|timestamp| timestamp.as_millis() == at.as_millis())?;
-            Some((at, animation.frames.get(index)?.clone()))
+            let timeline = self.picker_timeline()?;
+            let frame = timeline.frame(at.as_millis() as u64)?;
+            Some((at, frame.image.clone()))
         });
         self.invalidate_files([path.to_path_buf()]);
         if let Some((at, frame)) = chosen {
@@ -1554,6 +1815,11 @@ impl AssetManager {
             entry.meta.size,
             spec.max_edge
         );
+        // Not registering the preview as wanted also cancels any job for it,
+        // so that work can't hold up whatever the dialog is doing.
+        if self.previews_paused {
+            return self.held_animated_preview(&key);
+        }
         // In the background, keep showing frames already decoded but don't
         // start new work.
         if ctx.input(|input| input.viewport().focused == Some(false)) {
@@ -1664,6 +1930,19 @@ impl AssetManager {
                 .insert(key, PreviewJobControl { intent, cancel });
             self.last_asset_activity = Instant::now();
         }
+    }
+
+    /// The frame on screen, without advancing or scheduling another.
+    fn held_animated_preview(&mut self, key: &str) -> Preview {
+        let Some(animation) = self.animations.get_mut(key) else {
+            return Preview::Paused;
+        };
+        // Still in use, so `end_frame` must not release the texture.
+        animation.last_used = Instant::now();
+        animation
+            .texture
+            .as_ref()
+            .map_or(Preview::Paused, |texture| Preview::Ready(texture.clone()))
     }
 
     fn render_animated_preview(&mut self, ctx: &Context, key: &str) -> Preview {
@@ -1838,7 +2117,8 @@ impl AssetJobResult {
                 animation.byte_len()
             }
             Self::Failed { reason, .. } => reason.len(),
-            Self::Cancelled { .. } => 0,
+            Self::Cancelled { .. } | Self::PickerTiming { .. } => 0,
+            Self::PickerFrame { result, .. } => result.as_ref().map_or(0, DecodedImage::byte_len),
         }
     }
     fn identity(&self) -> (&str, u64) {
@@ -1859,6 +2139,16 @@ impl AssetJobResult {
                 ..
             }
             | Self::AnimationProgress {
+                request_key,
+                request_id,
+                ..
+            }
+            | Self::PickerTiming {
+                request_key,
+                request_id,
+                ..
+            }
+            | Self::PickerFrame {
                 request_key,
                 request_id,
                 ..
@@ -1964,8 +2254,15 @@ fn asset_worker(
             }
             JobStep::Complete(result) => {
                 #[cfg(not(test))]
-                if let AssetJobResult::Failed { kind, .. } = &result {
-                    media::recover_backend(*kind);
+                match &result {
+                    AssetJobResult::Failed { kind, .. } => media::recover_backend(*kind),
+                    AssetJobResult::PickerTiming {
+                        result: Err(error), ..
+                    }
+                    | AssetJobResult::PickerFrame {
+                        result: Err(error), ..
+                    } => media::recover_backend(error.kind),
+                    _ => {}
                 }
                 scheduler.finish(&identity);
                 if !publish_result(tx, repaint, stop, result, bytes) {
@@ -2110,7 +2407,46 @@ fn process_asset_job(job: AssetJob, media_backend: &dyn MediaBackend) -> JobStep
             JobStep::Complete(image_result(request_key, request_id, result))
         }
         job @ AssetJob::AnimatedPreview { .. } => step_animated_preview(job, media_backend),
+        job @ AssetJob::Picker { .. } => run_picker_job(job, media_backend),
     }
+}
+
+/// Looks up a video's timing or extracts one frame for the thumbnail picker.
+fn run_picker_job(job: AssetJob, media_backend: &dyn MediaBackend) -> JobStep {
+    let AssetJob::Picker {
+        source_path,
+        request_key,
+        source_revision,
+        source_size,
+        request_id,
+        cancel,
+        at,
+    } = job
+    else {
+        unreachable!("only picker jobs run here");
+    };
+    if cancel.load(AtomicOrdering::Acquire) {
+        return cancelled(request_key, request_id);
+    }
+    let source = SourceKey::new(&source_path, source_revision, source_size);
+    let result = match at {
+        None => AssetJobResult::PickerTiming {
+            result: media_backend.picker_timing(&source, &cancel),
+            request_key,
+            request_id,
+        },
+        Some(at) => AssetJobResult::PickerFrame {
+            result: media_backend.picker_frame(&source, Duration::from_millis(at), &cancel),
+            request_key,
+            request_id,
+            at,
+        },
+    };
+    if (source_revision != 0 && !source.unchanged()) || cancel.load(AtomicOrdering::Acquire) {
+        let (request_key, request_id) = result.identity();
+        return cancelled(request_key.to_owned(), request_id);
+    }
+    JobStep::Complete(result)
 }
 
 /// Runs one step of an animated preview and decides what happens next.
@@ -2190,7 +2526,10 @@ fn source_path_from_asset_key(key: &str) -> Option<&str> {
         ["_xl", "_l", "_m", "_s"]
             .iter()
             .find_map(|suffix| path.strip_suffix(suffix))
-    } else if spec.starts_with("overview_") || spec.starts_with("anim_v") {
+    } else if spec.starts_with("overview_")
+        || spec.starts_with("anim_v")
+        || spec.starts_with("pickerframe_")
+    {
         Some(path)
     } else {
         None
@@ -2627,6 +2966,34 @@ mod tests {
                 .map(PreviewStep::Complete)
                 .map_err(|error| MediaError::new(ErrorKind::InvalidMedia, error))
         }
+
+        fn picker_timing(
+            &self,
+            _source: &SourceKey,
+            _cancel: &AtomicBool,
+        ) -> Result<VideoTiming, MediaError> {
+            Ok(VideoTiming {
+                duration: Some(60.0),
+                frame_rate: Some(30.0),
+            })
+        }
+
+        fn picker_frame(
+            &self,
+            source: &SourceKey,
+            _at: Duration,
+            cancel: &AtomicBool,
+        ) -> Result<DecodedImage, MediaError> {
+            self.load_animated_preview(
+                &source.path,
+                source.revision,
+                source.size,
+                AnimatedSourceKind::Video,
+                cancel,
+            )
+            .map(|animation| animation.frames[0].clone())
+            .map_err(|error| MediaError::new(ErrorKind::InvalidMedia, error))
+        }
     }
     /// Thumbnail decode paths for a 12 MP JPEG. Run with
     /// `cargo test --release perf_thumbnail -- --ignored --nocapture`.
@@ -3020,6 +3387,143 @@ mod tests {
             assets.request_preview(&ctx, &two, PreviewIntent::Hovered),
             Preview::Pending
         ));
+    }
+
+    #[test]
+    fn paused_previews_hold_their_frame_and_start_no_work() {
+        let ctx = Context::default();
+        let mut assets = AssetManager::new();
+        let entry_owned = DirEntry::test_new("C:/media/held.mp4");
+        let entry = entry_owned.entry_ref();
+        let _ = assets.request_preview(&ctx, &entry, PreviewIntent::Focused);
+        let key = assets.dwell.keys().next().expect("dwell key").clone();
+
+        assets.set_previews_paused(true);
+        assets.begin_frame();
+        assert!(matches!(
+            assets.request_preview(&ctx, &entry, PreviewIntent::Focused),
+            Preview::Paused
+        ));
+        assert!(assets.pending.is_empty());
+        assert!(assets.requests.is_empty());
+        assert!(assets.desired_assets.is_empty());
+
+        let mut decoded = tiny_animation();
+        decoded.frames.push(decoded.frames[0].clone());
+        decoded.frame_delays.push(VIDEO_PREVIEW_FRAME_DELAY);
+        decoded.source_timestamps.push(Duration::from_secs(1));
+        assets.put_animation(key.clone(), AnimatedPreview::new(decoded));
+        let Preview::Ready(_) = assets.render_animated_preview(&ctx, &key) else {
+            panic!("first frame");
+        };
+        let shown = assets.animations.peek(&key).expect("preview").texture_frame;
+        let animation = assets.animations.peek_mut(&key).expect("preview");
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("past");
+        animation.started_at = long_ago + Duration::from_millis(5);
+        animation.last_used = long_ago;
+
+        assert!(matches!(
+            assets.request_preview(&ctx, &entry, PreviewIntent::Focused),
+            Preview::Ready(_)
+        ));
+        let animation = assets.animations.peek(&key).expect("preview");
+        assert_eq!(animation.texture_frame, shown, "the frame must not advance");
+        assert!(animation.last_used > long_ago, "must keep its texture");
+        assets.end_frame();
+        assert!(
+            assets
+                .animations
+                .peek(&key)
+                .expect("preview")
+                .texture
+                .is_some()
+        );
+
+        assets.set_previews_paused(false);
+        assets.begin_frame();
+        let _ = assets.request_preview(&ctx, &entry, PreviewIntent::Focused);
+        assert!(
+            assets.desired_assets.contains(&key),
+            "wanted again once unpaused"
+        );
+    }
+
+    #[test]
+    fn picker_runs_one_job_at_a_time_earliest_first_and_cancels_on_close() {
+        let ctx = Context::default();
+        let entry_owned = DirEntry::test_new("C:/media/pick.mp4");
+        let entry = entry_owned.entry_ref();
+        let backend = Arc::new(MockMediaBackend {
+            result: Mutex::new(Ok(tiny_animation())),
+        });
+        let mut assets = AssetManager::with_media_backend(backend);
+        assets.picker_open(&entry, None);
+        assert!(assets.picker_waiting_for_timing());
+        assets.picker_pump();
+        assert_eq!(assets.pending.len(), 1, "only the timing lookup");
+        wait_for_preview_result(&mut assets, &ctx);
+        assert!(!assets.picker_waiting_for_timing());
+        let total = assets.picker_timeline().expect("session").progress().1;
+        assert!(total > 1);
+
+        // The default frame at 5%, then ascending.
+        assets.picker_pump();
+        assert_eq!(assets.pending.len(), 1);
+        assets.picker_pump();
+        assert_eq!(assets.pending.len(), 1, "still the same job");
+        wait_for_preview_result(&mut assets, &ctx);
+        let timeline = assets.picker_timeline().expect("session");
+        assert_eq!(timeline.progress(), (1, total));
+        assert!(timeline.frame(3_000).is_some());
+
+        // Survives `end_frame`, which drops whatever isn't asked for.
+        assets.picker_pump();
+        let key = assets.pending.iter().next().expect("job").clone();
+        assets.begin_frame();
+        assets.end_frame();
+        assert!(assets.requests.contains_key(&key));
+        let cancel = Arc::clone(&assets.requests[&key].cancel);
+        assets.picker_close();
+        assert!(cancel.load(AtomicOrdering::Acquire));
+        assert!(assets.pending.is_empty());
+        assert!(assets.picker_timeline().is_none());
+    }
+
+    #[test]
+    fn a_vanished_picker_job_does_not_stall_the_queue() {
+        let entry_owned = DirEntry::test_new("C:/media/stall.mp4");
+        let entry = entry_owned.entry_ref();
+        let ctx = Context::default();
+        let backend = Arc::new(MockMediaBackend {
+            result: Mutex::new(Ok(tiny_animation())),
+        });
+        let mut assets = AssetManager::with_media_backend(backend);
+        assets.picker_open(&entry, None);
+        assets.picker_pump();
+        wait_for_preview_result(&mut assets, &ctx);
+        assets.picker_pump();
+        let total = assets.picker_timeline().expect("session").progress().1;
+        // What invalidating the file does to a running job.
+        assets.invalidate_files([entry.get_path()]);
+        assets.picker_pump();
+        let timeline = assets.picker_timeline().expect("session");
+        assert_eq!(timeline.failed(), 1);
+        assert_eq!(timeline.progress().1, total - 1);
+        assert_eq!(assets.pending.len(), 1, "the next frame started");
+    }
+
+    #[test]
+    fn picker_keys_name_their_source() {
+        assert_eq!(
+            source_path_from_asset_key("/media/a#b.mp4#1:20#pickerframe_1500"),
+            Some("/media/a#b.mp4")
+        );
+        assert_eq!(
+            source_path_from_asset_key("/media/a.mp4#1:20#pickerframe_probe"),
+            Some("/media/a.mp4")
+        );
     }
 
     #[test]

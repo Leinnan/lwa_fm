@@ -387,7 +387,10 @@ impl MyTabViewer<'_> {
                 .request_preview_at_size(ui.ctx(), entry, intent, area.size())
             {
                 Preview::Ready(texture) => Some((texture, true)),
-                Preview::Pending | Preview::Unavailable { .. } | Preview::Fallback => None,
+                Preview::Pending
+                | Preview::Unavailable { .. }
+                | Preview::Fallback
+                | Preview::Paused => None,
             }
         });
         let texture = animated.or_else(|| {

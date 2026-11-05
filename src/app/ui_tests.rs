@@ -94,6 +94,77 @@ fn draw_fluent(root: &mut egui::Ui, app: &mut App) {
     draw(root, app);
 }
 
+fn picker_harness(size: egui::Vec2) -> (Harness<'static, App>, DirEntry) {
+    let mut app = fixture(Appearance::Dark, true, false);
+    let entry = DirEntry::test_new("/virtual/Projects/DirFleet/picker clip.mp4");
+    crate::app::thumbnail_choice::clear(&entry.get_path());
+    app.open_thumbnail_picker(entry.clone());
+    let mut harness = Harness::builder()
+        .with_options(egui_mev_test::snapshot_options())
+        .with_size(size)
+        .build_ui_state(draw, app);
+    let ctx = harness.ctx.clone();
+    harness.state_mut().assets.picker_fill_for_test(&ctx, 8);
+    harness.run_steps(6);
+    (harness, entry)
+}
+
+fn picker_choice(entry: &DirEntry) -> Option<std::time::Duration> {
+    crate::app::thumbnail_choice::get(
+        &entry.get_path(),
+        entry.meta.source_revision,
+        entry.meta.size,
+    )
+}
+
+#[test]
+fn thumbnail_picker_fills_gaps_and_applies_a_clicked_frame() {
+    let _guard = egui_mev_test::snapshot_lock();
+    let (mut harness, entry) = picker_harness(egui::vec2(1100.0, 720.0));
+    let total = |harness: &Harness<'static, App>| {
+        harness
+            .state()
+            .assets
+            .picker_timeline()
+            .expect("open")
+            .progress()
+            .1
+    };
+    let before = total(&harness);
+    harness
+        .get_by_label("Add frames between 0:15 and 1:01")
+        .click();
+    harness.run_steps(4);
+    assert_eq!(total(&harness), before + 4);
+    // With nothing selected there is nothing to apply.
+    harness.get_by_label("Use frame").click();
+    harness.run_steps(4);
+    assert!(harness.state().thumbnail_picker.is_some());
+
+    harness.get_by_label("Frame at 0:15").click();
+    harness.run_steps(4);
+    harness.get_by_label("Use frame").click();
+    harness.run_steps(4);
+    assert!(harness.state().thumbnail_picker.is_none(), "must close");
+    assert!(harness.state().assets.picker_timeline().is_none());
+    assert_eq!(picker_choice(&entry).map(|at| at.as_secs()), Some(15));
+    crate::app::thumbnail_choice::clear(&entry.get_path());
+}
+
+#[test]
+fn thumbnail_picker_moves_and_applies_by_keyboard() {
+    let _guard = egui_mev_test::snapshot_lock();
+    let (mut harness, entry) = picker_harness(egui::vec2(480.0, 620.0));
+    // The default frame is at 3:00, and the finished frame before it at 2:17.
+    harness.key_press(egui::Key::ArrowLeft);
+    harness.run_steps(4);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(4);
+    assert!(harness.state().thumbnail_picker.is_none(), "must close");
+    assert_eq!(picker_choice(&entry).map(|at| at.as_secs()), Some(137));
+    crate::app::thumbnail_choice::clear(&entry.get_path());
+}
+
 #[cfg(windows)]
 #[test]
 fn fluent_windows_grids_compact_settings_and_appearance_switching() {

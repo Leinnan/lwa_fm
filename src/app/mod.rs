@@ -53,6 +53,7 @@ mod settings;
 mod side_panel;
 pub mod thumbnail_choice;
 mod thumbnail_picker;
+mod thumbnail_timeline;
 mod top_bottom;
 mod trash_view;
 pub mod ui;
@@ -203,7 +204,7 @@ impl App {
             && self.display_modal != Some(ModalWindow::SelectThumbnail)
         {
             self.thumbnail_picker = None;
-            self.assets.close_overview_frames();
+            self.assets.picker_close();
         }
         if let Some(modal) = &self.display_modal {
             match modal {
@@ -1645,6 +1646,9 @@ impl eframe::App for App {
         }
         self.assets
             .set_selected_previews_enabled(self.settings.animate_selected_previews);
+        // Nothing animates behind a dialog.
+        self.assets
+            .set_previews_paused(self.display_modal.is_some());
         self.assets.begin_frame();
         self.assets.poll_results(&ctx);
         self.drain_command_queue(&ctx);
