@@ -51,6 +51,8 @@ mod perf_tests;
 mod plugins_ui;
 mod settings;
 mod side_panel;
+#[cfg(windows)]
+mod system_menu;
 pub mod thumbnail_choice;
 mod thumbnail_picker;
 mod thumbnail_timeline;
@@ -165,6 +167,9 @@ pub struct App {
     /// the instant they were first seen. Coalesces bursts into one refresh.
     #[serde(skip, default)]
     pending_structural_dirs: BTreeMap<PathBuf, Instant>,
+    #[cfg(windows)]
+    #[serde(skip)]
+    pending_system_menu: Option<system_menu::PendingSystemMenu>,
     #[serde(skip)]
     file_ops: file_ops::FileOps,
     #[serde(skip)]
@@ -637,6 +642,8 @@ impl Default for App {
             watchers: DirectoryWatchers::default(),
             assets: AssetManager::default(),
             pending_structural_dirs: BTreeMap::new(),
+            #[cfg(windows)]
+            pending_system_menu: None,
             file_ops: file_ops::FileOps::default(),
             rename: None,
             pending_delete: file_ops::PendingDelete::default(),
@@ -1301,6 +1308,8 @@ impl App {
             ActionToPerform::Plugin(message) => self.handle_plugin_message(ctx, *message),
             ActionToPerform::SelectThumbnail(entry) => self.open_thumbnail_picker(*entry),
             ActionToPerform::ResetThumbnail(path) => self.set_thumbnail_choice(&path, None),
+            #[cfg(windows)]
+            ActionToPerform::ShowSystemContextMenu(paths) => self.request_system_menu(ctx, paths),
         }
     }
 }
@@ -1652,6 +1661,8 @@ impl eframe::App for App {
         self.assets.begin_frame();
         self.assets.poll_results(&ctx);
         self.drain_command_queue(&ctx);
+        #[cfg(windows)]
+        self.show_pending_system_menu(&ctx);
         self.poll_drives(&ctx);
         self.poll_plugins();
         self.process_file_system_changes(&ctx);

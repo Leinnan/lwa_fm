@@ -15,12 +15,149 @@ use crate::toast;
 use egui::Id;
 use egui::Ui;
 use egui::Vec2;
+use itertools::Itertools as _;
 use std::path::{Path, PathBuf};
+
+/// What the entry menu's sections act on.
+struct EntryMenu<'a, 'e> {
+    tab: &'a TabData,
+    /// The right-clicked item.
+    entry: &'a EntryRef<'e>,
+    /// The whole selection, which always includes `entry`.
+    paths: &'a [PathBuf],
+    single: bool,
+    is_dir: bool,
+}
+
+impl EntryMenu<'_, '_> {
+    /// Ways to open the selection, or to find it elsewhere.
+    fn open_section(&self, ui: &mut Ui) {
+        if ui.button("Open").clicked() {
+            MyTabViewer::activate_selection(self.tab, false);
+            ui.close();
+        }
+        let path = self.entry.get_path();
+        if self.single && self.entry.is_package() && ui.button("Show Package Contents").clicked() {
+            TabAction::ChangePaths(path.clone().into()).schedule_tab(self.tab.id);
+            ui.close();
+        }
+        if self.single && self.is_dir {
+            ui.menu_button("Open in", |ui| {
+                crate::app::menus::open_folder_items(
+                    ui,
+                    &path,
+                    ["New tab", "New window", "Terminal"],
+                );
+            });
+        }
+        #[cfg(any(windows, target_os = "macos"))]
+        if self.single && !self.is_dir && ui.button("Open with…").clicked() {
+            crate::shell::open_with(&path);
+            crate::app::open_history::opened(&path);
+            ui.close();
+        }
+        #[cfg(any(windows, target_os = "macos"))]
+        if self.single && ui.button(crate::app::menus::reveal_label()).clicked() {
+            crate::shell::display_in_explorer(&path).unwrap_or_else(|error| {
+                toast!(Error, "{error}");
+            });
+            ui.close();
+        }
+    }
+
+    /// The everyday edits, which also have shortcuts.
+    fn clipboard_section(&self, ui: &mut Ui) {
+        keymap::menu_button(ui, Command::Cut);
+        keymap::menu_button(ui, Command::Copy);
+        if self.single && self.is_dir && ui.button("Paste into folder").clicked() {
+            ActionToPerform::PasteInto(self.entry.get_path()).schedule();
+            ui.close();
+        }
+        keymap::menu_button(ui, Command::Rename);
+        keymap::menu_button(ui, Command::Delete);
+    }
+
+    /// The rarer actions, kept in submenus.
+    fn organize_section(&self, ui: &mut Ui, targets: &[PathBuf], favorites: &Locations) {
+        if self.single
+            && !self.is_dir
+            && crate::app::assets::kinds::media_kind(Path::new(self.entry.file_name))
+                == Some(crate::app::assets::kinds::MediaKind::Video)
+        {
+            ui.menu_button("Thumbnail", |ui| {
+                if ui.button("Select thumbnail…").clicked() {
+                    ActionToPerform::SelectThumbnail(Box::new(self.entry.to_entry())).schedule();
+                    ui.close();
+                }
+                let path = self.entry.get_path();
+                if crate::app::thumbnail_choice::has(&path)
+                    && ui.button("Reset thumbnail").clicked()
+                {
+                    ActionToPerform::ResetThumbnail(path).schedule();
+                    ui.close();
+                }
+            });
+        }
+        ui.menu_button("More", |ui| {
+            ui.menu_button("Move to", |ui| transfer_menu(ui, targets, self.paths, true));
+            ui.menu_button("Copy to", |ui| {
+                transfer_menu(ui, targets, self.paths, false);
+            });
+            keymap::menu_button(ui, Command::Duplicate);
+            keymap::menu_button(ui, Command::CopyAsPath);
+            keymap::menu_button(ui, Command::DeletePermanently);
+            if self
+                .paths
+                .iter()
+                .any(|path| crate::app::open_history::get(path).is_some())
+                && ui.button("Remove from open history").clicked()
+            {
+                crate::app::open_history::forget(self.paths.iter().map(PathBuf::as_path));
+                ui.close();
+            }
+        });
+        if self.single && self.is_dir {
+            let path = PathBuf::from(self.entry.full_path_string());
+            crate::app::menus::favorite_toggle(ui, &path, favorites);
+        }
+    }
+
+    /// What the operating system offers for the selection. Draws its own
+    /// separator, and nothing at all when there is nothing to offer.
+    fn system_section(&self, ui: &mut Ui) {
+        #[cfg(any(windows, target_os = "macos"))]
+        if self.single {
+            ui.separator();
+            if ui.button(crate::app::menus::properties_label()).clicked() {
+                crate::shell::open_properties(self.entry.get_path());
+                ui.close();
+            }
+        }
+        #[cfg(windows)]
+        if shares_parent(self.paths) {
+            if !self.single {
+                ui.separator();
+            }
+            if ui.button("Windows context menu").clicked() {
+                ActionToPerform::ShowSystemContextMenu(self.paths.to_vec()).schedule();
+                ui.close();
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let _ = ui;
+    }
+}
+
+/// Whether all the paths are in one folder, which the Windows shell needs to
+/// build a menu for them together (search results can span folders).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn shares_parent(paths: &[PathBuf]) -> bool {
+    paths.iter().map(|path| path.parent()).all_equal()
+}
 
 impl MyTabViewer<'_> {
     /// Context menu for an item. It acts on the whole selection, which
     /// always includes the right-clicked item (right-click selects it first).
-    #[allow(clippy::too_many_lines)]
     pub(super) fn show_entry_context_menu(
         &self,
         row_response: &egui::Response,
@@ -45,92 +182,19 @@ impl MyTabViewer<'_> {
                 if paths.is_empty() {
                     paths.push(val.get_path());
                 }
-                let single = paths.len() == 1;
-                let is_dir = !val.is_file();
                 if tab.current_path.is_trash() {
                     Self::trash_entry_menu(ui);
                     return;
                 }
-
-                if ui.button("Open").clicked() {
-                    Self::activate_selection(tab, false);
-                    ui.close();
-                }
-                if single && val.is_package() && ui.button("Show Package Contents").clicked() {
-                    TabAction::ChangePaths(val.get_path().into()).schedule_tab(tab.id);
-                    ui.close();
-                }
-                if single && is_dir {
-                    if ui.button("Open in new tab").clicked() {
-                        ActionToPerform::NewTab(val.get_path()).schedule();
-                        ui.close();
-                    }
-                    if ui.button("Open in new window").clicked() {
-                        ActionToPerform::NewWindow(val.get_path()).schedule();
-                        ui.close();
-                    }
-                    if ui.button("Open in terminal").clicked() {
-                        ActionToPerform::OpenInTerminal(val.get_path()).schedule();
-                        ui.close();
-                    }
-                }
-                #[cfg(any(windows, target_os = "macos"))]
-                if single && !is_dir && ui.button("Open with…").clicked() {
-                    crate::shell::open_with(val.get_path());
-                    crate::app::open_history::opened(&val.get_path());
-                    ui.close();
-                }
-                if single
-                    && !is_dir
-                    && crate::app::assets::kinds::media_kind(Path::new(val.file_name))
-                        == Some(crate::app::assets::kinds::MediaKind::Video)
-                {
-                    if ui.button("Select thumbnail…").clicked() {
-                        ActionToPerform::SelectThumbnail(Box::new(val.to_entry())).schedule();
-                        ui.close();
-                    }
-                    if crate::app::thumbnail_choice::has(&val.get_path())
-                        && ui.button("Reset thumbnail").clicked()
-                    {
-                        ActionToPerform::ResetThumbnail(val.get_path()).schedule();
-                        ui.close();
-                    }
-                }
-                if paths
-                    .iter()
-                    .any(|path| crate::app::open_history::get(path).is_some())
-                    && ui.button("Remove from open history").clicked()
-                {
-                    crate::app::open_history::forget(paths.iter().map(PathBuf::as_path));
-                    ui.close();
-                }
-                #[cfg(any(windows, target_os = "macos"))]
-                if single && ui.button(crate::app::menus::reveal_label()).clicked() {
-                    crate::shell::display_in_explorer(val.get_path()).unwrap_or_else(|error| {
-                        toast!(Error, "{error}");
-                    });
-                    ui.close();
-                }
-
-                ui.separator();
-                keymap::menu_button(ui, Command::Cut);
-                keymap::menu_button(ui, Command::Copy);
-                if single && is_dir && ui.button("Paste into folder").clicked() {
-                    ActionToPerform::PasteInto(val.get_path()).schedule();
-                    ui.close();
-                }
-                keymap::menu_button(ui, Command::CopyAsPath);
-
-                ui.separator();
-                keymap::menu_button(ui, Command::Rename);
-                keymap::menu_button(ui, Command::Duplicate);
+                let menu = EntryMenu {
+                    tab,
+                    entry: val,
+                    single: paths.len() == 1,
+                    is_dir: !val.is_file(),
+                    paths: &paths,
+                };
                 let current = tab.current_path.single_path();
                 let targets = self.transfer_targets(favorites, current.as_deref());
-                ui.menu_button("Move to", |ui| transfer_menu(ui, &targets, &paths, true));
-                ui.menu_button("Copy to", |ui| transfer_menu(ui, &targets, &paths, false));
-                keymap::menu_button(ui, Command::Delete);
-                keymap::menu_button(ui, Command::DeletePermanently);
-
                 let mut entries: Vec<EntryRef<'_>> = tab
                     .selection
                     .rows()
@@ -139,35 +203,17 @@ impl MyTabViewer<'_> {
                 if entries.is_empty() {
                     entries.push(*val);
                 }
-                crate::plugins::menu_items(
-                    ui,
-                    &crate::plugins::host_targets(entries.into_iter()),
-                    current.as_deref(),
-                    true,
-                );
+                let plugin_targets = crate::plugins::host_targets(entries.into_iter());
 
-                if single && is_dir {
+                crate::app::menus::fit_to_window(ui, |ui| {
+                    menu.open_section(ui);
                     ui.separator();
-                    let path = val.full_path_string();
-                    if favorites.locations.iter().any(|f| f.path == path) {
-                        if ui.button("Remove from favorites").clicked() {
-                            ActionToPerform::RemoveFromFavorites(path.into()).schedule();
-                            ui.close();
-                        }
-                    } else if ui.button("Add to favorites").clicked() {
-                        ActionToPerform::AddToFavorites(path.into()).schedule();
-                        ui.close();
-                    }
-                }
-
-                #[cfg(any(windows, target_os = "macos"))]
-                if single {
+                    menu.clipboard_section(ui);
                     ui.separator();
-                    if ui.button(crate::app::menus::properties_label()).clicked() {
-                        crate::shell::open_properties(val.get_path());
-                        ui.close();
-                    }
-                }
+                    menu.organize_section(ui, &targets, favorites);
+                    crate::plugins::menu_items(ui, &plugin_targets, current.as_deref(), true);
+                    menu.system_section(ui);
+                });
             });
     }
 
@@ -348,34 +394,36 @@ impl MyTabViewer<'_> {
 }
 
 fn transfer_menu(ui: &mut Ui, targets: &[PathBuf], paths: &[PathBuf], moving: bool) {
-    if ui.button("Choose folder…").clicked() {
-        ActionToPerform::ChooseTransferTarget {
-            srcs: paths.to_vec(),
-            moving,
-        }
-        .schedule();
-        ui.close();
-    }
-    if !targets.is_empty() {
-        ui.separator();
-    }
-    for target in targets {
-        let name = target.file_name().map_or_else(
-            || target.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        if ui
-            .button(name)
-            .on_hover_text(target.display().to_string())
-            .clicked()
-        {
-            ActionToPerform::Transfer {
+    crate::app::menus::fit_to_window(ui, |ui| {
+        if ui.button("Choose folder…").clicked() {
+            ActionToPerform::ChooseTransferTarget {
                 srcs: paths.to_vec(),
-                dst: target.clone(),
                 moving,
             }
             .schedule();
             ui.close();
         }
-    }
+        if !targets.is_empty() {
+            ui.separator();
+        }
+        for target in targets {
+            let name = target.file_name().map_or_else(
+                || target.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            if ui
+                .button(name)
+                .on_hover_text(target.display().to_string())
+                .clicked()
+            {
+                ActionToPerform::Transfer {
+                    srcs: paths.to_vec(),
+                    dst: target.clone(),
+                    moving,
+                }
+                .schedule();
+                ui.close();
+            }
+        }
+    });
 }

@@ -1,3 +1,5 @@
+pub mod context_menu;
+
 use crate::helper::DetachedSpawn;
 use anyhow::Context;
 use std::{ffi::OsStr, iter::once, os::windows::ffi::OsStrExt};

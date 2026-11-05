@@ -262,6 +262,9 @@ pub enum ActionToPerform {
     SelectThumbnail(Box<crate::data::files::DirEntry>),
     /// Go back to the default thumbnail of a video.
     ResetThumbnail(PathBuf),
+    /// Show Explorer's own context menu for these items, all in one folder.
+    #[cfg(windows)]
+    ShowSystemContextMenu(Vec<PathBuf>),
 }
 
 impl ActionToPerform {
@@ -348,6 +351,8 @@ impl From<&ActionToPerform> for Cow<'static, str> {
             ActionToPerform::Plugin(_) => Cow::Borrowed("Plugin message"),
             ActionToPerform::SelectThumbnail(_) => Cow::Borrowed("Select thumbnail…"),
             ActionToPerform::ResetThumbnail(_) => Cow::Borrowed("Reset thumbnail"),
+            #[cfg(windows)]
+            ActionToPerform::ShowSystemContextMenu(_) => Cow::Borrowed("Windows context menu"),
         }
     }
 }

@@ -322,8 +322,12 @@ pub fn menu_items(
             }
         }
     };
-    if actions.len() > 5 {
-        ui.menu_button("Plugins", |ui| draw(ui));
+    // The entry menu has less room to spare than the folder's background menu.
+    let inline_limit = if entry { 2 } else { 5 };
+    if actions.len() > inline_limit {
+        ui.menu_button("Plugins", |ui| {
+            crate::app::menus::fit_to_window(ui, |ui| draw(ui));
+        });
     } else {
         draw(ui);
     }

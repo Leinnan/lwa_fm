@@ -3448,3 +3448,170 @@ fn folder_usage_and_rust_clean_through_the_app() {
     finish_plugins(harness);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// A list of `paths` with the given rows selected; names without an extension are folders.
+fn entry_menu_harness(
+    paths: &[&str],
+    selected: &[usize],
+    size: egui::Vec2,
+) -> Harness<'static, App> {
+    let mut app = fixture(Appearance::Dark, false, false);
+    let entries: Vec<DirEntry> = paths
+        .iter()
+        .map(|path| {
+            let mut entry = DirEntry::test_new(path);
+            if Path::new(path).extension().is_none() {
+                entry.meta.entry_type = crate::data::files::EntryType::Directory;
+            }
+            entry
+        })
+        .collect();
+    app.tabs
+        .get_current_tab()
+        .expect("tab")
+        .set_entries(&entries);
+    let mut harness = Harness::builder()
+        .with_options(egui_mev_test::snapshot_options())
+        .with_size(size)
+        .build_ui_state(draw, app);
+    harness.run_steps(4);
+    let tab = harness.state_mut().tabs.get_current_tab().expect("tab");
+    tab.selection.set_rows(selected.to_vec());
+    harness.run_steps(2);
+    harness
+}
+
+fn has_label(harness: &Harness<'_, App>, label: &str) -> bool {
+    harness.query_all_by_label_contains(label).next().is_some()
+}
+
+#[test]
+fn entry_menu_keeps_rare_actions_in_submenus() {
+    let _guard = egui_mev_test::snapshot_lock();
+    let mut harness = entry_menu_harness(
+        &[
+            "/virtual/menu/sample clip.mp4",
+            "/virtual/menu/sample folder",
+        ],
+        &[0],
+        egui::vec2(1100.0, 720.0),
+    );
+
+    harness
+        .get_by_label_contains("sample clip")
+        .click_secondary();
+    harness.run_steps(4);
+    for label in ["Cut", "Rename", "Thumbnail", "More"] {
+        assert!(has_label(&harness, label), "{label} is at the top level");
+    }
+    for label in [
+        "Move to",
+        "Copy to",
+        "Duplicate",
+        "Copy as path",
+        "Delete permanently",
+        "Select thumbnail…",
+    ] {
+        assert!(!has_label(&harness, label), "{label} is in a submenu");
+    }
+    harness.get_by_label("More").click();
+    harness.run_steps(4);
+    for label in [
+        "Move to",
+        "Copy to",
+        "Duplicate",
+        "Copy as path",
+        "Delete permanently",
+    ] {
+        assert!(has_label(&harness, label), "{label} is under More");
+    }
+    assert!(!has_label(&harness, "Choose folder…"));
+    harness.get_by_label("Move to").click();
+    harness.run_steps(4);
+    assert!(has_label(&harness, "Choose folder…"), "nested under More");
+    harness.get_by_label("Thumbnail").click();
+    harness.run_steps(4);
+    assert!(has_label(&harness, "Select thumbnail…"));
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(4);
+
+    harness
+        .get_by_label_contains("sample folder")
+        .click_secondary();
+    harness.run_steps(4);
+    assert!(has_label(&harness, "Paste into folder"));
+    assert!(has_label(&harness, "Add to favorites"));
+    assert!(!has_label(&harness, "Thumbnail"), "only for videos");
+    assert!(!has_label(&harness, "New window"), "under Open in");
+    harness.get_by_label("Open in").click();
+    harness.run_steps(4);
+    for label in ["New tab", "New window", "Terminal"] {
+        assert!(has_label(&harness, label), "{label} is under Open in");
+    }
+    while COMMANDS_QUEUE.pop().is_some() {}
+}
+
+#[test]
+fn entry_menu_scrolls_inside_a_short_window() {
+    let _guard = egui_mev_test::snapshot_lock();
+    let height = 150.0;
+    let mut harness = entry_menu_harness(
+        &["/virtual/menu/sample note.txt"],
+        &[0],
+        egui::vec2(800.0, height),
+    );
+    harness
+        .get_by_label_contains("sample note")
+        .click_secondary();
+    harness.run_steps(6);
+
+    let last = if cfg!(windows) {
+        "Windows context menu"
+    } else {
+        "More"
+    };
+    let first = harness.get_by_label("Open").rect();
+    assert!(
+        first.top() >= 0.0,
+        "the menu starts in the window: {first:?}"
+    );
+    // Other systems have fewer rows, which may just fit.
+    let overflow = harness.get_by_label_contains(last).rect();
+    assert!(
+        !cfg!(windows) || overflow.bottom() > height,
+        "too long to fit: {overflow:?}"
+    );
+
+    harness.get_by_label_contains(last).scroll_to_me();
+    harness.run_steps(6);
+    let scrolled = harness.get_by_label_contains(last).rect();
+    assert!(scrolled.bottom() <= height, "reachable: {scrolled:?}");
+    while COMMANDS_QUEUE.pop().is_some() {}
+}
+
+/// The shell builds a menu for items of one folder only.
+#[cfg(windows)]
+#[test]
+fn windows_context_menu_needs_one_parent_folder() {
+    let _guard = egui_mev_test::snapshot_lock();
+    let size = egui::vec2(1100.0, 720.0);
+    let mut harness = entry_menu_harness(
+        &["/virtual/menu/sample a.txt", "/virtual/menu/sample b.txt"],
+        &[0, 1],
+        size,
+    );
+    harness.get_by_label_contains("sample a").click_secondary();
+    harness.run_steps(4);
+    assert!(has_label(&harness, "Windows context menu"));
+
+    let mut harness = entry_menu_harness(
+        &["/virtual/one/sample a.txt", "/virtual/two/sample b.txt"],
+        &[0, 1],
+        size,
+    );
+    harness.get_by_label_contains("sample a").click_secondary();
+    harness.run_steps(4);
+    assert!(has_label(&harness, "Rename"), "the menu is open");
+    assert!(!has_label(&harness, "Windows context menu"));
+    while COMMANDS_QUEUE.pop().is_some() {}
+}
