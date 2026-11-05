@@ -325,7 +325,7 @@ impl Workspace {
         let mut tabs = TabStore::default();
         let mut windows: Vec<Window> = Vec::new();
         for saved in saved {
-            let layout = saved.layout.filter_map_tabs(|path| {
+            let mut layout = saved.layout.filter_map_tabs(|path| {
                 let tab = path.is_dir().then(|| TabData::unloaded(path))?;
                 let id = tab.id;
                 tabs.insert(id, tab);
@@ -333,6 +333,12 @@ impl Workspace {
             });
             if layout.iter_all_tabs().next().is_none() {
                 continue;
+            }
+            // Filtering keeps each pane's active index, which can now be past
+            // its tabs, both here and in `save`. Such a pane shows nothing,
+            // and when focused leaves the window without a current tab.
+            for (_, leaf) in layout.iter_leaves_mut() {
+                leaf.active.0 = leaf.active.0.min(leaf.len().saturating_sub(1));
             }
             let id = if windows.is_empty() {
                 WindowId::MAIN
@@ -846,6 +852,28 @@ mod tests {
             ))
         );
         assert!(Workspace::restore(Vec::new()).is_none());
+    }
+
+    /// Saving leaves out tabs without a single folder, and restoring those
+    /// whose folder is gone. The pane's active tab must still exist: without
+    /// it there is no current tab, and the window stays blank on every start.
+    #[test]
+    fn a_restored_pane_keeps_an_active_tab_when_tabs_are_dropped() {
+        let _guard = lock();
+        let (a, mut trash, c) = (tab("src"), tab("src/app"), tab("src/data"));
+        trash.current_path = CurrentPath::Trash;
+        let c_id = c.id;
+        let mut workspace = Workspace::from_tabs(vec![a, trash, c]);
+        workspace.get_current_index();
+        workspace.select_tab(3);
+        assert_eq!(workspace.get_current_index(), Some(c_id));
+        drain();
+
+        let mut restored = Workspace::restore(workspace.save()).expect("restored");
+        drain();
+        assert_eq!(restored.get_tab_ids().len(), 2);
+        let current = restored.get_current_tab().expect("a current tab");
+        assert_eq!(current.current_path, CurrentPath::One("src/data".into()));
     }
 
     #[test]

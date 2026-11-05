@@ -1667,7 +1667,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         #[cfg(windows)]
-        self.chrome.sync(ctx, frame);
+        self.chrome.sync(&ctx, frame);
 
         #[cfg(feature = "profiling")]
         crate::profiler::profiler_window(&ctx, &mut self.profiler_visible);

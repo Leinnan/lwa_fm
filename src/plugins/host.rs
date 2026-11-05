@@ -892,6 +892,7 @@ impl PluginHost {
             Some(PanelClick::Row(RowClick::Action {
                 payload: path,
                 item,
+                ..
             })) => {
                 self.pending_row = Some(RowOrigin {
                     panel: self.panels[index].key(),

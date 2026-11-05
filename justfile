@@ -1,3 +1,5 @@
+set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
+
 format_bundle := if os() == "windows" { "--format wxsmsi" } else { if os() == "linux" { "--format appimage" } else { "--format osx" } }
 bundle_dir := "target/release/bundle"
 installer_dir := "target/release/installer"
@@ -17,15 +19,21 @@ bundle:
     cargo bundler -r {{format_bundle}}
 
 # Old bundles would otherwise be picked up too, the AppImage name includes the version
+[unix]
 _clean_bundle:
-    rm -rf {{bundle_dir}} {{installer_dir}}
+    rm -rf '{{bundle_dir}}' '{{installer_dir}}'
+
+[windows]
+_clean_bundle:
+    if (Test-Path -LiteralPath '{{bundle_dir}}') { Remove-Item -LiteralPath '{{bundle_dir}}' -Recurse -Force -ErrorAction Stop }
+    if (Test-Path -LiteralPath '{{installer_dir}}') { Remove-Item -LiteralPath '{{installer_dir}}' -Recurse -Force -ErrorAction Stop }
 
 # Build the installer and copy only it to target/release/installer
 [group('build')]
 [windows]
 installer: _clean_bundle bundle
-    mkdir -p {{installer_dir}}
-    cp {{bundle_dir}}/wsxmsi/*.msi {{installer_dir}}/
+    New-Item -ItemType Directory -Path '{{installer_dir}}' -Force -ErrorAction Stop | Out-Null
+    Copy-Item -Path '{{bundle_dir}}/wsxmsi/*.msi' -Destination '{{installer_dir}}/' -ErrorAction Stop
 
 # Build the installer and copy only it to target/release/installer
 [group('build')]
@@ -59,6 +67,7 @@ _gen_icon source size postfix:
 
 # Build the window icon and Windows icon from the SVGs, without the tile's margin
 [group('setup')]
+[unix]
 make_win_icon:
     rsvg-convert static/icon.svg | magick - -trim +repage icon_full.png
     rsvg-convert static/icon_small.svg | magick - -trim +repage icon_small.png
@@ -66,8 +75,21 @@ make_win_icon:
     magick \( icon_small.png -resize 16x16 \) \( icon_small.png -resize 24x24 \) \( icon_small.png -resize 32x32 \) \( icon_full.png -resize 48x48 \) \( icon_full.png -resize 64x64 \) \( icon_full.png -resize 128x128 \) \( icon_full.png -resize 256x256 \) static/icon.ico
     rm icon_full.png icon_small.png
 
+# Windows PowerShell cannot pipe binary PNG data without corrupting it.
+[group('setup')]
+[windows]
+make_win_icon:
+    rsvg-convert static/icon.svg -o icon_full.png
+    rsvg-convert static/icon_small.svg -o icon_small.png
+    magick icon_full.png -trim +repage icon_full.png
+    magick icon_small.png -trim +repage icon_small.png
+    magick icon_full.png -resize 256x256 static/window_icon.png
+    magick '(' icon_small.png -resize 16x16 ')' '(' icon_small.png -resize 24x24 ')' '(' icon_small.png -resize 32x32 ')' '(' icon_full.png -resize 48x48 ')' '(' icon_full.png -resize 64x64 ')' '(' icon_full.png -resize 128x128 ')' '(' icon_full.png -resize 256x256 ')' static/icon.ico
+    Remove-Item -LiteralPath icon_full.png, icon_small.png -ErrorAction Stop
+
 # Build the icon for macOS app
 [group('setup')]
+[macos]
 make_mac_icon:
     rm -rf static/icon.iconset
     mkdir -p static/icon.iconset
