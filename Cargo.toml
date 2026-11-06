@@ -97,13 +97,13 @@ jpeg-decoder = { version = "0.3", default-features = false }
 raw-window-handle = "0.6"
 # Shared with other egui apps. Every egui_mev_* crate must use the same rev: two revs
 # compile two copies, and their types do not match.
-egui_mev_app = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "59d84d8758d5956bf842e2812f5175926c8f7ae6", features = ["chrome", "wgpu"] }
-egui_mev_commands = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "59d84d8758d5956bf842e2812f5175926c8f7ae6" }
-egui_mev_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "59d84d8758d5956bf842e2812f5175926c8f7ae6" }
-egui_mev_data = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "59d84d8758d5956bf842e2812f5175926c8f7ae6" }
-egui_mev_tasks = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "59d84d8758d5956bf842e2812f5175926c8f7ae6" }
-egui_mev_theme = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "59d84d8758d5956bf842e2812f5175926c8f7ae6", features = ["lucide", "native", "serde"] }
-egui_mev_widgets = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "59d84d8758d5956bf842e2812f5175926c8f7ae6" }
+egui_mev_app = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3", features = ["chrome", "wgpu"] }
+egui_mev_commands = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
+egui_mev_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
+egui_mev_data = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
+egui_mev_tasks = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
+egui_mev_theme = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3", features = ["lucide", "native", "serde"] }
+egui_mev_widgets = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
 
 [patch.crates-io]
 puffin = { git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
@@ -157,7 +157,7 @@ wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"]
 egui = { version = "=0.37.0", features = ["monochrome_emoji_fonts"] }
 egui_kittest = { version = "=0.37.0", features = ["snapshot", "wgpu"] }
 egui-winit = { version = "=0.37.0", features = ["accesskit"] }
-egui_mev_test = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "59d84d8758d5956bf842e2812f5175926c8f7ae6" }
+egui_mev_test = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
 
 [build-dependencies]
 anyhow = "1.0"

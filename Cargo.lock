@@ -1462,7 +1462,7 @@ dependencies = [
 [[package]]
 name = "egui_mev_app"
 version = "0.1.0"
-source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=59d84d8758d5956bf842e2812f5175926c8f7ae6#59d84d8758d5956bf842e2812f5175926c8f7ae6"
+source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=a075ab322ff54f59ed4bd10845cb593aa24ed4d3#a075ab322ff54f59ed4bd10845cb593aa24ed4d3"
 dependencies = [
  "directories",
  "eframe",
@@ -1479,7 +1479,7 @@ dependencies = [
 [[package]]
 name = "egui_mev_commands"
 version = "0.1.0"
-source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=59d84d8758d5956bf842e2812f5175926c8f7ae6#59d84d8758d5956bf842e2812f5175926c8f7ae6"
+source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=a075ab322ff54f59ed4bd10845cb593aa24ed4d3#a075ab322ff54f59ed4bd10845cb593aa24ed4d3"
 dependencies = [
  "egui",
  "egui_mev_theme",
@@ -1490,7 +1490,7 @@ dependencies = [
 [[package]]
 name = "egui_mev_core"
 version = "0.1.0"
-source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=59d84d8758d5956bf842e2812f5175926c8f7ae6#59d84d8758d5956bf842e2812f5175926c8f7ae6"
+source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=a075ab322ff54f59ed4bd10845cb593aa24ed4d3#a075ab322ff54f59ed4bd10845cb593aa24ed4d3"
 dependencies = [
  "fixedbitset",
  "lru",
@@ -1500,7 +1500,7 @@ dependencies = [
 [[package]]
 name = "egui_mev_data"
 version = "0.1.0"
-source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=59d84d8758d5956bf842e2812f5175926c8f7ae6#59d84d8758d5956bf842e2812f5175926c8f7ae6"
+source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=a075ab322ff54f59ed4bd10845cb593aa24ed4d3#a075ab322ff54f59ed4bd10845cb593aa24ed4d3"
 dependencies = [
  "egui",
  "egui_mev_core",
@@ -1514,7 +1514,7 @@ dependencies = [
 [[package]]
 name = "egui_mev_tasks"
 version = "0.1.0"
-source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=59d84d8758d5956bf842e2812f5175926c8f7ae6#59d84d8758d5956bf842e2812f5175926c8f7ae6"
+source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=a075ab322ff54f59ed4bd10845cb593aa24ed4d3#a075ab322ff54f59ed4bd10845cb593aa24ed4d3"
 dependencies = [
  "egui",
  "web-time",
@@ -1523,7 +1523,7 @@ dependencies = [
 [[package]]
 name = "egui_mev_test"
 version = "0.1.0"
-source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=59d84d8758d5956bf842e2812f5175926c8f7ae6#59d84d8758d5956bf842e2812f5175926c8f7ae6"
+source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=a075ab322ff54f59ed4bd10845cb593aa24ed4d3#a075ab322ff54f59ed4bd10845cb593aa24ed4d3"
 dependencies = [
  "egui",
  "egui_kittest",
@@ -1533,7 +1533,7 @@ dependencies = [
 [[package]]
 name = "egui_mev_theme"
 version = "0.1.0"
-source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=59d84d8758d5956bf842e2812f5175926c8f7ae6#59d84d8758d5956bf842e2812f5175926c8f7ae6"
+source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=a075ab322ff54f59ed4bd10845cb593aa24ed4d3#a075ab322ff54f59ed4bd10845cb593aa24ed4d3"
 dependencies = [
  "egui",
  "lucide-icons",
@@ -1546,7 +1546,7 @@ dependencies = [
 [[package]]
 name = "egui_mev_widgets"
 version = "0.1.0"
-source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=59d84d8758d5956bf842e2812f5175926c8f7ae6#59d84d8758d5956bf842e2812f5175926c8f7ae6"
+source = "git+https://github.com/Leinnan/egui_mev_toolkit?rev=a075ab322ff54f59ed4bd10845cb593aa24ed4d3#a075ab322ff54f59ed4bd10845cb593aa24ed4d3"
 dependencies = [
  "egui",
  "egui_mev_core",
