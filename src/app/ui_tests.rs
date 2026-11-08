@@ -2067,6 +2067,59 @@ fn dropping_items_on_a_folder_asks_first() {
     snapshots.unwrap();
 }
 
+/// Dropping items into the folder they already live in does nothing; in a
+/// mixed drop only the items from elsewhere are offered.
+#[test]
+fn dropping_items_into_their_own_folder_does_nothing() {
+    let _guard = egui_mev_test::snapshot_lock();
+    while COMMANDS_QUEUE.pop().is_some() {}
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1100.0, 720.0))
+        .build_ui_state(draw_fluent, fixture(Appearance::Dark, false, false));
+    harness.run_steps(12);
+    let ctx = harness.ctx.clone();
+    let here = PathBuf::from("/virtual/Projects/DirFleet/Design notes.txt");
+    let elsewhere = PathBuf::from("/virtual/Documents/Budget.xlsx");
+    harness.state_mut().drop_transfer(
+        &ctx,
+        vec![here.clone()],
+        PathBuf::from("/virtual/Projects/DirFleet"),
+        true,
+    );
+    harness.run_steps(4);
+    assert_eq!(harness.state().display_modal, None);
+    assert!(harness.state().pending_drop.is_none());
+    let queued: Vec<_> = std::iter::from_fn(|| COMMANDS_QUEUE.pop()).collect();
+    assert!(
+        !queued.iter().any(|action| matches!(
+            action,
+            ActionToPerform::FileOp(_) | ActionToPerform::FileOpEvent(_)
+        )),
+        "nothing was moved: {queued:?}"
+    );
+
+    harness.state_mut().drop_transfer(
+        &ctx,
+        vec![here, elsewhere.clone()],
+        PathBuf::from("/virtual/Projects/DirFleet"),
+        true,
+    );
+    harness.run_steps(4);
+    assert_eq!(
+        harness.state().display_modal,
+        Some(ModalWindow::ConfirmDrop)
+    );
+    assert_eq!(
+        harness
+            .state()
+            .pending_drop
+            .as_ref()
+            .map(|p| p.srcs.clone()),
+        Some(vec![elsewhere])
+    );
+    while COMMANDS_QUEUE.pop().is_some() {}
+}
+
 /// Runs frames until `done`, reporting what the plugins were doing if never.
 #[cfg(unix)]
 fn wait(

@@ -259,7 +259,7 @@ pub struct PendingDelete {
 /// Items dropped onto a folder, waiting for the user to confirm the move or copy.
 #[derive(Debug, Clone)]
 pub struct PendingDrop {
-    srcs: Vec<PathBuf>,
+    pub(super) srcs: Vec<PathBuf>,
     dst: PathBuf,
     moving: bool,
 }
@@ -576,6 +576,14 @@ impl App {
         dst: PathBuf,
         moving: bool,
     ) {
+        // Items dropped into their own folder stay where they are.
+        let srcs: Vec<PathBuf> = srcs
+            .into_iter()
+            .filter(|src| !already_in(src, &dst))
+            .collect();
+        if srcs.is_empty() {
+            return;
+        }
         if self.settings.confirm_drop {
             self.pending_drop = Some(PendingDrop { srcs, dst, moving });
             self.display_modal = Some(ModalWindow::ConfirmDrop);
@@ -845,7 +853,14 @@ impl App {
             return;
         }
         if let Some(folder) = folder {
-            self.transfer(ctx, dropped, folder, false);
+            // A drag that left the window and came back into its own folder.
+            let dropped: Vec<PathBuf> = dropped
+                .into_iter()
+                .filter(|src| !already_in(src, &folder))
+                .collect();
+            if !dropped.is_empty() {
+                self.transfer(ctx, dropped, folder, false);
+            }
         } else {
             toast!(Info, "Open a single folder to drop files into it.");
         }
@@ -1313,6 +1328,11 @@ pub fn drop_moves(srcs: &[PathBuf], dst: &Path, modifiers: egui::Modifiers) -> b
         .all(|src| src.components().next() == dst.components().next())
 }
 
+/// Whether `src` already sits directly in `dst`, so dropping it there does nothing.
+fn already_in(src: &Path, dst: &Path) -> bool {
+    src.parent().is_some_and(|parent| same_dir(parent, dst))
+}
+
 /// Makes `response` accept dragged items into the folder `dst`: highlights it
 /// while hovered and starts the copy or move on release.
 pub fn folder_drop_target(ui: &Ui, response: &egui::Response, dst: &Path) {
@@ -1320,7 +1340,7 @@ pub fn folder_drop_target(ui: &Ui, response: &egui::Response, dst: &Path) {
         return;
     };
     // A folder can't take itself, its own subfolders, or items already in it.
-    let pointless = hovered.0.iter().all(|src| src.parent() == Some(dst))
+    let pointless = hovered.0.iter().all(|src| already_in(src, dst))
         || hovered.0.iter().any(|src| dst.starts_with(src));
     if pointless {
         return;
@@ -1332,9 +1352,15 @@ pub fn folder_drop_target(ui: &Ui, response: &egui::Response, dst: &Path) {
         egui::StrokeKind::Inside,
     );
     if let Some(payload) = response.dnd_release_payload::<DraggedPaths>() {
-        let moving = drop_moves(&payload.0, dst, ui.input(|i| i.modifiers));
+        let srcs: Vec<PathBuf> = payload
+            .0
+            .iter()
+            .filter(|src| !already_in(src, dst))
+            .cloned()
+            .collect();
+        let moving = drop_moves(&srcs, dst, ui.input(|i| i.modifiers));
         ActionToPerform::DropTransfer {
-            srcs: payload.0.clone(),
+            srcs,
             dst: dst.to_path_buf(),
             moving,
         }
@@ -1433,7 +1459,7 @@ fn select_stem(ctx: &Context, id: egui::Id, name: &str, is_dir: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchMode, BatchRename, drop_moves, paths_as_text};
+    use super::{BatchMode, BatchRename, already_in, drop_moves, paths_as_text};
 
     #[test]
     fn batch_rename_previews_patterns_and_problems() {
@@ -1471,6 +1497,19 @@ mod tests {
             assert!(!drop_moves(&src, Path::new(r"D:\backup"), Modifiers::NONE));
             assert!(drop_moves(&src, Path::new(r"D:\backup"), Modifiers::SHIFT));
         }
+    }
+
+    #[test]
+    fn items_already_in_the_drop_folder_are_detected() {
+        let src = Path::new("/data/a.txt");
+        assert!(already_in(src, Path::new("/data")));
+        assert!(already_in(src, Path::new("/data/")));
+        assert!(!already_in(src, Path::new("/data/b")));
+        assert!(!already_in(src, Path::new("/")));
+        assert_eq!(
+            already_in(src, Path::new("/DATA")),
+            cfg!(any(windows, target_os = "macos"))
+        );
     }
 
     #[test]
