@@ -527,7 +527,7 @@ impl MyTabViewer<'_> {
                         cells.weak,
                     )
                 } else {
-                    let elapsed = timestamp.elapsed();
+                    let elapsed = crate::data::time::Elapsed::elapsed(timestamp);
                     populate_time_pool(std::iter::once(elapsed), ui.ctx());
                     let Some(galley) =
                         TIME_POOL.with_borrow_mut(|pool| pool.get(&elapsed).cloned())

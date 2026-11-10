@@ -103,8 +103,10 @@ impl App {
                         if entry.is_file() {
                             ActionToPerform::SystemOpen(entry.full_path_string().into()).schedule();
                         } else {
-                            TabAction::ChangePaths(entry.get_path().into())
-                                .schedule_tab(view.tab_id);
+                            TabAction::ChangePaths(crate::app::dock::existing_dir(
+                                entry.get_path(),
+                            ))
+                            .schedule_tab(view.tab_id);
                         }
                     }
                     if ui.button("Copy as path").clicked() {

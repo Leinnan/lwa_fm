@@ -378,7 +378,7 @@ pub fn read_dir(dir: &Path) -> Option<Arc<Listing>> {
     let listing = if let Some(listing) = from_disk {
         listing
     } else {
-        let listing = Arc::new(Listing::read(dir)?);
+        let listing = Arc::new(crate::data::files::read_listing(dir)?);
         #[cfg(feature = "profiling")]
         puffin::profile_scope!("lwa_fm::database::read_dir::cache_write");
         if let Some(data) = listing.encode() {

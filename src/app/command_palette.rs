@@ -31,30 +31,38 @@ pub fn build_for_path(
                 commands.push(ValidAction {
                     action: ActionToPerform::TabAction(
                         crate::app::commands::TabTarget::ActiveTab,
-                        crate::app::commands::TabAction::ChangePaths(parent.to_path_buf().into()),
+                        crate::app::commands::TabAction::ChangePaths(
+                            crate::app::dock::existing_dir(parent.to_path_buf()),
+                        ),
                     ),
                     name: "Go Up".into(),
                     shortcut: None,
+                    enabled: true,
                 });
             }
         } else {
             commands.push(ValidAction {
                 action: ActionToPerform::TabAction(
                     crate::app::commands::TabTarget::ActiveTab,
-                    crate::app::commands::TabAction::ChangePaths(path.to_path_buf().into()),
+                    crate::app::commands::TabAction::ChangePaths(crate::app::dock::existing_dir(
+                        path.to_path_buf(),
+                    )),
                 ),
                 name: "Open".into(),
                 shortcut: None,
+                enabled: true,
             });
             commands.push(ValidAction {
                 action: ActionToPerform::NewTab(path.to_path_buf()),
                 name: "Open in new tab".into(),
                 shortcut: None,
+                enabled: true,
             });
             commands.push(ValidAction {
                 action: ActionToPerform::NewWindow(path.to_path_buf()),
                 name: "Open in new window".into(),
                 shortcut: None,
+                enabled: true,
             });
         }
         let open_name = if cfg!(windows) {
@@ -69,6 +77,7 @@ pub fn build_for_path(
             action: ActionToPerform::SystemOpen(path.to_string_lossy().to_string().into()),
             name: Cow::Borrowed(open_name),
             shortcut: None,
+            enabled: true,
         });
         commands.push(ActionToPerform::OpenInTerminal(path.to_path_buf()).into());
         let exist_in_favorites = favorites
@@ -82,12 +91,14 @@ pub fn build_for_path(
                 ),
                 name: "Remove from favorites".into(),
                 shortcut: None,
+                enabled: true,
             });
         } else {
             commands.push(ValidAction {
                 action: ActionToPerform::AddToFavorites(path.to_string_lossy().to_string().into()),
                 name: "Add to favorites".into(),
                 shortcut: None,
+                enabled: true,
             });
         }
     }
@@ -101,6 +112,7 @@ impl From<ActionToPerform> for ValidAction {
             action: val,
             name,
             shortcut: None,
+            enabled: true,
         }
     }
 }
@@ -119,6 +131,7 @@ pub fn app_commands(ctx: &egui::Context) -> Vec<ValidAction> {
             action: ActionToPerform::RunCommand(binding.command),
             name: Cow::Borrowed(binding.command.label()),
             shortcut: crate::app::keymap::shortcut_text(ctx, binding.command),
+            enabled: true,
         });
     }
     commands

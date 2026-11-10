@@ -74,7 +74,9 @@ impl App {
     fn disk_access_buttons(&mut self, ui: &mut egui::Ui) {
         if self.disk_access == DiskAccessPrompt::Restart {
             if ui.button("Restart DirFleet").clicked() {
-                crate::shell::relaunch_after_exit();
+                if let Err(error) = crate::shell::relaunch_after_exit() {
+                    log::warn!("{error}");
+                }
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
             if ui.button("Later").clicked() {

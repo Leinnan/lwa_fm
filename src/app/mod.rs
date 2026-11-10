@@ -15,7 +15,6 @@ use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -26,18 +25,21 @@ mod breadcrumbs;
 mod central_panel;
 pub mod command_palette;
 pub mod commands;
+mod core_link;
 pub mod database;
 pub mod dir_handling;
 pub mod directory_path_info;
-mod directory_view_settings;
+pub mod directory_view_settings;
 #[cfg(target_os = "macos")]
 mod disk_access;
 pub mod dock;
 mod drives_ui;
 pub mod file_ops;
-pub mod history;
+pub use dirfleet_core::history;
 mod inspector;
 pub mod keymap;
+#[cfg(test)]
+mod legacy_persistence_tests;
 pub mod saved_searches;
 pub mod search;
 pub mod search_state;
@@ -55,7 +57,7 @@ mod side_panel;
 mod system_menu;
 pub mod thumbnail_choice;
 mod thumbnail_picker;
-mod thumbnail_timeline;
+use dirfleet_core::thumbnail_timeline;
 mod top_bottom;
 mod trash_view;
 pub mod ui;
@@ -133,6 +135,10 @@ pub struct App {
     disk_access: disk_access::DiskAccessPrompt,
     #[serde(skip)]
     tabs: crate::app::dock::Workspace,
+    /// The shared core, started on the first frame. Nothing reads it yet:
+    /// the app moves onto it in steps.
+    #[serde(skip)]
+    core: Option<core_link::CoreLink>,
     /// Folders of the open tabs, saved so they come back after a restart.
     #[serde(default)]
     open_tabs: Vec<PathBuf>,
@@ -512,111 +518,7 @@ impl App {
     }
 }
 
-#[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
-pub enum Sort {
-    #[default]
-    Name,
-    Modified,
-    Created,
-    Accessed,
-    MostOpened,
-    Size,
-    Kind,
-    Random,
-}
-
-impl Sort {
-    pub const ALL: [Self; 8] = [
-        Self::Name,
-        Self::Modified,
-        Self::Created,
-        Self::Accessed,
-        Self::MostOpened,
-        Self::Size,
-        Self::Kind,
-        Self::Random,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Name => "Name",
-            Self::Modified => "Date modified",
-            Self::Created => "Date created",
-            Self::Accessed => "Date opened",
-            Self::MostOpened => "Times opened",
-            Self::Size => "Size",
-            Self::Kind => "Kind",
-            Self::Random => "Random",
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
-pub enum DisplayType {
-    #[default]
-    List,
-    Icons,
-}
-
-#[derive(Deserialize, Serialize, Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DataSource {
-    Settings,
-    Local,
-    #[default]
-    Generated,
-}
-
-#[derive(Deserialize, Serialize, Default, Debug, Clone)]
-pub struct Data<T> {
-    pub data: T,
-    pub source: DataSource,
-}
-
-#[allow(dead_code)]
-impl<T> Data<T> {
-    /// Returns true if the data is from the local source.
-    pub const fn is_local(&self) -> bool {
-        matches!(self.source, DataSource::Local)
-    }
-    /// Returns true if the data is from the global source.
-    pub const fn is_global(&self) -> bool {
-        matches!(self.source, DataSource::Settings)
-    }
-    /// Creates a new data instance with the local source.
-    pub const fn from_local(data: T) -> Self {
-        Self {
-            data,
-            source: DataSource::Local,
-        }
-    }
-    /// Creates a new data instance with the global source.
-    pub const fn from_settings(data: T) -> Self {
-        Self {
-            data,
-            source: DataSource::Settings,
-        }
-    }
-    /// Creates a new data instance with the generated source.
-    pub const fn generated(data: T) -> Self {
-        Self {
-            data,
-            source: DataSource::Generated,
-        }
-    }
-}
-
-impl<T> Deref for Data<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.data
-    }
-}
-impl<T> DerefMut for Data<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.data
-    }
-}
+pub use dirfleet_core::{Data, DataSource, DisplayType, Sort};
 
 impl Default for App {
     fn default() -> Self {
@@ -629,6 +531,7 @@ impl Default for App {
             chrome: egui_mev_app::NativeChrome::new(egui_mev_theme::AccentShades::system()),
             user_locations: Locations::get_user_dirs(),
             tabs: crate::app::dock::Workspace::new(&get_starting_path()),
+            core: None,
             open_tabs: Vec::new(),
             windows: Vec::new(),
             recent_folders: Vec::new(),
@@ -682,6 +585,8 @@ impl App {
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {
+            crate::legacy_import::remember(storage.get_string("egui").as_deref());
+            crate::legacy_import::import_globals(&cc.egui_ctx);
             let mut value: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
 
             value.load_locations(&cc.egui_ctx);
@@ -1348,7 +1253,7 @@ impl App {
                     _ => tab.current_path.parent().map(|parent| {
                         ActionToPerform::TabAction(
                             TabTarget::TabWithId(tab.id),
-                            TabAction::ChangePaths(parent.into()),
+                            TabAction::ChangePaths(crate::app::dock::existing_dir(parent)),
                         )
                     }),
                 };
@@ -1403,13 +1308,16 @@ impl App {
                             command_palette::ValidAction {
                                 action: ActionToPerform::TabAction(
                                     TabTarget::ActiveTab,
-                                    TabAction::ChangePaths(folder.clone().into()),
+                                    TabAction::ChangePaths(crate::app::dock::existing_dir(
+                                        folder.clone(),
+                                    )),
                                 ),
                                 name: Cow::Owned(format!(
                                     "Go to recent folder: {}",
                                     folder.display()
                                 )),
                                 shortcut: None,
+                                enabled: true,
                             }
                         }));
                     self.command_palette.commands.extend(
@@ -1423,6 +1331,7 @@ impl App {
                                 },
                                 name: Cow::Owned(format!("Run saved search: {}", saved.name)),
                                 shortcut: None,
+                                enabled: true,
                             }),
                     );
                     ActionToPerform::ToggleModalWindow(ModalWindow::Commands).schedule();
@@ -1611,7 +1520,7 @@ impl App {
                     .with_position(rect.min)
                     .with_inner_size(rect.size().max(egui::vec2(640.0, 420.0)));
             }
-            ctx.show_viewport_immediate(id.viewport(), builder, |ui, _class| {
+            ctx.show_viewport_immediate(crate::app::dock::viewport(id), builder, |ui, _class| {
                 self.tabs.set_current_window(id);
                 self.render_window(ui);
                 if ui.input(|i| i.viewport().close_requested()) {
@@ -1645,6 +1554,9 @@ impl eframe::App for App {
     #[allow(unused_variables)]
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.core
+            .get_or_insert_with(core_link::CoreLink::default)
+            .begin_frame(&ctx);
         #[cfg(feature = "profiling")]
         {
             puffin::profile_function!("my_update");

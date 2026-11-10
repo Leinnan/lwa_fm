@@ -52,3 +52,33 @@ jobs:
           cargo check --locked --features profiling
           cargo test --locked --features profiling
           cargo clippy --locked --all-targets --features profiling -- -D warnings
+
+  # The native macOS shell: the Rust core packaged for Swift, built with Xcode
+  # and checked against the same golden view models as the Rust tests.
+  native:
+    name: native macOS shell
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: native-${{ runner.os }}-
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: extractions/setup-just@v2
+      - name: Install xcodegen and boltffi
+        run: |
+          brew install xcodegen
+          version=$(sed -n 's/^boltffi_version := "\(.*\)"/\1/p' justfile)
+          boltffi --version 2>/dev/null | grep -q " $version$" || cargo install boltffi_cli --version "=$version" --locked
+      - name: Test the native shell
+        run: just apple-test

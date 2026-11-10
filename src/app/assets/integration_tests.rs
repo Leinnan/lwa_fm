@@ -1,5 +1,9 @@
 //! Opt-in media tests use the actual tools and application sampler, not a mock.
 use super::*;
+use dirfleet_effects::media::process;
+use dirfleet_effects::media::video::*;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 struct Fixture(PathBuf);
 struct BenchmarkProcessLimit;
@@ -286,12 +290,11 @@ fn real_short_video_and_geometry() {
     let portrait = fixture.video("short.mp4", "testsrc2=size=180x320:rate=30", "0.5");
     let image = poster(&portrait, 96, &AtomicBool::new(false)).expect("short poster");
     assert_eq!((image.width, image.height), (54, 96));
-    let metadata: crate::data::files::DirEntryMetaData = fs::metadata(&portrait.path)
-        .expect("portrait metadata")
-        .into();
-    let cached_poster = super::super::load_or_generate_thumbnail(
+    let metadata =
+        crate::data::files::metadata_of(&fs::metadata(&portrait.path).expect("portrait metadata"));
+    let cached_poster = super::load_or_generate_thumbnail(
         &portrait.path,
-        super::super::ThumbnailKind::Video,
+        super::ThumbnailKind::Video,
         96,
         metadata.source_revision,
         metadata.size,
@@ -426,9 +429,9 @@ fn real_sparse_frames_and_audio_tail() {
 fn real_disk_poster_reuse_preserves_timestamp_and_avoids_first_decode() {
     let fixture = Fixture::new();
     let source = fixture.video("reuse.mp4", "testsrc2=size=320x180:rate=30", "20");
-    let image = super::super::load_or_generate_thumbnail(
+    let image = super::load_or_generate_thumbnail(
         &source.path,
-        super::super::ThumbnailKind::Video,
+        super::ThumbnailKind::Video,
         160,
         source.revision,
         source.size,
@@ -461,7 +464,7 @@ fn real_disk_poster_reuse_preserves_timestamp_and_avoids_first_decode() {
 #[test]
 #[ignore = "requires FFmpeg; run with --ignored --test-threads=1"]
 fn real_picker_frames_come_earliest_first_and_reopen_without_ffmpeg() {
-    use super::super::{MediaBackend, PICKER_EDGE, SystemMediaBackend};
+    use super::{MediaBackend, PICKER_EDGE, SystemMediaBackend};
     use crate::app::thumbnail_timeline::FrameTimeline;
     let fixture = Fixture::new();
     let source = fixture.video("picker.mp4", "testsrc2=size=320x180:rate=30", "20");
@@ -510,6 +513,7 @@ fn real_picker_frames_come_earliest_first_and_reopen_without_ffmpeg() {
 #[test]
 #[ignore = "requires FFmpeg; run with --ignored --test-threads=1"]
 fn real_chosen_thumbnail_comes_from_the_overview_without_ffmpeg() {
+    super::connect_media_service();
     let fixture = Fixture::new();
     let source = fixture.video("chosen.mp4", "testsrc2=size=320x180:rate=30", "20");
     let (animation, _) = generate(source.clone(), PreviewSpec::new(240));
@@ -518,9 +522,9 @@ fn real_chosen_thumbnail_comes_from_the_overview_without_ffmpeg() {
     crate::app::thumbnail_choice::set(&source.path, source.revision, source.size, at);
     CHOSEN.lock().expect("chosen poster cache").clear();
     let before = process::PROCESS_COUNT.load(Ordering::Relaxed);
-    let poster = super::super::load_or_generate_thumbnail(
+    let poster = super::load_or_generate_thumbnail(
         &source.path,
-        super::super::ThumbnailKind::Video,
+        super::ThumbnailKind::Video,
         160,
         source.revision,
         source.size,
@@ -599,9 +603,9 @@ fn save_overview_sheet(animation: &DecodedAnimation) {
 fn real_cost_based_batch_reuses_poster_without_duplicate_frames() {
     let fixture = Fixture::new();
     let source = fixture.video("batch.mp4", "testsrc2=size=1280x720:rate=30", "10");
-    super::super::load_or_generate_thumbnail(
+    super::load_or_generate_thumbnail(
         &source.path,
-        super::super::ThumbnailKind::Video,
+        super::ThumbnailKind::Video,
         160,
         source.revision,
         source.size,

@@ -143,3 +143,101 @@ sign_mac_app:
 [group('build')]
 create_mac_installer: build_mac_app
     pkgbuild --install-location /Applications --component DirFleet.app DirFleetInstaller.pkg
+
+apple_dir := "apple"
+apple_app := apple_dir / "build/Build/Products/Release/DirFleet.app"
+apple_xcodebuild := "xcodebuild -project DirFleetNative.xcodeproj -scheme DirFleet-macOS -configuration Release -derivedDataPath build ONLY_ACTIVE_ARCH=YES -skipPackagePluginValidation"
+apple_xcodebuild_perf := "xcodebuild -project DirFleetNative.xcodeproj -scheme DirFleet-perf -configuration Release -derivedDataPath build ONLY_ACTIVE_ARCH=YES -skipPackagePluginValidation"
+# Must match the `boltffi` crate version in crates/dirfleet_ffi/Cargo.toml.
+boltffi_version := "0.29.3"
+# The pinned boltffi lives here, apart from any global one other projects use.
+boltffi_root := justfile_directory() / "target/tools/boltffi-" + boltffi_version
+
+# Install the pinned boltffi into target/tools (once)
+[group('native')]
+[macos]
+apple-tools:
+    @test -x "{{boltffi_root}}/bin/boltffi" || cargo install boltffi_cli --version '={{boltffi_version}}' --locked --root "{{boltffi_root}}"
+
+# Check the tools the native macOS shell needs
+[group('native')]
+[macos]
+apple-doctor: apple-tools
+    @command -v xcodebuild >/dev/null || { echo "xcodebuild missing: install Xcode"; exit 1; }
+    @command -v xcodegen >/dev/null || { echo "xcodegen missing: brew install xcodegen"; exit 1; }
+    @"{{boltffi_root}}/bin/boltffi" --version | grep -q " {{boltffi_version}}$" || { echo "{{boltffi_root}} doesn't hold boltffi {{boltffi_version}}: remove it and run just apple-tools"; exit 1; }
+    @rustup target list --installed | grep -q aarch64-apple-darwin || { echo "missing Rust target: rustup target add aarch64-apple-darwin"; exit 1; }
+    @echo "native shell tools OK"
+
+# Swift types for the core's events, effects and view model
+[group('native')]
+[macos]
+apple-typegen:
+    cargo run -p dirfleet_ffi --bin codegen --features codegen -- --output-dir {{apple_dir}}/generated
+    # The generated reader makes an array per number read; ours reads in place.
+    cp {{apple_dir}}/Serde/BinaryDeserializer.swift {{apple_dir}}/generated/App/Sources/Serde/BinaryDeserializer.swift
+
+# The Rust core as a Swift package
+[group('native')]
+[macos]
+[working-directory('crates/dirfleet_ffi')]
+apple-package: apple-doctor
+    rm -rf ../../{{apple_dir}}/generated/Shared
+    PATH="{{boltffi_root}}/bin:$PATH" boltffi pack apple --release
+    # lua-src links Lua as `static:-bundle`, which leaves it out of the static
+    # library; the Swift package gets it merged in (the newest build's copy).
+    lua="$(ls -t ../../target/aarch64-apple-darwin/release/build/mlua-sys-*/out/lib/liblua5.4.a | head -1)" && lib=../../{{apple_dir}}/generated/Shared/Shared.xcframework/macos-arm64/libdirfleet_ffi.a && libtool -static -o "$lib.merged" "$lib" "$lua" && mv "$lib.merged" "$lib"
+
+# Generate everything the native macOS shell's Xcode project needs
+[group('native')]
+[macos]
+apple-generate: apple-typegen apple-package
+    cd {{apple_dir}} && xcodegen
+
+# Build the native macOS shell
+[group('native')]
+[macos]
+apple-build: apple-generate
+    cd {{apple_dir}} && {{apple_xcodebuild}} build
+
+# Build and launch the native macOS shell
+[group('native')]
+[macos]
+apple-run: apple-build
+    open {{apple_app}}
+
+# Test the native macOS shell against the shared golden view models
+[group('native')]
+[macos]
+apple-test: apple-generate
+    cd {{apple_dir}} && {{apple_xcodebuild}} test -only-testing:DirFleetTests
+
+# Measure the native macOS shell on a folder shaped like a busy Desktop and on 10k and 100k files (Release); PERF lines show the numbers
+[group('native')]
+[macos]
+apple-perf out="": apple-generate
+    scripts/desktop_like_fixture.sh
+    cd {{apple_dir}} && TEST_RUNNER_DIRFLEET_PERF=1 TEST_RUNNER_DIRFLEET_PERF_OUT="{{out}}" TEST_RUNNER_DIRFLEET_PERF_ONLY="${DIRFLEET_PERF_ONLY:-}" TEST_RUNNER_DIRFLEET_PERF_SKIP_BACK="${DIRFLEET_PERF_SKIP_BACK:-}" {{apple_xcodebuild_perf}} test -only-testing:DirFleetTests/PerfTests 2>&1 | grep -E "^PERF|error:|Executed"
+
+# Drive the native macOS shell's UI on fixture folders (needs UI automation permission)
+[group('native')]
+[macos]
+apple-uitest: apple-generate
+    cd {{apple_dir}} && {{apple_xcodebuild}} test -only-testing:DirFleetUITests
+
+# Check the parity ledger against the code and show how far the Mac app has come
+[group('native')]
+parity:
+    cargo test -q -p dirfleet_ffi --test parity -- --nocapture
+
+# Generate the Xcode project and open it
+[group('native')]
+[macos]
+apple-open: apple-generate
+    xed {{apple_dir}}/DirFleetNative.xcodeproj
+
+# Remove everything generated for the native macOS shell
+[group('native')]
+[macos]
+apple-clean:
+    rm -rf {{apple_dir}}/generated {{apple_dir}}/build {{apple_dir}}/DirFleetNative.xcodeproj

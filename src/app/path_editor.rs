@@ -150,7 +150,7 @@ fn open(index: TabId, info: &mut DirectoryPathInfo, current_path: &Path, target:
     // rather than opening it again.
     info.text_input = target.to_string_lossy().into_owned();
     if target != current_path {
-        TabAction::ChangePaths(target.into()).schedule_tab(index);
+        TabAction::ChangePaths(crate::app::dock::existing_dir(target)).schedule_tab(index);
     }
     ActionToPerform::ToggleTopEdit.schedule();
 }

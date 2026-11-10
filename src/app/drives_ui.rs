@@ -320,7 +320,7 @@ impl App {
             let selected = active == Some(mount);
             let response = ui::nav_row(
                 ui,
-                drive.kind.icon(),
+                drive_icon(drive.kind),
                 &drive.display_name(),
                 selected,
                 egui::Sense::click(),
@@ -435,10 +435,11 @@ impl App {
             commands.push(super::command_palette::ValidAction {
                 action: ActionToPerform::TabAction(
                     TabTarget::ActiveTab,
-                    TabAction::ChangePaths(drive.mount.clone().into()),
+                    TabAction::ChangePaths(crate::app::dock::existing_dir(drive.mount.clone())),
                 ),
                 name: format!("Go to drive: {}", drive.display_name()).into(),
                 shortcut: None,
+                enabled: true,
             });
         }
         for drive in self.drives.visible().filter(|drive| drive.ejectable()) {
@@ -449,6 +450,7 @@ impl App {
                 },
                 name: format!("{}: {}", drive.eject_label(), drive.display_name()).into(),
                 shortcut: None,
+                enabled: true,
             });
         }
         commands
@@ -519,6 +521,17 @@ fn drive_tooltip(drive: &Drive) -> String {
         text = format!("{text} · {}", drive.file_system);
     }
     text
+}
+
+/// The sidebar icon of a drive kind.
+const fn drive_icon(kind: drives::DriveKind) -> lucide_icons::Icon {
+    match kind {
+        drives::DriveKind::Fixed => lucide_icons::Icon::HardDrive,
+        drives::DriveKind::Removable => lucide_icons::Icon::Usb,
+        drives::DriveKind::Network => lucide_icons::Icon::Server,
+        drives::DriveKind::Optical => lucide_icons::Icon::Disc,
+        drives::DriveKind::Virtual => lucide_icons::Icon::MemoryStick,
+    }
 }
 
 #[cfg(test)]

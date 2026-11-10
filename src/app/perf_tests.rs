@@ -103,9 +103,9 @@ fn perf_listing_pipeline() {
     report(
         "read_dir+build (uncached)",
         count,
-        median(5, || Listing::read(&dir)),
+        median(5, || crate::data::files::read_listing(&dir)),
     );
-    let listing = Listing::read(&dir).expect("read perf fixture");
+    let listing = crate::data::files::read_listing(&dir).expect("read perf fixture");
     report(
         "encode (cache write)",
         count,
@@ -206,7 +206,12 @@ fn perf_enumerate() {
             let root: std::sync::Arc<str> = std::sync::Arc::from("root");
             let index = builder.intern_dir(&root);
             enumerate(&dir, &mut |entry| {
-                builder.push_raw(index, &entry.name, entry.metadata());
+                crate::data::files::PushRaw::push_raw(
+                    &mut builder,
+                    index,
+                    &entry.name,
+                    entry.metadata(),
+                );
             })
             .expect("enumerate perf fixture");
             builder.finish()

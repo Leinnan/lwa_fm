@@ -1,3 +1,31 @@
+[workspace]
+members = [".", "crates/dirfleet_core", "crates/dirfleet_effects", "crates/dirfleet_ffi"]
+# vendor/puffin_egui joins as a path dependency; plain `cargo test` leaves it out.
+default-members = [".", "crates/dirfleet_core", "crates/dirfleet_effects", "crates/dirfleet_ffi"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+authors = ["Piotr Siuszko"]
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+nursery = { level = "deny", priority = 0 }
+pedantic = { level = "deny", priority = 1 }
+enum_glob_use = { level = "deny", priority = 2 }
+module_name_repetitions = { level = "allow", priority = 3 }
+cast_precision_loss = { level = "allow", priority = 4 }
+cast_possible_truncation = { level = "allow", priority = 5 }
+cast_sign_loss = { level = "allow", priority = 6 }
+out_of_bounds_indexing = { level = "allow", priority = 7 }
+perf = { level = "warn", priority = 8 }
+style = { level = "warn", priority = 9 }
+# this should be active but for that anyhow should be used everywhere
+unwrap_used = { level = "deny", priority = 10 }
+
 [package]
 name = "lwa_fm"
 edition = "2024"
@@ -24,14 +52,19 @@ opt-level = 2
 
 [features]
 default = []
-profiling = ["dep:puffin", "dep:puffin_http", "dep:puffin_egui", "profiling/profile-with-puffin"]
+profiling = ["dep:puffin", "dep:puffin_http", "dep:puffin_egui", "profiling/profile-with-puffin", "dirfleet_effects/profiling"]
 
 [dependencies]
+dirfleet_core = { path = "crates/dirfleet_core" }
+dirfleet_effects = { path = "crates/dirfleet_effects" }
+crux_core = "=0.20.0"
 lucide-icons = "=1.67.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 sled = "0.34"
 mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"] }
 toml = "1"
+# Reads egui memory saved by earlier builds (`src/legacy_import.rs`); eframe uses the same version.
+ron = "0.12"
 log = { version = "0.4.28", features = ["std"] }
 profiling = { version = "1.0.18", default-features = false }
 # Keep the profiler UI on the same egui version as the app.
@@ -39,11 +72,8 @@ puffin = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", 
 puffin_http = {optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 puffin_egui = { optional = true, path = "vendor/puffin_egui" }
 # Only collation is used; the `icu` umbrella crate pulls in every component and its data.
-icu_collator = { git = "https://github.com/unicode-org/icu4x", rev = "4d2b015" }
-icu_locale_core = { git = "https://github.com/unicode-org/icu4x", rev = "4d2b015" }
 notify = "6.1"
 smallvec = "1.15"
-bevy_device_lang = "0.6"
 fuzzy-matcher = "0.3"
 # NFC folding, so names stored decomposed (HFS+, SMB) match typed text.
 unicode-normalization = "0.1"
@@ -91,19 +121,18 @@ regex = { version = "1", default-features = false, features = ["std", "perf", "u
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "wgsl"] }
 mimalloc = { version = "0.1", default-features = false }
 foldhash = "0.2"
-memchr = "2.7"
 fixedbitset = "0.5"
 jpeg-decoder = { version = "0.3", default-features = false }
 raw-window-handle = "0.6"
 # Shared with other egui apps. Every egui_mev_* crate must use the same rev: two revs
 # compile two copies, and their types do not match.
-egui_mev_app = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3", features = ["chrome", "wgpu"] }
-egui_mev_commands = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
-egui_mev_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
-egui_mev_data = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
-egui_mev_tasks = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
-egui_mev_theme = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3", features = ["lucide", "native", "serde"] }
-egui_mev_widgets = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
+egui_mev_app = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994", features = ["chrome", "wgpu"] }
+egui_mev_commands = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994" }
+egui_mev_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994" }
+egui_mev_data = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994" }
+egui_mev_tasks = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994" }
+egui_mev_theme = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994", features = ["lucide", "native", "serde"] }
+egui_mev_widgets = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994" }
 
 [patch.crates-io]
 puffin = { git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
@@ -151,34 +180,21 @@ systemicons = { git = "https://github.com/Leinnan/systemicons.git" }
 wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
 
 [dev-dependencies]
+dirfleet_effects = { path = "crates/dirfleet_effects", features = ["test-support"] }
 # Harnesses have no system font fallback, so the bundled symbols keep glyphs like the
 # saved-search star drawn the same on every machine. Not for release builds, where
 # these would win over system color emoji.
 egui = { version = "=0.37.0", features = ["monochrome_emoji_fonts"] }
 egui_kittest = { version = "=0.37.0", features = ["snapshot", "wgpu"] }
 egui-winit = { version = "=0.37.0", features = ["accesskit"] }
-egui_mev_test = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "a075ab322ff54f59ed4bd10845cb593aa24ed4d3" }
+egui_mev_test = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994" }
 
 [build-dependencies]
 anyhow = "1.0"
 winresource = "0.1.19"
 
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-nursery = { level = "deny", priority = 0 }
-pedantic = { level = "deny", priority = 1 }
-enum_glob_use = { level = "deny", priority = 2 }
-module_name_repetitions = { level = "allow", priority = 3 }
-cast_precision_loss = { level = "allow", priority = 4 }
-cast_possible_truncation = { level = "allow", priority = 5 }
-cast_sign_loss = { level = "allow", priority = 6 }
-out_of_bounds_indexing = { level = "allow", priority = 7 }
-perf = { level = "warn", priority = 8 }
-style = { level = "warn", priority = 9 }
-# this should be active but for that anyhow should be used everywhere
-unwrap_used = { level = "deny", priority = 10 }
+[lints]
+workspace = true
 
 [package.metadata.bundle]
 name = "DirFleet"

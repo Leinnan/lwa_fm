@@ -73,6 +73,61 @@ mod tests {
         assert!(parse_shortcut("Ctrl+").is_err());
     }
 
+    /// The core reads manifests without egui; it must accept the same
+    /// shortcuts, as the same keys, except keys no shortcut uses.
+    #[test]
+    fn the_core_reads_shortcuts_as_the_toolkit_does() {
+        use dirfleet_core::plugins::shortcut;
+        let unused = |name: &str| {
+            [
+                "Browser", "Media", "Audio", "Launch", "Shift", "Control", "Alt", "Super",
+            ]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+                || name.ends_with("Lock")
+                || ["Fn", "Eject", "Power", "Sleep"].contains(&name)
+        };
+        for key in Key::ALL {
+            let name = key.name();
+            for text in [
+                format!("Ctrl+{name}"),
+                format!("Alt+Shift+{}", name.to_lowercase()),
+                name.to_owned(),
+            ] {
+                let egui = parse_shortcut(&text);
+                let core = shortcut::parse(&text);
+                if unused(name) {
+                    assert!(core.is_err(), "{text}: no shortcut uses it");
+                    continue;
+                }
+                match (&egui, &core) {
+                    (Ok(egui), Ok(core)) => {
+                        assert_eq!(core.key, egui.logical_key.name(), "{text}");
+                        assert_eq!(core.command, egui.modifiers.command, "{text}");
+                        assert_eq!(core.alt, egui.modifiers.alt, "{text}");
+                        assert_eq!(core.shift, egui.modifiers.shift, "{text}");
+                    }
+                    (Err(egui), Err(core)) => assert_eq!(core, egui, "{text}"),
+                    _ => panic!("{text}: egui says {egui:?}, the core {core:?}"),
+                }
+            }
+        }
+        for text in [
+            "Cmd++",
+            "Option+ArrowDown",
+            "Ctrl+Digit3",
+            "Ctrl+KeyQ",
+            "Ctrl+Esc",
+            "Ctrl+",
+        ] {
+            assert_eq!(
+                parse_shortcut(text).map(|s| s.logical_key.name()).ok(),
+                shortcut::parse(text).map(|s| s.key).ok(),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn finds_conflicts_with_built_in_shortcuts() {
         let refresh = parse_shortcut("Ctrl+R").expect("valid");

@@ -9,217 +9,47 @@
 //! [`ActionToPerform::Plugin`](crate::app::commands::ActionToPerform::Plugin).
 //! See `docs/plugins.md` for the plugin author's view.
 
-mod api;
-mod discovery;
 pub mod form;
 pub mod host;
-mod jobs;
 pub mod keymap;
-pub mod manifest;
 pub mod panel;
-pub mod permissions;
-mod runtime;
-mod sandbox;
 pub mod table;
 #[cfg(test)]
 mod tests;
 pub mod ui;
-pub mod usage;
-#[cfg(target_os = "macos")]
-mod usage_bulk;
+pub use dirfleet_core::plugins::{
+    AppRequest, BarSegment, CallContext, InspectorRow, JobEvent, NotifyLevel, PluginCode,
+    PluginMsg, Source, manifest, permissions,
+};
+#[cfg(test)]
+pub use dirfleet_effects::plugins::DISCARD_MESSAGES;
+#[cfg(test)]
+pub use dirfleet_effects::plugins::sandbox;
+pub use dirfleet_effects::plugins::{discovery, jobs, runtime};
+pub use dirfleet_effects::usage;
 
 pub use host::PluginHost;
 pub use host::targets_from_entries as host_targets;
 pub use manifest::TargetInfo;
 
 use crate::app::commands::ActionToPerform;
-use std::collections::BTreeMap;
+use dirfleet_effects::plugins::ActivationExt as _;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, RwLock};
 
-/// Where a plugin was loaded from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    /// Shipped inside the app.
-    Bundled,
-    /// A folder in the plugins directory.
-    User(PathBuf),
-}
-
-/// A plugin's code: its manifest and Lua files, loaded once and shared by
-/// its worker and jobs.
-#[derive(Debug)]
-pub struct PluginCode {
-    pub manifest: manifest::Manifest,
-    /// Lua sources by path relative to the plugin folder, with `/`.
-    pub files: BTreeMap<String, String>,
-    pub source: Source,
-}
-
-impl PluginCode {
-    pub fn id(&self) -> &str {
-        &self.manifest.id
-    }
-
-    pub fn action(&self, id: &str) -> Option<&manifest::ActionDef> {
-        self.manifest.actions.iter().find(|action| action.id == id)
-    }
-}
-
-/// What a handler is called with: the folder, the items and form values.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CallContext {
-    /// The folder shown, when it is one folder.
-    pub dir: Option<PathBuf>,
-    pub targets: Vec<TargetInfo>,
-    pub tab: Option<u32>,
-    pub values: Option<form::Values>,
-}
-
-/// One segment of the directory bar.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BarSegment {
-    pub text: Option<String>,
-    /// A small rounded label, such as a count.
-    pub badge: Option<String>,
-    /// A button that runs this plugin's action `action`.
-    pub button: Option<String>,
-    pub action: Option<String>,
-    pub icon: Option<String>,
-    pub tooltip: Option<String>,
-    /// `normal`, `muted`, `good`, `warn` or `bad`.
-    pub tone: Option<String>,
-    #[serde(default)]
-    pub spinner: bool,
-}
-
-/// One row of a plugin's inspector section.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-#[serde(untagged)]
-pub enum InspectorRow {
-    /// `{"Label", "value"}`
-    Pair(String, String),
-    Named {
-        label: String,
-        value: String,
-    },
-}
-
-/// What a job reports while it runs.
-#[derive(Debug, Clone)]
-pub enum JobEvent {
-    Progress {
-        fraction: f32,
-        label: String,
-    },
-    Finished {
-        done: usize,
-        skipped: usize,
-        failures: Vec<String>,
-        cancelled: bool,
-    },
-}
-
-/// Something a plugin asks the app to do.
-#[derive(Debug, Clone)]
-pub enum AppRequest {
-    Open(PathBuf),
-    OpenInNewTab(PathBuf),
-    Refresh,
-    Select(Vec<PathBuf>),
-    SystemOpen(PathBuf),
-    OpenTerminal(PathBuf),
-    FileOp(crate::fileops::FileOp),
-    Clipboard(String),
-    Notify {
-        level: NotifyLevel,
-        text: String,
-    },
-    /// A job's results, for the dialog of the run it belongs to.
-    ShowTable {
-        plugin: String,
-        job: Option<u64>,
-        spec: table::TableSpec,
-    },
-    /// A change to one row of the plugin's results.
-    UpdateTableRow {
-        plugin: String,
-        update: table::RowUpdate,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotifyLevel {
-    Info,
-    Success,
-    Warning,
-    Error,
-}
-
-/// Messages from plugin threads to the UI thread.
-#[derive(Debug, Clone)]
-pub enum PluginMsg {
-    /// A worker finished loading its code (or failed to).
-    Loaded {
-        plugin: String,
-        generation: u64,
-        result: Result<(), String>,
-    },
-    FormReady {
-        request: u64,
-        result: Result<form::Form, String>,
-    },
-    Validated {
-        request: u64,
-        result: Result<BTreeMap<String, String>, String>,
-    },
-    Bar {
-        plugin: String,
-        dir: PathBuf,
-        result: Result<Vec<BarSegment>, String>,
-    },
-    Inspector {
-        plugin: String,
-        key: u64,
-        result: Result<Vec<InspectorRow>, String>,
-    },
-    /// A quick action finished.
-    ActionDone {
-        plugin: String,
-        result: Result<(), String>,
-    },
-    Job {
-        id: u64,
-        event: JobEvent,
-    },
-    App(AppRequest),
-    Invalidate {
-        plugin: String,
-        bar: bool,
-        inspector: bool,
-    },
-    Error {
-        plugin: String,
-        message: String,
-    },
-}
-
-/// Hands a message to the UI thread and wakes it.
-pub fn send(message: PluginMsg) {
-    #[cfg(test)]
-    if DISCARD_MESSAGES.get() {
-        return;
-    }
-    ActionToPerform::Plugin(Box::new(message)).schedule();
-    crate::watcher::request_repaint();
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Set on a test's thread when it calls Lua directly, with no app to take
-    /// the messages: the queue is shared, so another test would get them.
-    pub static DISCARD_MESSAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+/// Sends plugin threads' messages to the UI thread and wakes it, and points
+/// plugins at this app's folders.
+pub fn connect() {
+    dirfleet_effects::plugins::configure(dirfleet_effects::plugins::PluginDirs {
+        plugins: std::env::var_os("DIRFLEET_PLUGINS_DIR")
+            .map(PathBuf::from)
+            .or_else(|| crate::paths::project_dirs().map(|dirs| dirs.config_dir.join("plugins"))),
+        data: crate::paths::project_dirs().map(|dirs| dirs.data_dir.join("plugin-data")),
+    });
+    dirfleet_effects::plugins::set_sink(|message| {
+        ActionToPerform::Plugin(Box::new(message)).schedule();
+        crate::watcher::request_repaint();
+    });
 }
 
 /// An action as menus, the palette and shortcuts see it.

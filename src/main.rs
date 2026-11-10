@@ -4,9 +4,8 @@ use anyhow::Context;
 use consts::APP_NAME;
 use eframe::egui;
 
-mod access_time;
+use dirfleet_effects::access_time;
 mod app;
-mod child_process;
 mod clipboard;
 mod consts;
 pub mod data;
@@ -14,6 +13,7 @@ mod drives;
 mod fileops;
 mod fs_enum;
 mod helper;
+mod legacy_import;
 mod locations;
 #[cfg(target_os = "macos")]
 mod macos_tools;
@@ -45,6 +45,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
     paths::migrate_legacy_paths();
+    // Before any listing is read: names sort in the device's language.
+    dirfleet_effects::listing_io::init_locale();
 
     #[cfg(feature = "profiling")]
     profiler::enable_profiling();

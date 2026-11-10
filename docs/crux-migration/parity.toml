@@ -1,0 +1,2484 @@
+# Feature parity between the egui app and the native macOS app.
+#
+# One entry per user-visible feature of the egui app (and the few the Mac
+# app adds), grouped by the areas of `parity.md`. Checked by `just parity`
+# (`crates/dirfleet_ffi/tests/parity.rs`).
+#
+# status:       "open" — the Mac app doesn't have it through the core yet
+#               "done" — it does, and `core_test` and `swift_test` prove it
+#               "na"   — not wanted in the Mac app; `na_mac` says why
+# egui_on_core: true once the egui app also uses the core for it and its old
+#               code is gone (default false)
+# events:       the core `Event` variants this feature introduced; every
+#               variant must appear in some entry
+# *_test:       test function names; each must exist
+
+# 1. Listing
+
+[[feature]]
+id = "listing.basic"
+area = 1
+summary = "List a folder's entries with name, size and modified date"
+egui_ref = "src/app/dock/list_view.rs:69"
+status = "done"
+core_test = ["a_listing_shows_its_rows"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "listing.viewport_rows"
+area = 1
+summary = "Large folders scroll smoothly: only rows near the viewport are sent"
+egui_ref = "src/app/dock/list_view.rs:69"
+status = "done"
+events = ["ViewportChanged"]
+core_test = ["the_view_holds_only_the_rows_near_the_viewport", "view_and_bridge_latency_on_a_100k_folder"]
+swift_test = ["testViewportRoundTripOnA100kFolder"]
+
+[[feature]]
+id = "listing.loading"
+area = 1
+summary = "A spinner while a folder is read"
+egui_ref = "src/app/dock.rs:960"
+status = "done"
+core_test = ["navigating_lists_and_watches_the_folder", "a_late_listing_of_the_previous_folder_is_dropped"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "listing.error"
+area = 1
+summary = "A folder that can't be read shows why"
+egui_ref = "src/app/dock.rs:907"
+status = "done"
+core_test = ["a_folder_that_cannot_be_read_shows_why"]
+swift_test = ["testAMissingFolderShowsAnError"]
+
+[[feature]]
+id = "listing.live_refresh"
+area = 1
+summary = "Changes on disk show up by themselves (watcher, 150 ms debounce)"
+egui_ref = "src/app/mod.rs:321"
+status = "done"
+events = ["Refresh"]
+core_test = ["a_change_in_the_folder_lists_it_again", "a_ready_watch_lists_the_folder_again", "lists_refreshes_on_change_and_stops_watching_on_leave"]
+swift_test = ["testAChangeOnDiskShowsUp"]
+
+[[feature]]
+id = "listing.live_updates_unavailable"
+area = 1
+summary = "A toast when live updates can't be started"
+egui_ref = "src/watcher.rs:348"
+status = "open"
+core_test = ["a_folder_that_cannot_be_watched_stays_listed_and_warns_once"]
+notes = "Core: a folder whose watch fails stays listed and 'Live updates unavailable' shows once, as egui; a missing folder only says so through its listing. No Swift test, since FSEvents can't be made to fail on demand"
+
+[[feature]]
+id = "listing.refresh_command"
+area = 1
+summary = "Refresh forces a re-read (F5, Cmd+R)"
+egui_ref = "src/app/keymap.rs:13"
+status = "done"
+core_test = ["a_change_in_the_folder_lists_it_again"]
+swift_test = ["testAChangeOnDiskShowsUp"]
+notes = "Mac: View > Refresh, Cmd+R"
+
+[[feature]]
+id = "listing.refresh_on_focus"
+area = 1
+summary = "Coming back to the window re-reads folders sorted by Date opened"
+egui_ref = "src/app/mod.rs:452"
+status = "done"
+events = ["WindowFocused"]
+core_test = ["coming_back_to_a_window_reads_folders_sorted_by_opening_and_forgets_a_replaced_cut"]
+swift_test = ["testComingBackToTheWindowReordersAFolderSortedByDateOpened"]
+notes = "A window becoming key reads its folders sorted by Date opened (or filtered by opened:) again"
+
+[[feature]]
+id = "listing.progress"
+area = 1
+summary = "Progress text and partial results stream in during deep walks"
+egui_ref = "src/app/mod.rs:855"
+status = "open"
+core_test = ["searching_subfolders_walks_them_and_rows_say_where_they_are"]
+notes = "Partial results stream in and the search bar says 'Scanning N folders…'; no Swift test, since the text only shows mid-walk"
+
+[[feature]]
+id = "listing.cache"
+area = 1
+summary = "Folders reopen instantly from the listing cache (sled)"
+egui_ref = "src/app/database.rs:86"
+status = "open"
+
+[[feature]]
+id = "listing.collation"
+area = 1
+summary = "Names sort in natural, locale-aware order (ICU)"
+egui_ref = "src/app/dir_handling.rs:691"
+status = "done"
+core_test = ["lists_folders_first_with_sizes"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Shared ICU collator, set from the device language by each shell"
+
+[[feature]]
+id = "listing.columns"
+area = 1
+summary = "Columns Name, Folder, Modified/Deleted, Created, Opened, Opens, Kind, Size"
+egui_ref = "src/app/dock/columns.rs:16"
+status = "done"
+egui_test = ["list_columns_can_be_added_and_resized"]
+events = ["ToggleColumn", "ResetColumns"]
+core_test = ["rows_carry_every_column_and_columns_follow_the_choice", "columns_are_saved_and_come_back", "name_cannot_be_hidden"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: an NSTableView with the core's columns in the core's order, Opens among them"
+
+[[feature]]
+id = "listing.columns.header_sort"
+area = 1
+summary = "Clicking a column header sorts; again reverses"
+egui_ref = "src/app/dock/list_view.rs:688"
+status = "done"
+core_test = ["sorting_reorders_the_listing_without_reading_it_again"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels", "testTheListSortsFromItsHeader"]
+notes = "Mac: the table's header sorts natively and sends SortBy/SetReverse; it shows the core's sort"
+
+[[feature]]
+id = "listing.columns.resize"
+area = 1
+summary = "Columns resize by dragging; double-click resets"
+egui_ref = "src/app/dock/list_view.rs:688"
+status = "open"
+egui_test = ["list_columns_can_be_added_and_resized"]
+events = ["SetColumnWidth"]
+core_test = ["rows_carry_every_column_and_columns_follow_the_choice"]
+notes = "Mac: the table takes the core's widths and sends SetColumnWidth when a column's edge is dragged; double-click to reset is missing"
+
+[[feature]]
+id = "listing.columns.show_hide"
+area = 1
+summary = "Header menu shows/hides columns and resets them"
+egui_ref = "src/app/dock/list_view.rs:688"
+status = "done"
+egui_test = ["list_columns_can_be_added_and_resized"]
+core_test = ["rows_carry_every_column_and_columns_follow_the_choice"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels", "testTheListShowsTheColumnsTheCoreShows"]
+notes = "Mac: the table header's menu lists the optional columns and sends ToggleColumn; no Reset there yet"
+
+[[feature]]
+id = "listing.columns.narrow"
+area = 1
+summary = "Narrow panes shrink columns, then hide the least important"
+egui_ref = "src/app/dock/columns.rs:175"
+status = "open"
+
+[[feature]]
+id = "listing.kind_labels"
+area = 1
+summary = "Kind labels: Folder, Application/Package, PNG image, …"
+egui_ref = "src/app/dock/columns.rs:220"
+status = "done"
+core_test = ["rows_carry_every_column_and_columns_follow_the_choice"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "listing.dates"
+area = 1
+summary = "Relative dates; row tooltip with preview and exact dates"
+egui_ref = "src/app/dock/entry_actions.rs:323"
+status = "done"
+core_test = ["dates_read_as_time_ago_once_the_clock_ticks", "dates_read_as_time_ago_once_the_time_is_known"]
+swift_test = ["testListingDetailsDatesPermissionsAndPackages"]
+notes = "The effects' clock ticks every 30 s from Started; dates stay exact until it does (scripts never start it). The Mac tooltip has the exact dates; the hover preview in it is not copied"
+
+[[feature]]
+id = "listing.grid"
+area = 1
+summary = "Grid view with tiles sized by icon size"
+egui_ref = "src/app/dock/grid_view.rs:41"
+status = "done"
+egui_test = ["fluent_windows_grids_compact_settings_and_appearance_switching"]
+core_test = ["switching_list_and_grid_only_redraws"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: LazyVGrid with system icons; tile sizes follow the icon-size setting once settings are shared"
+
+[[feature]]
+id = "listing.grid.details"
+area = 1
+summary = "Large/XL tiles add a line with size or folder; placeholders while loading"
+egui_ref = "src/app/dock/grid_view.rs:41"
+status = "done"
+core_test = ["large_tiles_show_a_files_size"]
+swift_test = ["testListingDetailsDatesPermissionsAndPackages"]
+notes = "Large and extra large tiles add the size, or a search result's folder; the system icon stands in until a thumbnail is ready"
+
+[[feature]]
+id = "listing.view_toggle"
+area = 1
+summary = "Switch List/Grid (Cmd+Shift+1/2, toolbar segment)"
+egui_ref = "src/app/top_bottom.rs:649"
+status = "done"
+events = ["SetDisplay"]
+core_test = ["switching_list_and_grid_only_redraws"]
+notes = "Mac: toolbar segment and Cmd+1/Cmd+2 as in Finder (egui: Cmd+Shift+1/2)"
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "listing.sort"
+area = 1
+summary = "Sort by name, modified, created, opened, times opened, size, kind, random"
+egui_ref = "crates/dirfleet_core/src/view_settings.rs:5"
+status = "done"
+events = ["SortBy"]
+core_test = ["sorting_reorders_the_listing_without_reading_it_again", "the_view_sorts_and_reverses", "a_listing_read_with_an_old_view_is_reordered_and_the_tab_waits_for_it"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: toolbar View options menu and View ▸ Sort By; the menus themselves wait for UI tests"
+
+[[feature]]
+id = "listing.sort.reverse"
+area = 1
+summary = "Reverse order"
+egui_ref = "src/app/top_bottom.rs:607"
+status = "done"
+events = ["SetReverse"]
+core_test = ["choosing_the_current_sort_again_reverses_it", "every_tab_showing_the_folder_changes_with_it"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: toolbar View options menu and View ▸ Sort By; the menus themselves wait for UI tests"
+
+[[feature]]
+id = "listing.sort.folders_first"
+area = 1
+summary = "Folders stay first when sorting by name or kind"
+egui_ref = "src/app/dir_handling.rs:691"
+status = "done"
+core_test = ["lists_folders_first_with_sizes"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "listing.view_per_folder"
+area = 1
+summary = "Each folder remembers its view; others use the defaults"
+egui_ref = "src/app/directory_view_settings.rs"
+status = "done"
+core_test = ["a_folder_keeps_its_view_and_others_use_the_default", "folder_views_are_saved_and_come_back"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "listing.hidden"
+area = 1
+summary = "Show or hide hidden items, per folder (Cmd+H in egui)"
+egui_ref = "src/data/files.rs:157"
+status = "done"
+events = ["SetShowHidden"]
+core_test = ["hidden_items_show_only_when_asked_and_clutter_never"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: Show hidden items, Cmd+Shift+. as in Finder"
+
+[[feature]]
+id = "listing.never_shown"
+area = 1
+summary = ".DS_Store and ._* files are never shown"
+egui_ref = "src/fs_enum.rs:161"
+status = "done"
+core_test = ["hidden_items_show_only_when_asked_and_clutter_never"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "listing.packages"
+area = 1
+summary = "Packages (.app, .framework) appear as single items"
+egui_ref = "src/fs_enum/package.rs"
+status = "done"
+core_test = ["packages_list_as_single_items"]
+swift_test = ["testListingDetailsDatesPermissionsAndPackages"]
+notes = "Checked in a Swift test on a temp folder, so the shared goldens stay the same on Linux"
+
+[[feature]]
+id = "listing.empty_states"
+area = 1
+summary = "Empty folder, show-hidden link, permission denied with Privacy link, empty Trash"
+egui_ref = "src/app/dock.rs:907"
+status = "done"
+events = ["OpenPrivacySettings"]
+core_test = ["an_empty_view_says_how_many_items_are_hidden", "a_folder_the_app_may_not_read_offers_the_privacy_settings", "a_folder_without_read_permission_is_denied"]
+swift_test = ["testListingDetailsDatesPermissionsAndPackages"]
+notes = "Listings tell a refusal (EACCES, or EPERM from macOS privacy protection) from other failures; the Mac app offers Open Privacy Settings, as egui does"
+
+
+# 2. Selection & keyboard
+
+[[feature]]
+id = "select.click"
+area = 2
+summary = "Click selects, Cmd-click toggles, Shift-click selects a range, empty space clears"
+egui_ref = "src/app/dock/interaction.rs:105"
+status = "done"
+egui_test = ["selection_follows_paths_across_sort_filter_and_deletion"]
+events = ["Click", "SetSelection"]
+core_test = ["clicks_select_toggle_and_extend_like_egui", "a_shell_list_reports_its_selection"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels", "testClickingGridTilesSelectsThemAtOnce", "testTheListAndTheCoreShareTheSelection"]
+notes = "Mac: the table selects natively and reports its rows; the grid sends clicks with their modifiers and draws the core's answer in the same turn"
+
+[[feature]]
+id = "select.right_click"
+area = 2
+summary = "Right-click outside the selection selects that item first"
+egui_ref = "src/app/dock/interaction.rs:65"
+status = "done"
+events = ["ContextClick"]
+core_test = ["a_right_click_outside_the_selection_selects_that_row"]
+swift_test = ["testTheStatusLineShowsFreeSpaceAndARightClickSelectsItsRow", "testTheGridBuildsItsMenusWhenTheyOpen"]
+notes = "The table's and grid's menus tell the core about the clicked row before they are built, so the menu acts on it"
+
+[[feature]]
+id = "select.rubber_band"
+area = 2
+summary = "Dragging on empty space draws a selection rectangle"
+egui_ref = "src/app/dock/interaction.rs:124"
+status = "open"
+egui_test = ["dragging_on_empty_space_selects_items"]
+
+[[feature]]
+id = "select.keys"
+area = 2
+summary = "Arrows, Home/End, PgUp/PgDn move; Shift extends; Cmd moves only the cursor"
+egui_ref = "src/app/dock/interaction.rs:177"
+status = "done"
+egui_test = ["keyboard_moves_keep_the_cursor_in_view"]
+events = ["MoveCursor"]
+core_test = ["the_keyboard_moves_the_cursor_and_shift_extends"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels", "testArrowKeysMoveThroughTheGrid"]
+notes = "Mac: the table moves its selection natively; the grid sends MoveCursor for arrows, Home/End and PgUp/PgDn"
+
+[[feature]]
+id = "select.toggle_key"
+area = 2
+summary = "Cmd+Space toggles the item under the cursor"
+egui_ref = "src/app/dock/interaction.rs:177"
+status = "na"
+na_mac = "⌘Space is Spotlight on the Mac; ⌘-click toggles"
+
+[[feature]]
+id = "select.all_invert_clear"
+area = 2
+summary = "Select all (Cmd+A), invert (Cmd+Shift+I), clear (Esc)"
+egui_ref = "src/app/dock/interaction.rs:177"
+status = "done"
+events = ["SelectAll", "InvertSelection", "ClearSelection"]
+core_test = ["select_all_is_one_range_and_invert_and_clear_follow"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: Edit > Select All (native), Invert Selection Cmd+Shift+I, Deselect All Cmd+Opt+A"
+
+[[feature]]
+id = "select.enter_opens"
+area = 2
+summary = "Enter opens the selection; several folders open in new tabs"
+egui_ref = "src/app/dock/interaction.rs:337"
+status = "done"
+events = ["OpenSelection"]
+core_test = ["opening_several_folders_opens_tabs_and_files_open_together"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+notes = "Mac: File ▸ Open (⌘↓, Finder's key; Return renames as in Finder)"
+
+[[feature]]
+id = "select.open_in_tab_gestures"
+area = 2
+summary = "Cmd+Enter, Cmd-double-click and middle-click open a folder in a new tab"
+egui_ref = "src/app/dock/interaction.rs:58"
+status = "open"
+notes = "Mac: ⌘-double-click and File ▸ Open in New Tab (⌃⌘O) open a folder in a new tab, tried by hand; no Swift test drives the gesture"
+
+[[feature]]
+id = "select.double_click_opens"
+area = 2
+summary = "Double-click opens a folder"
+egui_ref = "src/app/dock/interaction.rs:58"
+status = "done"
+events = ["OpenRow"]
+core_test = ["opening_a_folder_row_navigates_into_it_and_back_returns"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "select.type_to_select"
+area = 2
+summary = "Typing jumps to matching names; repeating a letter cycles"
+egui_ref = "src/app/dock/interaction.rs:274"
+status = "done"
+events = ["TypeSelect"]
+core_test = ["typing_jumps_to_matching_names_and_a_repeated_letter_cycles"]
+swift_test = ["testTypingSelectsByNameAndQuickLookStepsThroughTheFolder", "testTypingSelectsByName"]
+notes = "The one-second window is a Delay in the core"
+
+[[feature]]
+id = "select.cursor"
+area = 2
+summary = "A cursor ring separate from the selection"
+egui_ref = "src/app/dock.rs:877"
+status = "done"
+egui_test = ["keyboard_cursor_ring_snapshot"]
+core_test = ["clicks_select_toggle_and_extend_like_egui", "the_keyboard_moves_the_cursor_and_shift_extends"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: the table draws its own focus; the grid shows only the selection"
+
+[[feature]]
+id = "select.auto_select"
+area = 2
+summary = "New, renamed and pasted items are selected afterwards"
+egui_ref = "src/app/dock.rs:421"
+egui_test = ["keyboard_selects_and_renames_without_hovering_the_list"]
+status = "done"
+core_test = ["a_new_folder_is_made_selected_and_renamed_once_listed"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+
+[[feature]]
+id = "select.follows_paths"
+area = 2
+summary = "The selection follows items across sort, filter and deletion"
+egui_ref = "src/app/dock.rs:421"
+status = "done"
+egui_test = ["selection_follows_paths_across_sort_filter_and_deletion"]
+core_test = ["the_selection_stays_on_its_entries_when_rows_move", "a_view_changed_while_an_order_was_made_is_ordered_again"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+
+# 3. Quick Look
+
+[[feature]]
+id = "quicklook.toggle"
+area = 3
+summary = "Space shows and hides a large preview"
+egui_ref = "src/app/dock/quick_look.rs"
+status = "done"
+events = ["QuickLook"]
+core_test = ["quick_look_shows_the_selection_from_the_cursor_and_opens_what_it_shows"]
+swift_test = ["testQuickLookShowsTheSelection"]
+notes = "Mac: the system Quick Look panel (.quickLookPreview); Space or File > Quick Look, Cmd+Y"
+
+[[feature]]
+id = "quicklook.step"
+area = 3
+summary = "Arrow keys step through items while previewing"
+egui_ref = "src/app/dock/quick_look.rs"
+status = "done"
+core_test = ["quick_look_of_one_item_steps_through_the_folder"]
+swift_test = ["testTypingSelectsByNameAndQuickLookStepsThroughTheFolder"]
+notes = "One item previews with the rows around it (500 each side), so the panel's arrows step through the folder"
+
+[[feature]]
+id = "quicklook.open"
+area = 3
+summary = "Enter opens the previewed item"
+egui_ref = "src/app/dock/quick_look.rs"
+status = "done"
+events = ["OpenPreviewed"]
+core_test = ["quick_look_shows_the_selection_from_the_cursor_and_opens_what_it_shows"]
+swift_test = ["testReturnInQuickLookOpensTheItemItShows"]
+notes = "Return in the Quick Look panel opens the item it shows (a key monitor in the app delegate). The Swift test goes through the monitor's call; the key itself wasn't pressed"
+
+[[feature]]
+id = "quicklook.no_preview"
+area = 3
+summary = "Folders and unsupported files show a message"
+egui_ref = "src/app/dock/quick_look.rs"
+status = "na"
+na_mac = "The system Quick Look panel shows folders and unsupported files itself"
+
+
+# 4. Workspace & navigation
+
+[[feature]]
+id = "workspace.windows.new"
+area = 4
+summary = "New window (Cmd+N)"
+egui_ref = "src/app/dock/workspace.rs:208"
+status = "done"
+events = ["NewWindow", "AdoptWindow"]
+core_test = ["a_new_window_asks_the_shell_to_show_it", "windows_show_their_own_folders", "a_shell_s_own_tabs_are_adopted_with_their_ids"]
+egui_test = ["second_window_draws_takes_its_commands_and_closes"]
+swift_test = ["testCoreOpenedWindowsAreShownAndLaunchWindowsAdopted"]
+egui_on_core = true
+
+[[feature]]
+id = "workspace.windows.close"
+area = 4
+summary = "Closing a window drops its tabs and stops their watches"
+egui_ref = "src/app/mod.rs:1582"
+status = "done"
+events = ["WindowClosed"]
+core_test = ["closing_a_window_stops_its_watch_and_drops_its_tabs"]
+egui_test = ["second_window_draws_takes_its_commands_and_closes"]
+swift_test = ["testCoreOpenedWindowsAreShownAndLaunchWindowsAdopted"]
+egui_on_core = true
+
+[[feature]]
+id = "workspace.windows.main_takes_over"
+area = 4
+summary = "Closing the main window hands its role to the next window"
+egui_ref = "src/app/dock/workspace.rs:259"
+status = "na"
+na_mac = "Native windows are all equal; there is no main window"
+events = ["CloseFirstWindow"]
+core_test = ["closing_the_first_window_hands_it_the_second_one_s_tabs"]
+egui_on_core = true
+
+[[feature]]
+id = "workspace.tabs.new"
+area = 4
+summary = "New tab (Cmd+T, + button) at the pane's folder"
+egui_ref = "src/app/dock/workspace.rs:535"
+status = "done"
+events = ["NewTab", "AdoptTab"]
+core_test = ["a_new_tab_goes_to_the_end_of_the_focused_pane_at_its_folder", "a_shell_s_own_tabs_are_adopted_with_their_ids"]
+notes = "Mac: File > New Tab (Cmd+T) opens a core window as a native tab of the current one; egui: core rule, end of the focused pane"
+swift_test = ["testANewTabJoinsItsWindowsTabGroupAndTheGroupIsSaved"]
+egui_on_core = true
+
+[[feature]]
+id = "workspace.tabs.close"
+area = 4
+summary = "Close tab (Cmd+W, middle-click, ×)"
+egui_ref = "src/app/dock.rs:1013"
+status = "done"
+events = ["CloseTab"]
+core_test = ["closing_shows_the_left_neighbour_and_reopen_brings_it_back", "the_first_window_keeps_its_last_tab_and_others_close_with_theirs"]
+notes = "Mac: native window tabs close with Cmd+W (WindowClosed); panes close with View > Close Split (CloseTab)"
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+egui_on_core = true
+
+[[feature]]
+id = "workspace.tabs.reopen"
+area = 4
+summary = "Reopen closed tab (Cmd+Shift+T), last 20 kept"
+egui_ref = "src/app/dock/workspace.rs:600"
+status = "done"
+events = ["ReopenClosedTab", "ReopenClosedAsWindow"]
+core_test = ["closing_shows_the_left_neighbour_and_reopen_brings_it_back", "a_closed_window_can_be_reopened_as_a_window_but_not_after_quitting"]
+notes = "Mac: File > Reopen Closed Tab (Cmd+Shift+T), as a native tab"
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "workspace.tabs.cycle"
+area = 4
+summary = "Next/previous tab, go to tab 1–8, Cmd+9 last tab"
+egui_ref = "src/app/dock/workspace.rs:626"
+status = "done"
+egui_on_core = true
+events = ["CycleTab", "GoToTab", "ActivateTab"]
+core_test = ["tabs_cycle_and_go_to_by_number"]
+swift_test = ["testANewTabJoinsItsWindowsTabGroupAndTheGroupIsSaved"]
+notes = "Mac: native Show Next/Previous Tab and Window ▸ Show Tab 1–9 (⌘1–9, 9 the last)"
+
+[[feature]]
+id = "workspace.tabs.menu"
+area = 4
+summary = "Tab menu: New, Duplicate, Move to new window, Close, Close others, Reopen"
+egui_ref = "src/app/dock.rs:1031"
+status = "done"
+events = ["DuplicateTab", "CloseOtherTabs"]
+core_test = ["a_new_tab_goes_to_the_end_of_the_focused_pane_at_its_folder"]
+swift_test = ["testANewTabJoinsItsWindowsTabGroupAndTheGroupIsSaved"]
+notes = "Mac: File ▸ New Tab, Duplicate Tab, Close Other Tabs, Reopen Closed Tab; Window ▸ Move Tab to New Window is native"
+
+[[feature]]
+id = "workspace.tabs.title"
+area = 4
+summary = "Tab title is the folder name or 'Searching: …'"
+egui_ref = "src/app/dock.rs:1077"
+status = "done"
+core_test = ["a_listing_shows_its_rows"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Folder name; the Searching: title comes with search (T8)"
+
+[[feature]]
+id = "workspace.split"
+area = 4
+summary = "Split panes side by side"
+egui_ref = "src/app/dock/workspace.rs:469"
+status = "done"
+egui_test = ["fluent_keyboard_search_dialogs_and_split_panes_survive_theme_changes", "keyboard_selection_and_search_follow_the_active_pane"]
+events = ["SplitTab", "SplitNew", "ResizeSplit", "SetLayout"]
+core_test = ["splitting_shows_two_panes_each_with_its_rows", "a_split_from_a_single_tab_copies_it_into_a_new_pane", "a_shell_layout_is_adopted_only_with_the_same_tabs", "layouts_round_trip_through_their_flat_form"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: View > Split Right / Split Below, two panes side by side (HSplitView/VSplitView); egui keeps any tree"
+egui_on_core = true
+
+[[feature]]
+id = "workspace.focused_pane"
+area = 4
+summary = "The focused pane is marked; others are dimmed"
+egui_ref = "src/app/dock.rs:897"
+status = "done"
+core_test = ["a_split_from_a_single_tab_copies_it_into_a_new_pane"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: an accent line on the focused pane; clicking a pane focuses it (ActivateTab)"
+egui_on_core = true
+
+[[feature]]
+id = "workspace.tear_off"
+area = 4
+summary = "Drag a tab out to a new window or onto another window"
+egui_ref = "src/app/dock/workspace.rs:496"
+status = "done"
+events = ["MoveTab", "WindowGrouped"]
+core_test = ["tabs_move_to_a_new_window_and_beside_another_tab"]
+notes = "Mac: native window tabs tear off and merge by themselves; groups are reported at quit and restored"
+swift_test = ["testANewTabJoinsItsWindowsTabGroupAndTheGroupIsSaved"]
+egui_on_core = true
+
+[[feature]]
+id = "workspace.lazy_restore"
+area = 4
+summary = "Restored hidden tabs aren't read until shown"
+egui_ref = "src/app/dock.rs:742"
+status = "open"
+core_test = ["saved_windows_come_back_with_only_their_visible_tabs_listed", "split_layouts_are_saved_and_hidden_tabs_load_when_shown"]
+notes = "Core done; the Mac app has no tabs yet to show it"
+
+[[feature]]
+id = "workspace.start_folder"
+area = 4
+summary = "A folder given at launch replaces the saved windows"
+egui_ref = "src/app/mod.rs:1610"
+status = "open"
+core_test = ["a_folder_the_app_was_started_with_replaces_the_saved_windows"]
+swift_test = ["testOpensTheGivenFolderAndItsSubfolder"]
+notes = "Mac: -folder; its UI test is written but needs UI automation allowed to run"
+
+[[feature]]
+id = "workspace.start_home"
+area = 4
+summary = "With nothing saved the app starts at home"
+egui_ref = "src/app/mod.rs:1610"
+status = "done"
+core_test = ["a_first_start_opens_home_and_saves_it", "a_broken_saved_state_falls_back_to_home"]
+swift_test = ["testWindowsComeBackOnTheNextStart"]
+
+[[feature]]
+id = "workspace.panel_breakpoints"
+area = 4
+summary = "Sidebar/inspector become overlays in narrow windows"
+egui_ref = "src/app/ui.rs:197"
+status = "na"
+na_mac = "Native split views collapse on their own"
+egui_test = ["auto_collapse_keeps_preferences_and_toggle_opens_overlay"]
+
+[[feature]]
+id = "workspace.title_bar"
+area = 4
+summary = "Custom title bar"
+egui_ref = "src/app/mod.rs:126"
+status = "na"
+na_mac = "Windows only"
+
+[[feature]]
+id = "nav.back"
+area = 4
+summary = "Back (Alt+Left, Backspace; Cmd+[ on the Mac)"
+egui_ref = "src/app/top_bottom.rs:213"
+status = "done"
+events = ["Back"]
+core_test = ["opening_a_folder_row_navigates_into_it_and_back_returns"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: Back button and Go > Back, Cmd+["
+
+[[feature]]
+id = "nav.forward"
+area = 4
+summary = "Forward"
+egui_ref = "src/app/top_bottom.rs:213"
+status = "done"
+events = ["Forward"]
+core_test = ["back_and_forward_return_to_where_you_were", "going_somewhere_new_after_back_drops_forward"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: Forward button and Go > Forward, Cmd+]"
+
+[[feature]]
+id = "nav.up"
+area = 4
+summary = "Up to the parent folder"
+egui_ref = "src/app/top_bottom.rs:213"
+status = "done"
+events = ["Up"]
+core_test = ["up_shows_the_enclosing_folder"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: Up button and Go > Enclosing Folder, Cmd+Up"
+
+[[feature]]
+id = "nav.history_state"
+area = 4
+summary = "Back/Forward restore the folder's search, scroll and selection"
+egui_ref = "src/app/dock.rs:553"
+status = "done"
+egui_test = ["navigation_keeps_your_place", "search_edits_undo_redo_and_back_restores_them"]
+core_test = ["back_and_forward_return_to_where_you_were"]
+notes = "Selection and scroll row per entry; the Mac list and grid scroll back to the row. Searches join in T8"
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "nav.mouse_buttons"
+area = 4
+summary = "Mouse back/forward buttons"
+egui_ref = "src/app/keymap.rs:196"
+status = "open"
+notes = "Mac: buttons 4 and 5 go back and forward in the window's tab (a local event monitor); not tried with a real mouse"
+
+[[feature]]
+id = "nav.recent"
+area = 4
+summary = "Recent folders are remembered (12)"
+egui_ref = "src/app/mod.rs:121"
+status = "done"
+core_test = ["recent_folders_leave_out_the_one_shown"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+
+[[feature]]
+id = "nav.open_folder_dialog"
+area = 4
+summary = "File ▸ Open Folder… picks a folder with the system panel (Mac addition)"
+status = "done"
+events = ["OpenFolder"]
+core_test = ["opening_a_folder_asks_the_shell_and_shows_the_answer", "a_cancelled_pick_changes_nothing"]
+swift_test = ["testOpenFolderShowsThePickedFolder", "testCancelledPickChangesNothing"]
+notes = "Not in the egui app"
+
+
+# 5. Path bar
+
+[[feature]]
+id = "path.type"
+area = 5
+summary = "Type a folder path and press Enter"
+egui_ref = "src/app/path_editor.rs:26"
+status = "done"
+events = ["Navigate"]
+core_test = ["navigating_lists_and_watches_the_folder"]
+egui_test = ["path_editor_enter_opens_the_typed_path_not_the_hovered_row"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "path.breadcrumbs"
+area = 5
+summary = "Breadcrumbs from an anchor (Home, a volume, root)"
+egui_ref = "src/app/breadcrumbs.rs:46"
+egui_test = ["breadcrumbs_keep_their_size_when_hovered"]
+status = "done"
+core_test = ["the_path_bar_shows_crumbs_and_a_crumb_s_subfolders", "anchors_at_home_then_volume_then_root"]
+swift_test = ["testThePathBarListsSubfoldersAndGoToFolderChecksTheFolder"]
+notes = "Crumbs come from the core; the Mac bar scrolls, showing its end, instead of collapsing"
+
+[[feature]]
+id = "path.breadcrumbs.collapse"
+area = 5
+summary = "Crumbs collapse into a '…' menu; anchor menu lists enclosing folders"
+egui_ref = "src/app/breadcrumbs.rs:159"
+status = "open"
+notes = "The anchor's menu lists the folders above; when crumbs don't fit, the middle ones fold into a '…' menu (ViewThatFits), seen in a narrow window. No Swift test measures layout"
+
+[[feature]]
+id = "path.breadcrumbs.chevron"
+area = 5
+summary = "Chevron menu lists subfolders"
+egui_ref = "src/app/breadcrumbs.rs:258"
+status = "done"
+events = ["ListChildren"]
+core_test = ["the_path_bar_shows_crumbs_and_a_crumb_s_subfolders"]
+swift_test = ["testThePathBarListsSubfoldersAndGoToFolderChecksTheFolder"]
+notes = "Mac: a popover listing the subfolders"
+
+[[feature]]
+id = "path.breadcrumbs.actions"
+area = 5
+summary = "Crumbs: click goes, Cmd/middle-click opens a tab, accept drops, have a menu"
+egui_ref = "src/app/breadcrumbs.rs:227"
+status = "open"
+notes = "Click goes, ⌘-click opens a new tab, crumbs (chevrons) accept drops, and have the folder menu; no Swift test clicks crumbs"
+
+[[feature]]
+id = "path.edit"
+area = 5
+summary = "Edit the path (Cmd+L, Alt+D, F4; click the empty field)"
+egui_ref = "src/app/top_bottom.rs:102"
+egui_test = ["path_editor_takes_focus_and_compact_overlay_dismisses", "path_editor_closes_when_pressed_outside_and_stays_when_pressed_inside"]
+status = "done"
+events = ["OpenGoTo", "CloseGoTo"]
+core_test = ["go_to_folder_completes_names_and_reports_missing_folders"]
+swift_test = ["testThePathBarListsSubfoldersAndGoToFolderChecksTheFolder"]
+notes = "Mac: Go ▸ Go to Folder… (⇧⌘G, Finder's key) and ⌘L, or double-click the bar"
+
+[[feature]]
+id = "path.completion"
+area = 5
+summary = "Folder dropdown: arrows choose, Tab completes, click opens, Cmd-click opens a tab"
+egui_ref = "src/app/path_editor.rs:26"
+egui_test = ["path_editor_arrow_keys_choose_the_row_enter_opens", "path_editor_tab_completes_keeps_focus_and_lists_the_next_level", "path_editor_click_navigates_and_command_click_opens_a_tab", "path_editor_scrolls_the_chosen_row_into_view", "path_editor_dropdown_snapshots"]
+status = "done"
+events = ["GoToTyped", "GoToSubmit"]
+core_test = ["go_to_folder_completes_names_and_reports_missing_folders", "names_starting_with_the_text_come_first"]
+swift_test = ["testThePathBarListsSubfoldersAndGoToFolderChecksTheFolder"]
+notes = "Arrows choose, Tab completes, double-click opens; ⌘-click for a tab is still egui-only"
+
+[[feature]]
+id = "path.shortcuts"
+area = 5
+summary = "'~' expands; a bare name matches favorites and recent folders"
+egui_ref = "src/app/directory_path_info.rs:63"
+status = "done"
+core_test = ["a_bare_name_goes_to_a_matching_favorite", "home_expands_and_names_split_from_their_folder"]
+swift_test = ["testThePathBarListsSubfoldersAndGoToFolderChecksTheFolder"]
+
+[[feature]]
+id = "path.missing"
+area = 5
+summary = "'Directory does not exist' for a bad path"
+egui_ref = "src/app/path_editor.rs:26"
+status = "done"
+core_test = ["go_to_folder_completes_names_and_reports_missing_folders"]
+swift_test = ["testThePathBarListsSubfoldersAndGoToFolderChecksTheFolder"]
+
+[[feature]]
+id = "path.trash_header"
+area = 5
+summary = "The Trash shows its name and an Empty… button instead of a path"
+egui_ref = "src/app/top_bottom.rs:92"
+status = "done"
+core_test = ["the_trash_opens_in_a_tab_and_back_returns_to_the_folder"]
+swift_test = ["testTheTrashOpensInATabAndBackLeavesIt"]
+notes = "Mac: the path field reads the Trash's name, the toolbar has Empty Trash…"
+
+[[feature]]
+id = "toolbar.layout"
+area = 5
+summary = "Toolbar fits small windows, has large targets and named controls"
+egui_ref = "src/app/top_bottom.rs:213"
+status = "open"
+egui_test = ["top_bar_fits_at_minimum_width", "top_bar_targets_are_large_enough", "top_bar_controls_are_named", "top_bar_names_hidden_folders_and_marks_the_shown_panels"]
+
+
+# 6. Search
+
+[[feature]]
+id = "search.field"
+area = 6
+summary = "Search field (Cmd+F, F3, Cmd+E) that moves to a second row when narrow"
+egui_ref = "src/app/top_bottom.rs:755"
+egui_test = ["toolbar_search_field_opens_takes_typing_and_closes_with_escape"]
+status = "done"
+events = ["SetSearchText"]
+core_test = ["typing_filters_the_listing_without_reading_it_again", "an_order_for_an_older_query_is_made_again"]
+swift_test = ["testSearchFiltersAsYouTypeAndFindsResultsInSubfolders"]
+notes = "Mac: the toolbar search field, Edit ▸ Find (⌘F). It needs no second row: the toolbar overflows natively"
+
+[[feature]]
+id = "search.pills"
+area = 6
+summary = "key:value text becomes pills; pills edit, remove and navigate by keyboard"
+egui_ref = "src/widgets/chip_input.rs:794"
+egui_test = ["search_pills_remove_edit_and_clear_with_mouse_and_keyboard"]
+status = "open"
+events = ["CommitSearchText", "RemoveSearchChip"]
+core_test = ["typed_text_becomes_chips_and_filters_can_be_added_and_removed"]
+notes = "Core and Mac: Enter turns text into chips (search field tokens), Delete removes one. Editing a pill in place is still egui-only"
+
+[[feature]]
+id = "search.pill_editors"
+area = 6
+summary = "Pill editors: name (text/wildcard/regex), extension, type, size, age, folder"
+egui_ref = "src/widgets/chip_input.rs:768"
+status = "open"
+
+[[feature]]
+id = "search.syntax"
+area = 6
+summary = "Query syntax: words, phrases, globs, /regex/, -word, OR, ext:, kind:, size:, modified:, opened:, in:"
+egui_ref = "crates/dirfleet_core/src/search/query.rs:18"
+status = "done"
+core_test = ["combines_names_exclusions_and_filters", "non_ascii_names_match_ignoring_accents_and_case", "opened_filter_uses_the_open_times_given", "a_search_filters_what_is_listed_and_a_walk_finds_it_below"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Matching moved to dirfleet_core::search::filter; egui uses it too"
+
+[[feature]]
+id = "search.help"
+area = 6
+summary = "A help popup explains the syntax"
+egui_ref = "src/app/top_bottom.rs:299"
+status = "done"
+core_test = ["nothing_found_in_the_folder_offers_subfolders_and_favorites"]
+swift_test = ["testSearchUndoNoResultsOffersAndEscape"]
+notes = "A ? popover beside the search options lists query::HELP from the view model"
+
+[[feature]]
+id = "search.match_case"
+area = 6
+summary = "Match case (Alt+C); otherwise Unicode-aware case-insensitive"
+egui_ref = "src/app/search/filter.rs"
+status = "done"
+events = ["SetSearchCase"]
+core_test = ["typed_text_becomes_chips_and_filters_can_be_added_and_removed"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: search options menu ▸ Match Case"
+
+[[feature]]
+id = "search.filter_menu"
+area = 6
+summary = "'+ Filter' menu: type, modified, opened, size presets, extension, exclude, also search a folder"
+egui_ref = "src/app/top_bottom.rs:993"
+status = "open"
+events = ["ToggleSearchFilter"]
+core_test = ["preset_filters_turn_on_and_off_and_say_which_are_on"]
+notes = "Type, Modified, Opened and Size presets are in the core and the Mac options menu; Extension…, Exclude a word… and Also search a folder… need pill editors"
+
+[[feature]]
+id = "search.scope"
+area = 6
+summary = "Look in this folder or in all favorites"
+egui_ref = "src/app/top_bottom.rs:299"
+status = "done"
+events = ["SetSearchFavorites"]
+core_test = ["the_favorites_can_be_searched_instead_of_the_folder"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: a Favorites search scope beside This Folder and Subfolders"
+
+[[feature]]
+id = "search.subfolders"
+area = 6
+summary = "Include subfolders, depth 2–7"
+egui_ref = "src/app/top_bottom.rs:299"
+status = "done"
+events = ["SetSearchDepth"]
+core_test = ["searching_subfolders_walks_them_and_rows_say_where_they_are"]
+swift_test = ["testSearchFiltersAsYouTypeAndFindsResultsInSubfolders", "testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: This Folder / Subfolders search scopes, depth 2–7 in the options menu. The walk moved to dirfleet_effects::walk"
+
+[[feature]]
+id = "search.match_all_any"
+area = 6
+summary = "Match all or any words"
+egui_ref = "src/app/top_bottom.rs:299"
+status = "done"
+events = ["SetSearchAny"]
+core_test = ["combines_names_exclusions_and_filters"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "search.status"
+area = 6
+summary = "Result count, 'Searching…', Stop and Close"
+egui_ref = "src/app/top_bottom.rs:299"
+status = "done"
+events = ["StopSearch", "CloseSearch"]
+core_test = ["stopping_keeps_what_was_found_and_closing_shows_the_folder_again"]
+swift_test = ["testSearchFiltersAsYouTypeAndFindsResultsInSubfolders", "testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: result count and Stop next to the path; Esc or the field's clear button closes"
+
+[[feature]]
+id = "search.no_results"
+area = 6
+summary = "No matches offers 'Search subfolders' / 'Search favorites'"
+egui_ref = "src/app/top_bottom.rs:299"
+status = "done"
+core_test = ["nothing_found_in_the_folder_offers_subfolders_and_favorites"]
+swift_test = ["testSearchUndoNoResultsOffersAndEscape"]
+notes = "The Mac's No Results view offers Search Subfolders and Search Favorites"
+
+[[feature]]
+id = "search.escape"
+area = 6
+summary = "Esc clears text, then pills, then closes; Down moves into results"
+egui_ref = "src/app/top_bottom.rs:845"
+status = "done"
+events = ["SearchEscape"]
+core_test = ["escape_clears_the_text_then_the_filters_then_closes"]
+swift_test = ["testSearchUndoNoResultsOffersAndEscape"]
+notes = "Escape on the results (the search field keeps its own Escape); Down into results is the field's native behaviour"
+
+[[feature]]
+id = "search.undo"
+area = 6
+summary = "Search edits are undoable (step after a 700 ms pause)"
+egui_ref = "src/app/search_state.rs:15"
+egui_test = ["search_edits_undo_redo_and_back_restores_them"]
+status = "done"
+core_test = ["search_edits_are_undone_and_redone_with_file_operations", "an_edit_while_typing_waits_records_the_typing_first"]
+swift_test = ["testSearchUndoNoResultsOffersAndEscape"]
+notes = "One undo history for file operations, search edits and saved-search changes (app::undo), labelled from what changed; typing becomes a step after the 700 ms pause, or before any other search edit"
+
+[[feature]]
+id = "search.history"
+area = 6
+summary = "Searches are part of Back/Forward history"
+egui_ref = "src/app/search_state.rs:15"
+status = "done"
+core_test = ["a_pause_in_typing_records_the_search_and_back_returns_to_the_folder"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+notes = "Typing is recorded after a 700 ms pause (a Delay effect), chips and options at once"
+
+[[feature]]
+id = "search.highlight"
+area = 6
+summary = "Matches are highlighted in names"
+egui_ref = "src/app/dock/list_view.rs:592"
+status = "done"
+core_test = ["typing_filters_the_listing_without_reading_it_again", "highlights_merge_overlapping_words"]
+swift_test = ["testSearchFiltersAsYouTypeAndFindsResultsInSubfolders"]
+
+[[feature]]
+id = "search.folder_column"
+area = 6
+summary = "Results show a Folder column relative to the searched folder"
+egui_ref = "src/app/dock/columns.rs:16"
+status = "done"
+core_test = ["searching_subfolders_walks_them_and_rows_say_where_they_are"]
+swift_test = ["testSearchFiltersAsYouTypeAndFindsResultsInSubfolders", "testScriptsMatchTheirGoldenViewModels"]
+notes = "Relative to the folder as the walk resolved it, so symlinked folders (/tmp) still read short"
+
+[[feature]]
+id = "search.ends_on_open"
+area = 6
+summary = "Opening a folder ends the search (history keeps it)"
+egui_ref = "src/app/mod.rs:683"
+status = "done"
+core_test = ["opening_a_folder_ends_the_search_and_back_brings_it_back"]
+swift_test = ["testScriptsMatchTheirGoldenViewModels"]
+
+
+# 7. Saved searches
+
+[[feature]]
+id = "saved.save"
+area = 7
+summary = "Save (Cmd+S), update, revert, save as new; badge shows the saved search"
+egui_ref = "src/app/top_bottom.rs:1126"
+egui_test = ["saved_searches_save_update_delete_and_undo"]
+status = "done"
+events = ["SaveSearch", "UpdateSavedSearch", "RevertSearch"]
+core_test = ["a_search_is_saved_updated_reverted_and_run_from_the_sidebar"]
+swift_test = ["testASavedSearchShowsInTheSidebarAndRunsAgain"]
+notes = "Mac: File ▸ Save Search… (⌘S), Update Saved Search, Revert to Saved Search; the sidebar marks the running one. Save as new is Save Search… again"
+
+[[feature]]
+id = "saved.editor"
+area = 7
+summary = "Editor: name, query, match options, subfolders, scope folders, preview"
+egui_ref = "src/app/saved_searches.rs:336"
+egui_test = ["saved_search_sidebar_and_editor_snapshots"]
+status = "open"
+events = ["EditSavedSearch"]
+core_test = ["saved_searches_are_edited_duplicated_moved_deleted_and_kept"]
+notes = "Mac sheet: name, query, match case, any word, depth, favorites; choosing scope folders and the preview are still egui-only"
+
+[[feature]]
+id = "saved.run"
+area = 7
+summary = "Run in this tab or a new one"
+egui_ref = "src/app/saved_searches.rs:283"
+status = "done"
+events = ["RunSavedSearch", "RunSavedSearchInNewWindow"]
+core_test = ["a_search_is_saved_updated_reverted_and_run_from_the_sidebar", "a_saved_search_runs_in_a_new_window_at_its_folder"]
+swift_test = ["testASavedSearchShowsInTheSidebarAndRunsAgain", "testFramesSectionOrderAndFolderViewsComeBackAndSavedSearchesOpenInNewTabs"]
+notes = "Run, or Run in New Tab: a new core window the Mac joins to the window as a native tab"
+
+[[feature]]
+id = "saved.manage"
+area = 7
+summary = "Duplicate, delete, reorder, copy query"
+egui_ref = "src/app/saved_searches.rs:548"
+status = "done"
+events = ["DuplicateSavedSearch", "DeleteSavedSearch", "MoveSavedSearch"]
+core_test = ["saved_searches_are_edited_duplicated_moved_deleted_and_kept"]
+swift_test = ["testASavedSearchShowsInTheSidebarAndRunsAgain"]
+notes = "Mac: the row menu (Run, Edit…, Duplicate, Copy Query, Delete) and drag to reorder"
+
+[[feature]]
+id = "saved.undo"
+area = 7
+summary = "Every saved-search change is undoable"
+egui_ref = "src/app/saved_searches.rs:81"
+egui_test = ["saved_searches_save_update_delete_and_undo"]
+status = "done"
+core_test = ["saved_search_changes_are_undoable"]
+swift_test = ["testSearchUndoNoResultsOffersAndEscape"]
+notes = "Save, update, delete, duplicate, reorder and edit are undoable; the Swift test covers the shared Undo path through a search edit"
+
+
+# 8. Sidebar
+
+[[feature]]
+id = "sidebar.toggle"
+area = 8
+summary = "Show/hide the sidebar (Cmd+Alt+S); resizable"
+egui_ref = "src/app/mod.rs:620"
+egui_test = ["auto_collapse_keeps_preferences_and_toggle_opens_overlay"]
+status = "done"
+core_test = ["starting_lists_the_user_s_folders_and_the_drives"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+notes = "Mac: NavigationSplitView's own toggle and View ▸ Show Sidebar (⌃⌘S); the column resizes"
+
+[[feature]]
+id = "sidebar.sections"
+area = 8
+summary = "Sections collapse, reorder by drag, header menu; empty ones hide"
+egui_ref = "src/app/side_panel.rs:112"
+egui_test = ["sidebar_sections_collapse_and_reorder"]
+status = "done"
+events = ["SetSectionCollapsed", "MoveSidebarSection"]
+core_test = ["sidebar_sections_move_and_their_order_is_kept", "favorites_are_added_moved_removed_and_kept"]
+swift_test = ["testFramesSectionOrderAndFolderViewsComeBackAndSavedSearchesOpenInNewTabs"]
+notes = "Collapse (kept), hide when empty, and a header menu: Move Up / Move Down (kept), Collapse All / Expand All. Dragging headers is not offered: SwiftUI sidebar sections can't be dragged"
+
+[[feature]]
+id = "sidebar.favorites"
+area = 8
+summary = "Favorites section"
+egui_ref = "src/locations.rs:27"
+status = "done"
+core_test = ["favorites_are_added_moved_removed_and_kept"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders", "testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "sidebar.favorites_edit"
+area = 8
+summary = "Add/remove favorites from folder menus"
+egui_ref = "src/app/commands.rs:192"
+status = "done"
+events = ["AddFavorite", "RemoveFavorite", "MoveFavorite"]
+core_test = ["favorites_are_added_moved_removed_and_kept"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders", "testScriptsMatchTheirGoldenViewModels"]
+notes = "Mac: File ▸ Add to Favorites (⌃⌘T), row menus, drag to reorder"
+
+[[feature]]
+id = "sidebar.saved_searches"
+area = 8
+summary = "Saved searches section with run and menu"
+egui_ref = "src/app/saved_searches.rs:283"
+egui_test = ["saved_search_sidebar_and_editor_snapshots"]
+status = "done"
+core_test = ["a_search_is_saved_updated_reverted_and_run_from_the_sidebar"]
+swift_test = ["testASavedSearchShowsInTheSidebarAndRunsAgain"]
+
+[[feature]]
+id = "sidebar.recent"
+area = 8
+summary = "Recent section: last 5 folders, not the open one"
+egui_ref = "src/app/side_panel.rs:197"
+status = "done"
+core_test = ["recent_folders_leave_out_the_one_shown"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders", "testScriptsMatchTheirGoldenViewModels"]
+
+[[feature]]
+id = "sidebar.locations"
+area = 8
+summary = "Locations: User, Documents, Desktop, Downloads, Pictures, Music"
+egui_ref = "src/locations.rs:87"
+status = "done"
+core_test = ["starting_lists_the_user_s_folders_and_the_drives"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+
+[[feature]]
+id = "sidebar.trash"
+area = 8
+summary = "Trash row: open, drop to trash, Empty…"
+egui_ref = "src/app/trash_view.rs:143"
+status = "done"
+core_test = ["starting_lists_the_user_s_folders_and_the_drives", "pointless_drops_do_nothing_and_apps_open_what_is_dropped_on_them"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+notes = "Open, drop to trash and Empty… from its menu"
+
+[[feature]]
+id = "sidebar.drives"
+area = 8
+summary = "Drives with kind icon, capacity bar and eject on hover"
+egui_ref = "src/app/drives_ui.rs:317"
+status = "done"
+core_test = ["starting_lists_the_user_s_folders_and_the_drives"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+notes = "Mac: SF Symbol per kind, capacity bar, eject button and menu"
+
+[[feature]]
+id = "sidebar.row_actions"
+area = 8
+summary = "Rows: click goes, Cmd/middle-click opens a tab, accept drops, folder menu"
+egui_ref = "src/app/side_panel.rs:112"
+status = "open"
+core_test = ["starting_lists_the_user_s_folders_and_the_drives"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+notes = "Click goes and Open in New Tab is in the row menu; drops come with drag and drop (T6)"
+
+
+# 9. File operations
+
+[[feature]]
+id = "fileops.transfer"
+area = 9
+summary = "Copy and move"
+egui_ref = "src/app/file_ops.rs:541"
+status = "done"
+events = ["CopyTo", "MoveTo"]
+core_test = ["copying_asks_how_clashing_names_go_and_copies_into_the_same_folder_duplicate"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+notes = "The worker moved to dirfleet_effects::fileops; egui uses it too"
+
+[[feature]]
+id = "fileops.clone"
+area = 9
+summary = "APFS clones, metadata copied, symlinks kept, no partial files"
+egui_ref = "src/fileops/worker.rs:400"
+status = "done"
+core_test = ["copying_asks_how_clashing_names_go_and_copies_into_the_same_folder_duplicate"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+notes = "The same worker as egui (clonefile on macOS)"
+
+[[feature]]
+id = "fileops.conflicts"
+area = 9
+summary = "Conflict dialog: Replace, Skip, Keep both, Cancel"
+egui_ref = "src/app/file_ops.rs:1262"
+status = "done"
+events = ["ResolveConflict"]
+core_test = ["copying_asks_how_clashing_names_go_and_copies_into_the_same_folder_duplicate"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+notes = "Mac: a confirmation dialog with Replace, Skip, Keep Both, Cancel"
+
+[[feature]]
+id = "fileops.copy_names"
+area = 9
+summary = "Pasting into the same folder names copies 'name - Copy (n)'"
+egui_ref = "src/fileops/naming.rs:33"
+status = "done"
+core_test = ["copying_asks_how_clashing_names_go_and_copies_into_the_same_folder_duplicate"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+
+[[feature]]
+id = "fileops.move_copy_to"
+area = 9
+summary = "Move to / Copy to submenu (tabs, favorites, drives) and Choose folder…"
+egui_ref = "src/app/dock/entry_actions.rs:403"
+status = "done"
+core_test = ["move_and_copy_to_offer_other_tabs_favorites_and_drives_once", "copying_asks_how_clashing_names_go_and_copies_into_the_same_folder_duplicate"]
+swift_test = ["testFileOperationsRenameManyMoveToDeleteAndListActivity"]
+notes = "Move To / Copy To submenus (File menu and row menu) list other tabs' folders, favorites and drives, then Choose Folder…"
+
+[[feature]]
+id = "fileops.rename"
+area = 9
+summary = "Rename (F2) with the name preselected without extension"
+egui_ref = "src/app/file_ops.rs:988"
+egui_test = ["keyboard_selects_and_renames_without_hovering_the_list"]
+status = "done"
+events = ["StartRename", "Rename", "CancelRename"]
+core_test = ["renaming_checks_the_name_and_undo_and_redo_run_the_inverse"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+notes = "Mac: inline in the list and grid; Return renames, as in Finder"
+
+[[feature]]
+id = "fileops.rename_checks"
+area = 9
+summary = "Name checks: empty, reserved, slashes, already exists; case-only allowed"
+egui_ref = "src/fileops/naming.rs:51"
+status = "done"
+core_test = ["renaming_checks_the_name_and_undo_and_redo_run_the_inverse"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+notes = "validate_name moved to dirfleet_core::fileops; a clash is the worker's error"
+
+[[feature]]
+id = "fileops.batch_rename"
+area = 9
+summary = "Batch rename: find & replace or {name}{n}{ext} pattern, live preview"
+egui_ref = "src/app/file_ops.rs:132"
+status = "done"
+events = ["StartBatchRename", "SetBatchRename", "ApplyBatchRename", "CancelBatchRename"]
+core_test = ["renaming_several_items_previews_names_and_flags_clashes"]
+swift_test = ["testFileOperationsRenameManyMoveToDeleteAndListActivity"]
+notes = "Rename with several selected opens it; clashes are checked against the listing; one undoable RenameMany. Sheet opened by hand"
+
+[[feature]]
+id = "fileops.new_folder"
+area = 9
+summary = "New folder (Cmd+Shift+N), then rename"
+egui_ref = "src/app/file_ops.rs:520"
+status = "done"
+events = ["NewFolder"]
+core_test = ["a_new_folder_is_made_selected_and_renamed_once_listed"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+
+[[feature]]
+id = "fileops.new_text"
+area = 9
+summary = "New text document, then rename"
+egui_ref = "src/fileops/worker.rs:586"
+events = ["NewTextFile"]
+status = "done"
+core_test = ["a_new_folder_is_made_selected_and_renamed_once_listed"]
+swift_test = ["testFileOperationsRenameManyMoveToDeleteAndListActivity"]
+
+[[feature]]
+id = "fileops.duplicate"
+area = 9
+summary = "Duplicate (Cmd+D)"
+egui_ref = "src/app/file_ops.rs:533"
+status = "done"
+events = ["Duplicate"]
+core_test = ["trash_delete_and_duplicate_act_on_the_selection_but_not_in_the_trash"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+
+[[feature]]
+id = "fileops.trash"
+area = 9
+summary = "Move to Trash (Del) with an optional confirmation"
+egui_ref = "src/app/file_ops.rs:348"
+status = "open"
+events = ["TrashSelection"]
+core_test = ["trash_delete_and_duplicate_act_on_the_selection_but_not_in_the_trash"]
+notes = "Core and File ▸ Move to Trash (⌘⌫, Delete key) are in; on macOS the trash crate drives Finder, which asks for Automation permission, so no automated test trashes"
+
+[[feature]]
+id = "fileops.delete"
+area = 9
+summary = "Delete permanently (Shift+Del), always confirmed"
+egui_ref = "src/app/file_ops.rs:365"
+events = ["DeleteSelection"]
+status = "done"
+core_test = ["trash_delete_and_duplicate_act_on_the_selection_but_not_in_the_trash"]
+swift_test = ["testFileOperationsRenameManyMoveToDeleteAndListActivity"]
+notes = "The Mac asks first (Delete Immediately…); the Swift test sends the confirmed event"
+
+[[feature]]
+id = "fileops.undo"
+area = 9
+summary = "Undo/redo (Cmd+Z, Cmd+Shift+Z) with labelled entries and toasts"
+egui_ref = "src/app/file_ops.rs:630"
+status = "done"
+events = ["Undo", "Redo"]
+core_test = ["renaming_checks_the_name_and_undo_and_redo_run_the_inverse"]
+swift_test = ["testFileOperationsChangeTheDiskAndUndoReverts"]
+notes = "Mac: Edit ▸ Undo/Redo titled from the core; text being edited keeps its own undo. Result toasts come with toasts (T11)"
+
+[[feature]]
+id = "fileops.progress"
+area = 9
+summary = "Progress per operation with cancel"
+egui_ref = "src/app/file_ops.rs:930"
+status = "open"
+events = ["CancelOperation"]
+core_test = ["a_new_folder_is_made_selected_and_renamed_once_listed", "trash_delete_and_duplicate_act_on_the_selection_but_not_in_the_trash"]
+notes = "Core and a progress bar with Stop beside the path are in; no Swift test watches a long copy"
+
+[[feature]]
+id = "fileops.activity"
+area = 9
+summary = "Activity menu: last 30 operations"
+egui_ref = "src/app/file_ops.rs:930"
+status = "done"
+core_test = ["finished_operations_are_listed_newest_first_and_cut_items_counted"]
+swift_test = ["testFileOperationsRenameManyMoveToDeleteAndListActivity"]
+notes = "Toolbar Activity popover: the last 30 operations with when they finished, errors on hover, and Undo"
+
+[[feature]]
+id = "fileops.results"
+area = 9
+summary = "Result toasts: errors, cancelled, done with undo hint"
+egui_ref = "src/app/file_ops.rs:753"
+status = "done"
+core_test = ["finished_operations_and_drives_coming_and_going_show_toasts_that_expire"]
+swift_test = ["testAFinishedOperationShowsAToastThatGoesAway"]
+notes = "Done, stopped and failed; the undo hint is the Edit menu's titled Undo"
+
+
+# 10. Trash
+
+[[feature]]
+id = "trash.view"
+area = 10
+summary = "Show the Trash (reads ~/.Trash, needs Full Disk Access)"
+egui_ref = "src/app/trash_view.rs:20"
+status = "done"
+events = ["OpenTrash"]
+core_test = ["the_trash_opens_in_a_tab_and_back_returns_to_the_folder", "the_trash_keeps_its_own_view"]
+swift_test = ["testTheTrashOpensInATabAndBackLeavesIt"]
+notes = "Mac: Go ▸ Trash, the Modified column titled Deleted, its own empty state. The sidebar row comes with the sidebar (sidebar.trash)"
+
+[[feature]]
+id = "trash.empty"
+area = 10
+summary = "Empty the Trash (via Finder)"
+egui_ref = "src/fileops/trash_bin.rs:198"
+status = "open"
+events = ["EmptyTrash"]
+core_test = ["emptying_the_trash_asks_the_effects_and_folders_cannot_be_purged"]
+notes = "Core and Mac UI (File ▸ Empty Trash… ⇧⌘⌫, toolbar, confirmation) are in; no Swift test empties a real Trash, so it stays open until the XCUITest target (P0.7) can check it on disk"
+
+[[feature]]
+id = "trash.purge"
+area = 10
+summary = "Delete selected Trash items permanently"
+egui_ref = "src/fileops/trash_bin.rs:25"
+status = "open"
+events = ["PurgeSelection"]
+core_test = ["deleting_trashed_items_for_good_lists_the_trash_again"]
+notes = "Core and Mac UI (File ▸ Delete Immediately… ⌥⌘⌫, row menu, confirmation) are in; waits for an on-disk XCUITest like trash.empty"
+
+[[feature]]
+id = "trash.restore"
+area = 10
+summary = "Restore from the Trash"
+egui_ref = "src/fileops/trash_bin.rs:25"
+status = "na"
+na_mac = "Not supported on macOS in the egui app either (src/fileops/worker.rs:701)"
+events = ["RestoreSelection"]
+core_test = ["restoring_is_offered_where_the_platform_allows_it"]
+notes = "The core restores on Windows and Linux, for egui"
+
+[[feature]]
+id = "trash.no_edits"
+area = 10
+summary = "The Trash blocks rename, new, copy and paste"
+egui_ref = "src/app/mod.rs:1223"
+status = "open"
+core_test = ["the_trash_blocks_rename_copy_and_sending_items"]
+notes = "The core ignores rename, copy, cut, Copy/Move To and new items in the Trash, and Mac menus are disabled there; no Swift test, since the real Trash may need Full Disk Access"
+
+
+# 11. Clipboard & cut
+
+[[feature]]
+id = "clipboard.copy_cut_paste"
+area = 11
+summary = "Copy, cut, paste (Cmd+C/X/V), working with Finder"
+egui_ref = "src/clipboard/macos.rs:21"
+status = "open"
+events = ["CopySelection", "CutSelection", "Paste"]
+core_test = ["cut_items_are_dimmed_and_pasting_moves_them"]
+notes = "Core, effects (the egui clipboard code, moved) and Edit ▸ Copy/Cut/Paste on rows are in; no Swift test touches the user's clipboard"
+
+[[feature]]
+id = "clipboard.paste_into"
+area = 11
+summary = "Paste into a folder from its menu"
+egui_ref = "src/app/commands.rs:223"
+status = "open"
+events = ["PasteInto"]
+core_test = ["pasting_into_a_folder_sends_the_clipboard_there"]
+notes = "Paste Into Folder in the folder menus (crumbs, sidebar, folder); no Swift test, since it reads the user's clipboard"
+
+[[feature]]
+id = "clipboard.copy_path"
+area = 11
+summary = "Copy as path (Cmd+Shift+C)"
+egui_ref = "src/app/file_ops.rs:1412"
+status = "open"
+events = ["CopyPaths"]
+core_test = ["reveal_info_terminal_and_copy_act_on_the_selection_or_the_folder"]
+notes = "Core, effects (NSPasteboard; arboard elsewhere) and Edit ▸ Copy as Pathname (⌥⌘C, Finder's key) are in; no Swift test writes the clipboard"
+
+[[feature]]
+id = "clipboard.cut_dimmed"
+area = 11
+summary = "Cut items are dimmed until the clipboard changes"
+egui_ref = "src/app/dock/list_view.rs:264"
+status = "open"
+core_test = ["cut_items_are_dimmed_and_pasting_moves_them", "coming_back_to_a_window_reads_folders_sorted_by_opening_and_forgets_a_replaced_cut"]
+notes = "Cut rows are dimmed until pasted, or until another app replaces them on the clipboard (its change count, checked when a window comes to the front); no Swift test writes the user's clipboard"
+
+[[feature]]
+id = "clipboard.status"
+area = 11
+summary = "Status line 'N cut · paste to move them'"
+egui_ref = "src/app/file_ops.rs:300"
+status = "open"
+core_test = ["finished_operations_are_listed_newest_first_and_cut_items_counted"]
+notes = "'N cut · paste to move them' beside the path; no Swift test writes the clipboard"
+
+
+# 12. Drag & drop
+
+[[feature]]
+id = "dnd.inside"
+area = 12
+summary = "Drag items onto folders, empty space, crumbs, sidebar rows, drives, Trash"
+egui_ref = "src/app/dock/interaction.rs:72"
+status = "done"
+events = ["DropItems", "DropOnTrash"]
+core_test = ["drops_move_within_a_drive_copy_across_and_keys_decide", "pointless_drops_do_nothing_and_apps_open_what_is_dropped_on_them"]
+swift_test = ["testDroppedFilesMoveOnTheSameDriveOrCopyWithTheCopyKey"]
+notes = "Mac: rows drag out as files and folder rows, the folder's background, crumbs, sidebar rows, drives and the Trash take drops; a drag carries the row under the pointer, not the whole selection"
+
+[[feature]]
+id = "dnd.rule"
+area = 12
+summary = "Cmd copies, Shift moves; otherwise move on the same drive, copy across"
+egui_ref = "src/app/file_ops.rs:1320"
+status = "done"
+core_test = ["drops_move_within_a_drive_copy_across_and_keys_decide"]
+swift_test = ["testDroppedFilesMoveOnTheSameDriveOrCopyWithTheCopyKey"]
+notes = "The core decides by drive (the known mounts, longest first); shells map their keys: ⌥ copies and ⌘ moves on the Mac, as in Finder"
+
+[[feature]]
+id = "dnd.own_folder"
+area = 12
+summary = "Drops into an item's own folder or subfolders are ignored"
+egui_ref = "src/app/file_ops.rs:1338"
+egui_test = ["dropping_items_into_their_own_folder_does_nothing"]
+status = "done"
+core_test = ["pointless_drops_do_nothing_and_apps_open_what_is_dropped_on_them"]
+swift_test = ["testDroppedFilesMoveOnTheSameDriveOrCopyWithTheCopyKey"]
+
+[[feature]]
+id = "dnd.confirm"
+area = 12
+summary = "Optional 'Move or copy?' confirmation"
+egui_ref = "src/app/file_ops.rs:1134"
+egui_test = ["dropping_items_on_a_folder_asks_first"]
+status = "open"
+core_test = ["drops_move_within_a_drive_copy_across_and_keys_decide"]
+notes = "The setting and the Mac's Move/Copy/Cancel question are in; no Swift test answers it"
+
+[[feature]]
+id = "dnd.badge"
+area = 12
+summary = "A badge near the pointer says what the drop will do"
+egui_ref = "src/app/file_ops.rs:899"
+status = "na"
+na_mac = "macOS draws the drag image and its copy (+) badge itself"
+
+[[feature]]
+id = "dnd.onto_app"
+area = 12
+summary = "Dropping onto an .app opens the files with it"
+egui_ref = "src/app/file_ops.rs:1374"
+status = "done"
+core_test = ["pointless_drops_do_nothing_and_apps_open_what_is_dropped_on_them"]
+swift_test = ["testDroppedFilesMoveOnTheSameDriveOrCopyWithTheCopyKey"]
+notes = "An .app row takes drops and opens them"
+
+[[feature]]
+id = "dnd.out"
+area = 12
+summary = "Drag files out to other apps"
+egui_ref = "src/native_drag.rs:123"
+status = "open"
+notes = "Rows and tiles drag out as file URLs, a selection of several together; no automated test drags to another app, and the AppKit views' drags weren't tried by hand yet"
+
+[[feature]]
+id = "dnd.in"
+area = 12
+summary = "Drop files in from other apps, with an overlay"
+egui_ref = "src/app/file_ops.rs:811"
+status = "done"
+core_test = ["drops_move_within_a_drive_copy_across_and_keys_decide"]
+swift_test = ["testDroppedFilesMoveOnTheSameDriveOrCopyWithTheCopyKey"]
+notes = "Drops from other apps land like the app's own; while items are dragged over a folder view it is outlined and says 'Drop into …'. The overlay wasn't seen in the running app (no drags by hand)"
+
+
+# 13. Open & friends
+
+[[feature]]
+id = "open.default"
+area = 13
+summary = "Open files with the default app"
+egui_ref = "src/app/dock/entry_actions.rs:309"
+status = "open"
+core_test = ["opening_a_file_hands_it_to_its_app_and_packages_open_too", "opening_several_folders_opens_tabs_and_files_open_together"]
+notes = "Core, effects (open crate) and Mac (double-click, File ▸ Open, row menu) are in; no Swift test launches apps, so it stays open until a UI test can check it"
+
+[[feature]]
+id = "open.history"
+area = 13
+summary = "Opened files are counted (Date opened, Opens)"
+egui_ref = "src/app/open_history.rs"
+status = "done"
+core_test = ["opened_files_are_counted_shown_and_forgotten"]
+swift_test = ["testOpenHistoryShowsInColumnsAndIsForgottenAndCleared"]
+notes = "Core and effects (dirfleet_effects::open_history, JSON beside the state) are in: Opened and Opens columns, sorts, opened: filters, the inspector. The Swift test reads a seeded history; counting an open is the core test's, since a Swift test can't launch apps"
+
+[[feature]]
+id = "open.history_remove"
+area = 13
+summary = "Remove from open history"
+egui_ref = "src/app/dock/entry_actions.rs:168"
+events = ["ForgetOpened", "ClearOpenHistory"]
+status = "done"
+core_test = ["opened_files_are_counted_shown_and_forgotten"]
+swift_test = ["testOpenHistoryShowsInColumnsAndIsForgottenAndCleared"]
+notes = "Remove from Open History in the row menu and Clear… in Settings; the Swift test checks the columns and the file on disk"
+
+[[feature]]
+id = "open.package_contents"
+area = 13
+summary = "Show Package Contents"
+egui_ref = "src/app/dock/entry_actions.rs:40"
+events = ["ShowPackageContents"]
+status = "done"
+core_test = ["opening_a_file_hands_it_to_its_app_and_packages_open_too"]
+swift_test = ["testFileOperationsRenameManyMoveToDeleteAndListActivity"]
+
+[[feature]]
+id = "open.with"
+area = 13
+summary = "Open with… (choose an app)"
+egui_ref = "src/macos_tools.rs:75"
+status = "done"
+events = ["OpenWith"]
+core_test = ["open_with_asks_for_an_app_and_a_failure_becomes_a_toast"]
+swift_test = ["testOpenWithAsksTheShellForAnApp"]
+notes = "A PickApp shell effect: NSOpenPanel limited to applications"
+
+[[feature]]
+id = "open.reveal"
+area = 13
+summary = "Show in Finder"
+egui_ref = "src/app/menus.rs:22"
+status = "open"
+events = ["RevealSelection"]
+core_test = ["reveal_info_terminal_and_copy_act_on_the_selection_or_the_folder"]
+notes = "Core, effects (open -R) and File ▸ Show in Finder (⌥⌘R) are in; no Swift test opens Finder"
+
+[[feature]]
+id = "open.system_fm"
+area = 13
+summary = "Open in Finder"
+egui_ref = "src/app/menus.rs:11"
+status = "open"
+events = ["OpenInFileManager"]
+core_test = ["a_path_from_a_crumb_is_revealed_opened_or_copied"]
+notes = "Open in Finder in every folder menu (sidebar rows, crumbs, the empty area); a package is shown in Finder rather than launched, as egui. No Swift test opens Finder"
+
+[[feature]]
+id = "open.terminal"
+area = 13
+summary = "Open in terminal"
+egui_ref = "src/app/settings.rs:233"
+status = "open"
+events = ["OpenInTerminal"]
+core_test = ["reveal_info_terminal_and_copy_act_on_the_selection_or_the_folder"]
+notes = "Core, effects and File ▸ Open in Terminal are in; the terminal setting comes with settings (T11)"
+
+[[feature]]
+id = "open.get_info"
+area = 13
+summary = "Get Info"
+egui_ref = "src/macos_tools.rs:56"
+status = "open"
+events = ["GetInfo"]
+core_test = ["reveal_info_terminal_and_copy_act_on_the_selection_or_the_folder"]
+notes = "Core, effects (Finder via osascript) and File ▸ Get Info (⌘I) are in; no Swift test opens Finder"
+
+[[feature]]
+id = "open.windows_menu"
+area = 13
+summary = "Windows Explorer context menu"
+egui_ref = "src/app/system_menu.rs"
+status = "na"
+na_mac = "Windows only"
+egui_test = ["windows_context_menu_needs_one_parent_folder"]
+
+
+# 14. Drives
+
+[[feature]]
+id = "drives.list"
+area = 14
+summary = "Drives polled every 2 s with their kind"
+egui_ref = "src/drives/macos.rs"
+status = "done"
+core_test = ["starting_lists_the_user_s_folders_and_the_drives"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+notes = "Polled every 2 s by dirfleet_effects::places (drives moved to dirfleet_effects::drives)"
+
+[[feature]]
+id = "drives.capacity"
+area = 14
+summary = "Free space in the status bar with details"
+egui_ref = "src/app/drives_ui.rs:190"
+status = "done"
+core_test = ["the_status_line_says_how_much_room_the_drive_has"]
+swift_test = ["testTheStatusLineShowsFreeSpaceAndARightClickSelectsItsRow"]
+notes = "A Finder-style status bar: item and selection counts, the drive's free space (mount, capacity and file system on hover) and an eject button; seen in the built app"
+
+[[feature]]
+id = "drives.eject"
+area = 14
+summary = "Eject"
+egui_ref = "src/drives/macos.rs:28"
+status = "done"
+events = ["EjectDrive"]
+core_test = ["ejecting_moves_tabs_on_the_drive_home_and_a_refusal_says_why"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+notes = "A refusal shows as an error toast"
+
+[[feature]]
+id = "drives.eject_busy"
+area = 14
+summary = "Asks first when operations run on the drive"
+egui_ref = "src/app/drives_ui.rs:383"
+status = "done"
+events = ["ConfirmEject", "CancelEject"]
+core_test = ["ejecting_a_busy_drive_asks_first_and_cancels_its_operations"]
+swift_test = ["testTheStatusLineShowsFreeSpaceAndARightClickSelectsItsRow"]
+notes = "Ejecting with operations running asks (egui's wording); Eject cancels them first. The Swift test covers the status path only: no removable drive in CI"
+
+[[feature]]
+id = "drives.toasts"
+area = 14
+summary = "Connected/disconnected/ejected toasts"
+egui_ref = "src/app/drives_ui.rs"
+status = "done"
+core_test = ["finished_operations_and_drives_coming_and_going_show_toasts_that_expire", "ejecting_moves_tabs_on_the_drive_home_and_a_refusal_says_why"]
+swift_test = ["testAFinishedOperationShowsAToastThatGoesAway"]
+
+[[feature]]
+id = "drives.tabs_go_home"
+area = 14
+summary = "Tabs on a removed drive move to home"
+egui_ref = "src/app/drives_ui.rs"
+status = "done"
+core_test = ["ejecting_moves_tabs_on_the_drive_home_and_a_refusal_says_why"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+
+
+# 15. Inspector
+
+[[feature]]
+id = "inspector.toggle"
+area = 15
+summary = "Show/hide the inspector (Cmd+Alt+I); resizable"
+egui_ref = "src/app/inspector.rs:119"
+status = "done"
+events = ["SetInspector"]
+core_test = ["the_inspector_sums_up_several_items_and_its_state_is_kept"]
+swift_test = ["testTheInspectorDescribesTheSelectionAndAddsUpAFolder"]
+notes = "Mac: the native .inspector, View ▸ Show Inspector (⌥⌘I) and a toolbar button; kept between launches"
+
+[[feature]]
+id = "inspector.single"
+area = 15
+summary = "One item: name, path, type, size, dates, times opened"
+egui_ref = "src/app/inspector.rs:37"
+egui_test = ["inspector_selection_states_and_split_panes"]
+status = "done"
+core_test = ["the_inspector_describes_one_item_and_adds_up_a_folder_on_request", "opened_files_are_counted_shown_and_forgotten"]
+swift_test = ["testTheInspectorDescribesTheSelectionAndAddsUpAFolder"]
+notes = "Times opened shows once the file was opened from the app"
+
+[[feature]]
+id = "inspector.folder_size"
+area = 15
+summary = "Calculate a folder's size (hardlinks counted once)"
+egui_ref = "src/app/inspector.rs:266"
+status = "done"
+events = ["CalculateSize"]
+core_test = ["the_inspector_describes_one_item_and_adds_up_a_folder_on_request"]
+swift_test = ["testTheInspectorDescribesTheSelectionAndAddsUpAFolder"]
+notes = "The plugins' usage walk moved to dirfleet_effects::usage"
+
+[[feature]]
+id = "inspector.buttons"
+area = 15
+summary = "Open and Copy as path buttons"
+egui_ref = "src/app/inspector.rs:37"
+status = "done"
+core_test = ["the_inspector_describes_one_item_and_adds_up_a_folder_on_request"]
+swift_test = ["testTheInspectorDescribesTheSelectionAndAddsUpAFolder"]
+notes = "Open, Copy as Pathname and Show in Finder"
+
+[[feature]]
+id = "inspector.multi"
+area = 15
+summary = "Several items: counts, total size, by kind, action buttons"
+egui_ref = "src/app/inspector.rs:297"
+status = "done"
+core_test = ["the_inspector_sums_up_several_items_and_its_state_is_kept"]
+swift_test = ["testTheInspectorDescribesTheSelectionAndAddsUpAFolder"]
+notes = "Counts, files total and kinds, with Copy, Duplicate and Move to Trash"
+
+[[feature]]
+id = "inspector.preview"
+area = 15
+summary = "Preview card: loading, ready, unavailable with retry"
+egui_ref = "src/app/inspector.rs:162"
+egui_test = ["inspector_preview_loading_ready_and_failure"]
+status = "done"
+events = ["RetryPreview"]
+core_test = ["the_inspector_previews_its_item_and_retries_when_asked"]
+swift_test = ["testImagesGetThumbnailsInRowsTilesAndTheInspector"]
+notes = "Images and videos show the core's thumbnail (loading, ready, unavailable with Try Again); other files keep Quick Look's thumbnail"
+
+
+# 16. Previews & thumbnails
+
+[[feature]]
+id = "previews.images"
+area = 16
+summary = "Image thumbnails (png, jpg, bmp, webp, tiff, ico, tga)"
+egui_ref = "crates/dirfleet_core/src/listing/kinds.rs"
+status = "done"
+core_test = ["shown_images_and_videos_get_thumbnails_once", "an_image_thumbnail_is_saved_once_and_found_again"]
+swift_test = ["testImagesGetThumbnailsInRowsTilesAndTheInspector"]
+notes = "The egui decoder and disk cache, moved to dirfleet_effects::media; the core asks for shown rows, 8 at a time"
+
+[[feature]]
+id = "previews.gif"
+area = 16
+summary = "Animated GIFs"
+egui_ref = "crates/dirfleet_core/src/listing/kinds.rs"
+status = "done"
+core_test = ["a_gif_plays_from_a_cached_animation"]
+swift_test = ["testAGifTilePlaysOnHoverAndWhenSelected"]
+notes = "Frames decoded by the shared media code and saved as a looping GIF in the cache; the Mac app plays it in an NSImageView"
+
+[[feature]]
+id = "previews.video"
+area = 16
+summary = "Video thumbnails and animated frames"
+egui_ref = "src/app/assets.rs:777"
+status = "open"
+core_test = ["a_video_tile_plays_once_the_pointer_rests_on_it", "the_inspector_plays_a_selected_video"]
+notes = "Posters and animated frames come from the shared FFmpeg code; checked by hand on the Mac (tile on hover, inspector); no Swift test, since CI may lack FFmpeg"
+
+[[feature]]
+id = "previews.hover"
+area = 16
+summary = "Hover preview after 250 ms"
+egui_ref = "src/app/assets.rs:53"
+status = "done"
+events = ["HoverRow"]
+core_test = ["a_video_tile_plays_once_the_pointer_rests_on_it", "moving_on_before_the_pointer_rests_plays_nothing", "lists_play_nothing_on_hover"]
+swift_test = ["testAGifTilePlaysOnHoverAndWhenSelected"]
+notes = "A grid tile plays once the pointer rests on it for 250 ms (a Delay in the core); hover is tracked on the whole tile"
+
+[[feature]]
+id = "previews.icons"
+area = 16
+summary = "System file icons"
+egui_ref = "src/macos_tools.rs:21"
+status = "open"
+
+[[feature]]
+id = "previews.cache"
+area = 16
+summary = "Thumbnails cached on disk"
+egui_ref = "crates/dirfleet_effects/src/media/cache.rs:237"
+status = "open"
+core_test = ["an_image_thumbnail_is_saved_once_and_found_again"]
+notes = "The egui disk cache serves both apps now; no Swift test proves a cache hit yet"
+
+[[feature]]
+id = "previews.grid"
+area = 16
+summary = "Grid tiles show thumbnails with a frame"
+egui_ref = "src/app/dock/grid_view.rs:186"
+status = "done"
+core_test = ["icons_ask_at_the_icon_size_and_changed_files_ask_again"]
+swift_test = ["testImagesGetThumbnailsInRowsTilesAndTheInspector"]
+notes = "Tiles ask at the icon size (2x); thumbnails drawn with a thin frame and shadow"
+
+[[feature]]
+id = "previews.ffmpeg"
+area = 16
+summary = "FFmpeg found or downloaded (checksum-checked) with toasts"
+egui_ref = "crates/dirfleet_effects/src/media/ffmpeg_install.rs"
+status = "open"
+core_test = ["media_notices_become_toasts"]
+notes = "The core listens to media notices from the start and shows them as toasts; FFmpeg is fetched at start only with a state file and without DIRFLEET_NO_DOWNLOADS (tests set it). Homebrew's folders are searched too. The download itself isn't tested on the Mac"
+
+[[feature]]
+id = "previews.picker"
+area = 16
+summary = "Select thumbnail… dialog with frame timeline and keyboard"
+egui_ref = "src/app/thumbnail_picker.rs:501"
+egui_test = ["thumbnail_picker_fills_gaps_and_applies_a_clicked_frame", "thumbnail_picker_moves_and_applies_by_keyboard"]
+status = "done"
+events = ["SelectThumbnail", "SelectPickerFrame", "StepPickerFrame", "FillPickerGap", "UsePickerFrame", "ClosePicker"]
+core_test = ["a_video_s_thumbnail_is_chosen_from_its_frames_and_reset", "a_failed_video_says_why_and_a_late_frame_for_a_closed_dialog_is_dropped"]
+swift_test = ["testAVideosThumbnailIsChosenFromItsFramesAndReset"]
+notes = "The frame timeline moved to dirfleet_core (egui uses it from there); the picker's state is the core's. Mac sheet: large preview, a sheet of frames with + between them, arrow keys, Return, double-click. Frames come from the shared FFmpeg code as image files. The Swift test makes a clip with FFmpeg (skipped without it); the sheet was checked as a render, not opened in the running app"
+
+[[feature]]
+id = "previews.reset"
+area = 16
+summary = "Reset a chosen thumbnail; choices reset when the file changes"
+egui_ref = "src/app/thumbnail_choice.rs"
+status = "done"
+events = ["ResetThumbnail", "ResetPickerFrame"]
+core_test = ["a_video_s_thumbnail_is_chosen_from_its_frames_and_reset", "a_choice_made_for_an_earlier_version_of_the_file_is_not_used"]
+swift_test = ["testAVideosThumbnailIsChosenFromItsFramesAndReset"]
+notes = "Reset Thumbnail in the row menu (when one was chosen) and Reset to Default in the picker; a choice holds only for the revision and size it was made for"
+
+[[feature]]
+id = "previews.atime"
+area = 16
+summary = "Reading for thumbnails doesn't change last-access times"
+egui_ref = "crates/dirfleet_effects/src/access_time.rs"
+status = "open"
+
+
+# 17. Plugins
+
+[[feature]]
+id = "plugins.load"
+area = 17
+summary = "Bundled and user plugins load"
+egui_ref = "src/plugins/discovery.rs:17"
+status = "done"
+events = ["ReloadPlugins"]
+core_test = ["plugins_start_when_enabled_and_approved_and_ask_again_when_they_want_more", "bundled_plugins_load_and_compile", "scans_folders_and_reports_broken_ones"]
+swift_test = ["testAUserPluginIsTurnedOnAndItsActionRunsOnTheSelection"]
+notes = "Discovery and the Lua runtime moved to dirfleet_effects::plugins (egui uses them from there); the Mac app reads bundled plugins and the plugins folder beside its state, and Reload Plugins in Settings finds them again. The folder isn't watched yet (plugins.reload)"
+
+[[feature]]
+id = "plugins.reload"
+area = 17
+summary = "The plugins folder is watched; plugins hot-reload"
+egui_ref = "src/plugins/host.rs:244"
+status = "done"
+core_test = ["an_edited_plugin_folder_loads_the_plugins_again"]
+swift_test = ["testPluginShortcutsTheSandboxAndAnEditedPluginReloading"]
+notes = "The effects watch the plugins folder (canonical path, dot folders skipped, 300 ms debounce) and the core toasts Plugin reloaded and loads the plugins again; enabled plugins restart with the new code"
+
+[[feature]]
+id = "plugins.activation"
+area = 17
+summary = "Manifest activation rules (always, contains, ancestor, glob)"
+egui_ref = "src/plugins/manifest.rs:16"
+status = "done"
+core_test = ["folder_actions_show_where_their_activation_holds_and_act_on_the_folder"]
+swift_test = ["testFolderActionsAndAResultsDialogFromARealPlugin"]
+notes = "Folder actions show where the plugin's activation holds: always without looking, otherwise checked by the effects per shown folder (ActivationExt), cached by the core and checked again when the folder is read again"
+
+[[feature]]
+id = "plugins.actions"
+area = 17
+summary = "Plugin actions in context menus and the palette"
+egui_ref = "src/app/dock/entry_actions.rs:168"
+status = "done"
+events = ["RunPluginAction"]
+core_test = ["running_plugins_offer_their_actions_for_the_selection_and_run_them_on_their_worker", "folder_actions_show_where_their_activation_holds_and_act_on_the_folder", "the_palette_offers_plugin_actions_that_apply"]
+swift_test = ["testAUserPluginIsTurnedOnAndItsActionRunsOnTheSelection", "testFolderActionsAndAResultsDialogFromARealPlugin", "testAPluginsBarInspectorEventsAndPaletteAction"]
+notes = "Item actions in the item menu, folder (current_dir) actions in the empty area's menu where their activation holds, and in the palette those marked for it that apply, as egui's. The palette lists the first window's tab's; running one acts on the palette's window's tab"
+
+[[feature]]
+id = "plugins.permissions"
+area = 17
+summary = "Permissions with approval; re-approval when they grow"
+egui_ref = "src/plugins/permissions.rs"
+status = "done"
+events = ["ApprovePlugin"]
+core_test = ["plugins_start_when_enabled_and_approved_and_ask_again_when_they_want_more", "permissions_are_enforced"]
+swift_test = ["testAUserPluginIsTurnedOnAndItsActionRunsOnTheSelection"]
+notes = "A user plugin asking for permissions waits for Allow in Settings > Plugins; one whose permissions grow needs it again (the approval is a fingerprint, kept in the saved state)"
+
+[[feature]]
+id = "plugins.forms"
+area = 17
+summary = "Forms with 13 field types, conditions, remembered values, validation"
+egui_ref = "src/plugins/form.rs"
+egui_test = ["commands_window_opens_plugin_forms"]
+status = "done"
+events = ["SetPluginFormField", "SubmitPluginForm", "CancelPluginForm"]
+core_test = ["a_plugin_form_is_checked_then_validated_by_the_plugin_and_remembered", "a_form_the_plugin_accepts_runs_its_action_with_the_values_and_remembers_them", "a_form_lua_makes_shows_once_it_arrives_or_says_why_not"]
+swift_test = ["testAPluginFormIsValidatedByLuaAndAJobRunsPerItem"]
+notes = "The core holds the form (manifest fields, Lua's form(ctx), or a confirmation), checks it with egui_mev_data_core's rules, then the plugin's validate, and remembers values for remember forms in the saved state. Mac sheet draws all 13 field kinds from the core's rows (sliders, radio groups, Choose… for paths by mode); checked as a render, not opened in the running app"
+
+[[feature]]
+id = "plugins.results"
+area = 17
+summary = "Results dialog: sortable table, Run/Stop/background, reopen"
+egui_ref = "src/plugins/panel.rs:99"
+egui_test = ["results_dialog_runs_in_the_background", "results_dialog_stops_and_restarts", "results_dialog_filters_by_size", "results_dialog_snapshot", "results_dialog_scanning_snapshots"]
+status = "done"
+events = ["RunPluginResults", "StopPluginResults", "HidePluginResults", "ShowPluginResults", "SetPluginResultsField", "SortPluginResults", "FilterPluginResults", "OpenPluginResultsRow"]
+core_test = ["a_results_dialog_opens_with_its_options_and_runs_once_validated", "a_results_table_sorts_filters_and_waits_for_its_job_before_row_actions"]
+swift_test = ["testFolderActionsAndAResultsDialogFromARealPlugin"]
+notes = "The core keeps each dialog: options, Run/Restart/Stop/Run in background, the table (egui_mev_data_core's Table: sort, size filter, subtitle, summary), a note when Run would scan elsewhere, and keeps the sort and filter between runs. The Mac sheet draws it; a job's progress title brings it back. The built-in Folder Usage was checked as a render, not in the running app"
+
+[[feature]]
+id = "plugins.row_menu"
+area = 17
+summary = "Result rows have a menu and show what is happening to them"
+egui_ref = "src/plugins/panel.rs:99"
+egui_test = ["row_menu_asks_then_removes_and_updates_the_row", "row_menu_keeps_the_rust_clean_checks", "row_menu_waits_for_the_scan", "rows_show_what_is_happening_to_them"]
+status = "done"
+events = ["RefreshPluginResultsRow", "PluginResultsRowAction"]
+core_test = ["a_result_row_runs_its_action_is_measured_again_and_opens"]
+swift_test = ["testFolderActionsAndAResultsDialogFromARealPlugin"]
+notes = "Row menus: Open in new tab, Measure again, the row's own actions (asking a form first when they have one), Copy path; a row says what is happening (Waiting, its action's busy text, Measuring, Failed) and is measured again, quietly, after its action. Unlike egui, a row is measured right after its action rather than after the file operations it asked for settle"
+
+[[feature]]
+id = "plugins.bar"
+area = 17
+summary = "Bar segments below the file view"
+egui_ref = "src/plugins/ui.rs:27"
+status = "done"
+core_test = ["a_plugin_bar_is_asked_for_shown_and_asked_again_when_stale"]
+swift_test = ["testAPluginsBarInspectorEventsAndPaletteAction"]
+notes = "The core asks plugins with a bar that apply in each shown folder, and again when one of their actions or jobs ends, they say so, the folder changes, or refresh_secs pass (counted from the first clock tick). Mac: a strip above the status bar with text, badges, buttons that run the plugin's action, spinners and tones"
+
+[[feature]]
+id = "plugins.inspector"
+area = 17
+summary = "Plugin inspector sections"
+egui_ref = "src/plugins/ui.rs:129"
+status = "done"
+core_test = ["a_plugin_inspector_section_follows_the_selection"]
+swift_test = ["testAPluginsBarInspectorEventsAndPaletteAction"]
+notes = "Sections for the focused tab's selection while the inspector is shown, where the section's targets and the plugin's activation hold; asked again when the selection or folder changes"
+
+[[feature]]
+id = "plugins.jobs"
+area = 17
+summary = "Jobs with progress and cancel, at most 2 at once"
+egui_ref = "src/plugins/jobs.rs"
+status = "done"
+events = ["CancelPluginJob"]
+core_test = ["plugin_jobs_wait_their_turn_report_progress_and_say_how_they_went"]
+swift_test = ["testAPluginFormIsValidatedByLuaAndAJobRunsPerItem"]
+notes = "Jobs run on threads in the effects; the core queues them (2 at once, and each plugin's max_jobs), shows progress beside file operations with Cancel, and toasts egui's summary"
+
+[[feature]]
+id = "plugins.shortcuts"
+area = 17
+summary = "Plugin shortcuts, editable, with clash notes"
+egui_ref = "src/plugins/keymap.rs:15"
+status = "done"
+events = ["SetPluginShortcut"]
+core_test = ["plugin_shortcuts_bind_unless_they_clash", "plugin_shortcuts_can_be_changed", "shortcuts_read_as_the_app_writes_its_own"]
+swift_test = ["testPluginShortcutsTheSandboxAndAnEditedPluginReloading"]
+notes = "The core binds each running plugin's shortcuts (the user's own or the manifest's) unless they clash with an app command or an earlier plugin action, and says why in Settings. Mac: a Plugins menu with the bound actions as menu keys, run on the focused tab (asking first when the action says to), plus Reload Plugins"
+
+[[feature]]
+id = "plugins.api"
+area = 17
+summary = "The Lua API (path, fs, ops, process, ffmpeg, app, clipboard, storage…)"
+egui_ref = "src/plugins/api.rs:29"
+egui_test = ["folder_usage_and_rust_clean_through_the_app"]
+status = "done"
+core_test = ["plugin_messages_become_toasts_navigation_and_file_operations", "permissions_are_enforced", "path_helpers", "fs_reads_with_permission_and_rejects_relative_paths", "process_run_streams_lines"]
+swift_test = ["testPluginShortcutsTheSandboxAndAnEditedPluginReloading", "testFolderActionsAndAResultsDialogFromARealPlugin"]
+notes = "The Lua API runs in dirfleet_effects; app requests (open, new tab, refresh, select, system open, terminal, file operations, clipboard, notify, tables) are handled by the core. The Swift test checks a missing fs.read permission fails the call"
+
+[[feature]]
+id = "plugins.events"
+area = 17
+summary = "Plugin events: app started, folder opened, selection, fs changed, op finished, job finished"
+egui_ref = "src/plugins/manifest.rs:16"
+status = "done"
+core_test = ["plugins_hear_the_events_they_subscribe_to"]
+swift_test = ["testAPluginsBarInspectorEventsAndPaletteAction"]
+notes = "app_started (once per run), folder_opened, selection_changed (after the selection rests 250 ms), fs_changed, file_op_finished and job_finished go to subscribed running plugins with egui's payloads"
+
+[[feature]]
+id = "plugins.sandbox"
+area = 17
+summary = "Lua time and memory limits; unsafe libraries removed"
+egui_ref = "src/plugins/sandbox.rs"
+status = "done"
+core_test = ["runaway_code_is_stopped_by_the_budget", "memory_is_capped", "dangerous_globals_are_gone", "require_sees_only_plugin_files"]
+swift_test = ["testPluginShortcutsTheSandboxAndAnEditedPluginReloading"]
+notes = "A quick action looping forever is stopped after 2 seconds and the error is listed under the plugin in Settings"
+
+[[feature]]
+id = "plugins.settings"
+area = 17
+summary = "Settings ▸ Plugins: enable, approve, ffmpeg, shortcuts, errors, broken plugins"
+egui_ref = "src/plugins/ui.rs:269"
+events = ["SetPluginEnabled", "SetPluginShortcut"]
+status = "done"
+core_test = ["plugins_start_when_enabled_and_approved_and_ask_again_when_they_want_more", "plugin_shortcuts_bind_unless_they_clash", "plugin_shortcuts_can_be_changed", "plugins_that_use_ffmpeg_say_whether_it_is_there"]
+swift_test = ["testAUserPluginIsTurnedOnAndItsActionRunsOnTheSelection", "testPluginShortcutsTheSandboxAndAnEditedPluginReloading"]
+notes = "Mac Settings > Plugins: each plugin with its switch, version, author, status, permissions with Allow, whether FFmpeg is there for plugins that use it (found without starting the download), a Shortcuts group with a field and clash note per action, errors, broken folders, Reload"
+
+
+# 18. Context menus
+
+[[feature]]
+id = "menu.item"
+area = 18
+summary = "Item menu with open, edit, thumbnail, More, favorites, plugins, Get Info"
+egui_ref = "src/app/dock/entry_actions.rs:168"
+status = "open"
+egui_test = ["entry_menu_keeps_rare_actions_in_submenus", "entry_menu_uses_a_thumbnail_submenu_only_for_two_options"]
+
+[[feature]]
+id = "menu.empty_area"
+area = 18
+summary = "Empty-area menu: view, sort, hidden, refresh, paste, new, undo, folder actions"
+egui_ref = "src/app/dock/entry_actions.rs:241"
+status = "open"
+core_test = ["a_path_from_a_crumb_is_revealed_opened_or_copied"]
+notes = "Mac: New Folder, New Text Document, Paste, View, Refresh, Undo and the folder's actions; no Swift test opens menus"
+
+[[feature]]
+id = "menu.trash_row"
+area = 18
+summary = "Trash item menu"
+egui_ref = "src/app/dock/entry_actions.rs:293"
+status = "open"
+notes = "List and grid Trash rows: Put Back (where possible), Delete Immediately…, Show in Finder, Copy as Pathname; no Swift test opens menus"
+
+[[feature]]
+id = "menu.folder_rows"
+area = 18
+summary = "Sidebar, crumb and drive rows share the folder actions"
+egui_ref = "src/app/menus.rs:86"
+status = "open"
+events = ["RevealPath", "CopyPath"]
+core_test = ["a_path_from_a_crumb_is_revealed_opened_or_copied"]
+notes = "Mac: sidebar rows, crumbs and the empty area share Open in New Tab, favorites, Show in Finder, Copy as Pathname; no Swift test opens menus"
+
+[[feature]]
+id = "menu.more"
+area = 18
+summary = "Toolbar More menu"
+egui_ref = "src/app/top_bottom.rs:701"
+egui_test = ["top_bar_names_hidden_folders_and_marks_the_shown_panels"]
+status = "open"
+notes = "Toolbar More menu: view options, inspector, Refresh, Go to Folder, Open in Terminal, New Folder / Text Document, Commands, Keyboard Shortcuts, Settings; no Swift test opens menus"
+
+[[feature]]
+id = "menu.scroll"
+area = 18
+summary = "Menus taller than the window scroll"
+egui_ref = "src/app/menus.rs:44"
+status = "na"
+na_mac = "Native menus scroll on their own"
+egui_test = ["entry_menu_scrolls_inside_a_short_window"]
+
+
+# 19. Commands & keys
+
+[[feature]]
+id = "commands.palette"
+area = 19
+summary = "Command palette (Cmd+Shift+P, Cmd+K)"
+egui_ref = "src/app/command_palette.rs"
+egui_test = ["command_palette_supports_keyboard_choice"]
+status = "done"
+events = ["SetPaletteText", "ClosePalette"]
+core_test = ["the_palette_matches_commands_favorites_and_saved_searches"]
+swift_test = ["testThePaletteFindsAFavoriteAndRunsIt"]
+notes = "Mac: Edit ▸ Commands… (⇧⌘P) opens it in the focused window; arrows choose, Return runs"
+
+[[feature]]
+id = "commands.palette_sources"
+area = 19
+summary = "Palette lists commands, drives, plugin actions, recent folders, saved searches"
+egui_ref = "src/app/mod.rs:1284"
+status = "done"
+core_test = ["the_palette_matches_commands_favorites_and_saved_searches", "the_palette_offers_plugin_actions_that_apply"]
+swift_test = ["testThePaletteFindsAFavoriteAndRunsIt", "testAPluginsBarInspectorEventsAndPaletteAction"]
+notes = "Commands, favorites, saved searches, recent folders, drives and plugin actions"
+
+[[feature]]
+id = "commands.keymap"
+area = 19
+summary = "Default keyboard shortcuts for every command"
+egui_ref = "src/app/keymap.rs:13"
+status = "done"
+core_test = ["the_palette_matches_commands_favorites_and_saved_searches"]
+swift_test = ["testThePaletteFindsAFavoriteAndRunsIt"]
+notes = "Every command has its platform shortcut in dirfleet_core::app::palette; the Mac menus use the same keys"
+
+[[feature]]
+id = "commands.shortcuts_overlay"
+area = 19
+summary = "Keyboard shortcuts list (F1, Cmd+/)"
+egui_ref = "src/app/keymap.rs:259"
+status = "done"
+core_test = ["the_palette_matches_commands_favorites_and_saved_searches"]
+swift_test = ["testThePaletteFindsAFavoriteAndRunsIt"]
+notes = "Mac: Help ▸ Keyboard Shortcuts (⌘/)"
+
+[[feature]]
+id = "commands.menu_bar"
+area = 19
+summary = "Commands in the macOS menu bar (Mac addition)"
+status = "done"
+core_test = ["the_palette_matches_commands_favorites_and_saved_searches"]
+swift_test = ["testThePaletteFindsAFavoriteAndRunsIt"]
+notes = "File, Edit, View, Go and Window menus carry the commands"
+
+[[feature]]
+id = "commands.platform_labels"
+area = 19
+summary = "Shortcut labels and keys follow the platform (no 'Ctrl' on macOS)"
+egui_ref = "src/app/keymap.rs:13"
+status = "done"
+core_test = ["the_palette_matches_commands_favorites_and_saved_searches"]
+swift_test = ["testThePaletteFindsAFavoriteAndRunsIt"]
+notes = "Mac labels use ⌘⌥⇧⌃ (no 'Ctrl'); Finder's keys where Finder has one"
+
+
+# 20. Settings
+
+[[feature]]
+id = "settings.window"
+area = 20
+summary = "Settings window with pages and restore defaults"
+egui_ref = "src/app/settings.rs:109"
+egui_test = ["settings_switches_restore_defaults_and_close"]
+status = "done"
+events = ["ChangeSettings", "RestoreDefaultSettings"]
+core_test = ["settings_change_the_sidebar_and_terminal_and_are_kept"]
+swift_test = ["testSettingsApplyAndComeBackOnTheNextStart"]
+notes = "Mac: DirFleet ▸ Settings… (⌘,) with General, Appearance and Folders pages and Restore Defaults; plugin and keyboard pages come with their tracks"
+
+[[feature]]
+id = "settings.terminal"
+area = 20
+summary = "Terminal path with Browse… and a 'not found' warning"
+egui_ref = "src/app/settings.rs:233"
+status = "done"
+core_test = ["the_terminal_is_checked_at_start_and_when_it_changes", "terminals_are_found_by_name_or_path"]
+swift_test = ["testAccessTerminalAndAboutAfterStart"]
+notes = "Choose… plus a warning when no app has that name"
+
+[[feature]]
+id = "settings.fda"
+area = 20
+summary = "Full Disk Access status and suggestion toggle"
+egui_ref = "src/app/settings.rs:482"
+status = "done"
+core_test = ["the_banner_hides_for_tests_when_dismissed_and_after_dont_ask_again"]
+swift_test = ["testAccessTerminalAndAboutAfterStart"]
+notes = "Settings ▸ General ▸ Privacy: status, Open System Settings, Suggest at launch"
+
+[[feature]]
+id = "settings.about"
+area = 20
+summary = "Version, git hash, project website"
+egui_ref = "src/app/settings.rs:109"
+status = "done"
+core_test = ["the_terminal_is_checked_at_start_and_when_it_changes"]
+swift_test = ["testAccessTerminalAndAboutAfterStart"]
+notes = "Version and commit (the core's build script) and the project website"
+
+[[feature]]
+id = "settings.theme"
+area = 20
+summary = "App theme: System, Light, Dark"
+egui_ref = "src/app/settings.rs:109"
+egui_test = ["full_window_appearances_and_compact_layouts", "appearance_change_keeps_file_labels_visible", "theme_tokens_meet_contrast", "search_settings_and_overlay_snapshots", "fluent_windows_grids_compact_settings_and_appearance_switching"]
+status = "done"
+core_test = ["settings_change_the_sidebar_and_terminal_and_are_kept"]
+swift_test = ["testSettingsApplyAndComeBackOnTheNextStart"]
+
+[[feature]]
+id = "settings.sidebar_items"
+area = 20
+summary = "Sidebar, inspector, recent, Trash, drive capacity and drive notification toggles"
+egui_ref = "src/app/settings.rs:109"
+status = "done"
+core_test = ["settings_change_the_sidebar_and_terminal_and_are_kept"]
+swift_test = ["testSettingsApplyAndComeBackOnTheNextStart"]
+notes = "Recent, Trash, drive capacity and drive notifications; the sidebar and inspector are shown and hidden from the View menu"
+
+[[feature]]
+id = "settings.folder_defaults"
+area = 20
+summary = "Defaults for folders: view, sort, reverse, hidden"
+egui_ref = "src/app/settings.rs:109"
+status = "done"
+events = ["SetFolderDefaults"]
+core_test = ["folder_defaults_apply_to_folders_without_a_view_of_their_own"]
+swift_test = ["testSettingsApplyAndComeBackOnTheNextStart"]
+
+[[feature]]
+id = "settings.confirmations"
+area = 20
+summary = "Ask before trash; ask before moving dragged items"
+egui_ref = "src/app/settings.rs:109"
+status = "done"
+core_test = ["settings_change_the_sidebar_and_terminal_and_are_kept"]
+swift_test = ["testSettingsApplyAndComeBackOnTheNextStart"]
+notes = "Ask before the Trash and ask whether to move or copy dropped items"
+
+[[feature]]
+id = "settings.open_history"
+area = 20
+summary = "Remember opened files; clear open history"
+egui_ref = "src/app/settings.rs:109"
+status = "done"
+core_test = ["opened_files_are_counted_shown_and_forgotten"]
+swift_test = ["testOpenHistoryShowsInColumnsAndIsForgottenAndCleared"]
+notes = "Remember opened files and Clear… are in the General page"
+
+[[feature]]
+id = "settings.icon_size"
+area = 20
+summary = "Icon size: small to extra large"
+egui_ref = "src/app/settings.rs:109"
+status = "done"
+core_test = ["settings_change_the_sidebar_and_terminal_and_are_kept"]
+swift_test = ["testSettingsApplyAndComeBackOnTheNextStart"]
+
+[[feature]]
+id = "settings.animation"
+area = 20
+summary = "Animate selected videos and GIFs"
+egui_ref = "src/app/settings.rs:109"
+status = "done"
+core_test = ["the_selected_tile_plays_when_the_setting_is_on"]
+swift_test = ["testAGifTilePlaysOnHoverAndWhenSelected"]
+notes = "Settings toggle 'Play the selected video or GIF'"
+
+[[feature]]
+id = "settings.reset_thumbnails"
+area = 20
+summary = "Reset all chosen video thumbnails"
+egui_ref = "src/app/settings.rs:109"
+status = "done"
+events = ["ResetAllThumbnails"]
+core_test = ["a_video_s_thumbnail_is_chosen_from_its_frames_and_reset"]
+swift_test = ["testAVideosThumbnailIsChosenFromItsFramesAndReset"]
+notes = "Settings > Appearance: Chosen video thumbnails, Reset All… (asks first)"
+
+[[feature]]
+id = "settings.keyboard"
+area = 20
+summary = "Keyboard page lists shortcuts"
+egui_ref = "src/app/settings.rs:109"
+status = "done"
+core_test = ["plugin_shortcuts_bind_unless_they_clash", "plugin_shortcuts_can_be_changed"]
+swift_test = ["testPluginShortcutsTheSandboxAndAnEditedPluginReloading"]
+notes = "Settings > Keyboard lists every shortcut from the core's commands, then the bound plugin shortcuts; the Swift test checks the plugin bindings the page lists, not the page itself"
+
+
+# 21. Toasts
+
+[[feature]]
+id = "toasts.show"
+area = 21
+summary = "Info, warning, error and success toasts"
+egui_ref = "src/app/mod.rs:79"
+status = "done"
+events = ["DismissToast"]
+core_test = ["finished_operations_and_drives_coming_and_going_show_toasts_that_expire"]
+swift_test = ["testAFinishedOperationShowsAToastThatGoesAway"]
+notes = "Mac: a stack at the bottom right of each window; click to dismiss; errors stay longer"
+
+[[feature]]
+id = "toasts.from_anywhere"
+area = 21
+summary = "Toasts from background work reach the focused window"
+egui_ref = "src/app/mod.rs:79"
+status = "done"
+core_test = ["finished_operations_and_drives_coming_and_going_show_toasts_that_expire"]
+swift_test = ["testAFinishedOperationShowsAToastThatGoesAway"]
+notes = "Toasts are view-model data, so background work reaches every window"
+
+
+# 22. Full Disk Access
+
+[[feature]]
+id = "fda.banner"
+area = 22
+summary = "Banner: Open System Settings / Not now / Don't ask again"
+egui_ref = "src/app/disk_access.rs"
+status = "done"
+events = ["OpenDiskAccessSettings", "DismissDiskAccess", "RestartApp"]
+core_test = ["missing_full_disk_access_is_offered_watched_for_and_ends_in_a_restart", "the_banner_hides_for_tests_when_dismissed_and_after_dont_ask_again", "opening_the_settings_from_the_banner_asks_the_system"]
+swift_test = ["testAccessTerminalAndAboutAfterStart"]
+notes = "A bar above the panes: Open System Settings / Not now / Don't Ask Again; seen in the built app. The Swift test checks it stays hidden outside an app bundle"
+
+[[feature]]
+id = "fda.detect"
+area = 22
+summary = "Detects missing Full Disk Access and waits for it"
+egui_ref = "src/macos_tools.rs:178"
+status = "done"
+core_test = ["missing_full_disk_access_is_offered_watched_for_and_ends_in_a_restart", "test_runners_are_not_the_app_and_need_no_access"]
+swift_test = ["testAccessTerminalAndAboutAfterStart"]
+notes = "egui's TCC probe, moved to dirfleet_effects::access; rechecked every second while waiting"
+
+[[feature]]
+id = "fda.restart"
+area = 22
+summary = "Restart offered once access is granted"
+egui_ref = "src/macos_tools.rs:203"
+status = "open"
+core_test = ["missing_full_disk_access_is_offered_watched_for_and_ends_in_a_restart"]
+notes = "Relaunch effect then a shell-lane QuitApp; not tried for real, since that needs the grant toggled"
+
+
+# 23. Persistence
+
+[[feature]]
+id = "persist.windows"
+area = 23
+summary = "Windows and their tabs' folders come back on the next launch"
+egui_ref = "src/app/dock/workspace.rs:300"
+status = "done"
+events = ["Started", "Quitting"]
+core_test = ["saved_windows_come_back_with_only_their_visible_tabs_listed", "windows_closed_while_quitting_stay_saved", "closing_a_window_normally_forgets_it", "navigating_saves_the_new_folder_and_scrolling_saves_nothing", "nothing_is_saved_before_the_saved_state_is_read", "windows_are_saved_and_come_back_on_the_next_start"]
+swift_test = ["testWindowsComeBackOnTheNextStart"]
+
+[[feature]]
+id = "persist.window_frames"
+area = 23
+summary = "Window positions and sizes are kept"
+egui_ref = "src/app/dock/workspace.rs:300"
+status = "done"
+events = ["WindowFramed"]
+core_test = ["window_frames_are_kept_and_come_back"]
+swift_test = ["testFramesSectionOrderAndFolderViewsComeBackAndSavedSearchesOpenInNewTabs"]
+notes = "The shell reports moves and resizes; a restored window gets its frame back, kept on a screen. Seen in the built app with a frame written into its state"
+
+[[feature]]
+id = "persist.split_layout"
+area = 23
+summary = "Split pane layouts are kept"
+egui_ref = "src/app/dock/workspace.rs:300"
+status = "done"
+core_test = ["split_layouts_are_saved_and_hidden_tabs_load_when_shown"]
+notes = "Core saves layouts and Mac tab groups"
+swift_test = ["testANewTabJoinsItsWindowsTabGroupAndTheGroupIsSaved"]
+events = ["WindowGrouped"]
+
+[[feature]]
+id = "persist.settings"
+area = 23
+summary = "Settings are kept"
+egui_ref = "src/app/mod.rs:121"
+status = "done"
+core_test = ["settings_change_the_sidebar_and_terminal_and_are_kept"]
+swift_test = ["testSettingsApplyAndComeBackOnTheNextStart"]
+
+[[feature]]
+id = "persist.recent"
+area = 23
+summary = "Recent folders are kept"
+egui_ref = "src/app/mod.rs:1540"
+status = "done"
+core_test = ["favorites_are_added_moved_removed_and_kept"]
+swift_test = ["testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+
+[[feature]]
+id = "persist.favorites_searches"
+area = 23
+summary = "Favorites and saved searches are kept"
+egui_ref = "src/legacy_import.rs"
+status = "done"
+core_test = ["saved_searches_are_edited_duplicated_moved_deleted_and_kept", "favorites_are_added_moved_removed_and_kept"]
+swift_test = ["testASavedSearchShowsInTheSidebarAndRunsAgain", "testTheSidebarShowsFoldersDrivesFavoritesAndRecentFolders"]
+
+[[feature]]
+id = "persist.view_settings"
+area = 23
+summary = "Per-folder view settings and list columns are kept"
+egui_ref = "src/legacy_import.rs"
+status = "done"
+core_test = ["folder_views_are_saved_and_come_back", "columns_are_saved_and_come_back"]
+swift_test = ["testFramesSectionOrderAndFolderViewsComeBackAndSavedSearchesOpenInNewTabs"]
+
+[[feature]]
+id = "persist.stores"
+area = 23
+summary = "Open history and chosen thumbnails are kept"
+egui_ref = "src/app/open_history.rs"
+status = "done"
+core_test = ["a_video_s_thumbnail_is_chosen_from_its_frames_and_reset", "renamed_and_moved_items_keep_their_open_counts_and_chosen_thumbnails"]
+swift_test = ["testOpenHistoryShowsInColumnsAndIsForgottenAndCleared", "testAVideosThumbnailIsChosenFromItsFramesAndReset"]
+notes = "open_history.json and thumbnail_choices.json beside the state file (the Mac app's own); both follow renamed and moved items, as egui's"
+
+[[feature]]
+id = "persist.import"
+area = 23
+summary = "Data from earlier builds is imported"
+egui_ref = "src/legacy_import.rs"
+status = "na"
+na_mac = "The Mac app keeps its own data; there is no earlier build of it to import from"

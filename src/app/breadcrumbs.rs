@@ -296,7 +296,8 @@ fn chevron(ui: &mut Ui, tab: &TabData, parent: &Crumb, next: Option<&Crumb>) {
                 for (name, path) in children.iter() {
                     let on = next.is_some_and(|next| Path::new(&next.path) == path.as_path());
                     if ui.add(egui::Button::selectable(on, name)).clicked() {
-                        TabAction::ChangePaths(path.clone().into()).schedule_tab(tab.id);
+                        TabAction::ChangePaths(crate::app::dock::existing_dir(path.clone()))
+                            .schedule_tab(tab.id);
                         ui.close();
                     }
                 }

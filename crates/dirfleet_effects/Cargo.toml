@@ -1,0 +1,92 @@
+[package]
+name = "dirfleet_effects"
+version = "0.0.1"
+description = "DirFleet's effect handlers: file system, watchers, processes and OS integration."
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Plugins: Lua, as the egui app had it (the `plugins` feature).
+mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
+glob = { version = "0.3", optional = true }
+# Byte formatting for the plugin API; egui-free despite the name.
+egui_mev_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994", optional = true }
+dirfleet_core = { path = "../dirfleet_core" }
+anyhow = "1"
+ffmpeg-sidecar = { version = "2.4.0", default-features = false }
+foldhash = "0.2"
+image = { version = "0.25", default-features = false, features = ["rayon", "png", "jpeg", "bmp", "webp", "tiff", "ico", "tga", "gif"] }
+jpeg-decoder = { version = "0.3", default-features = false }
+lru = "0.16.3"
+puffin = { optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+sha2 = "0.10"
+bevy_device_lang = "0.6"
+directories = "6"
+rand = "0.8"
+rayon = "1.10"
+crux_core = "=0.20.0"
+notify = "6.1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.33"
+open = "5.3"
+crossbeam = "0.8"
+trash = "5.2"
+unicode-normalization = "0.1"
+walkdir = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"] }
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-core-media = "0.3"
+objc2-foundation = "0.3"
+objc2-image-io = "0.3"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+arboard = "3.4.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.59", features = [
+    "Wdk_Storage_FileSystem",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_WNet",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Ioctl",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[features]
+default = ["plugins"]
+# The Lua plugin runtime. Off, the crate builds without a C compiler for the
+# target, so other systems can be checked from this one.
+plugins = ["dep:mlua", "dep:chrono", "dep:glob", "dep:egui_mev_core"]
+# Test behaviour for dependants' tests: a per-process cache folder, no
+# FFmpeg download, deterministic media backends.
+test-support = []
+profiling = ["dep:puffin"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

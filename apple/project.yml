@@ -1,0 +1,96 @@
+name: DirFleetNative
+packages:
+  Shared:
+    path: ./generated/Shared
+  App:
+    path: ./generated/App
+options:
+  bundleIdPrefix: io.github.leinnan
+  deploymentTarget:
+    macOS: "14.0"
+attributes:
+  BuildIndependentTargetsInParallel: true
+
+targets:
+  DirFleet-macOS:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: DirFleet
+        excludes:
+          - "Info.plist"
+    dependencies:
+      - package: Shared
+      - package: App
+      # The Rust core makes thumbnails with these.
+      - sdk: AVFoundation.framework
+      - sdk: CoreMedia.framework
+      - sdk: ImageIO.framework
+    info:
+      path: DirFleet/Info.plist
+      properties:
+        CFBundleDisplayName: DirFleet
+        LSMinimumSystemVersion: "14.0"
+    settings:
+      PRODUCT_NAME: DirFleet
+      # Its own id, so this build's data and sled lock never collide with the egui build's.
+      PRODUCT_BUNDLE_IDENTIFIER: io.github.leinnan.dirfleet.native
+      OTHER_LDFLAGS: [-w]
+      ENABLE_USER_SCRIPT_SANDBOXING: NO
+      SWIFT_VERSION: "5.0"
+    scheme:
+      testTargets:
+        - DirFleetTests
+        - DirFleetUITests
+
+  DirFleetTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: DirFleetTests
+      # The shell's bridge class and views, tested with fake native UI; the
+      # app's entry point stays out.
+      - path: DirFleet
+        excludes:
+          - "Info.plist"
+          - "DirFleetApp.swift"
+    dependencies:
+      - package: Shared
+      - package: App
+      - sdk: AVFoundation.framework
+      - sdk: CoreMedia.framework
+      - sdk: ImageIO.framework
+    settings:
+      GENERATE_INFOPLIST_FILE: YES
+      OTHER_LDFLAGS: [-w]
+      SWIFT_VERSION: "5.0"
+
+  # Drives the built app; checks results on disk with FileManager, not through the app.
+  DirFleetUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: DirFleetUITests
+    dependencies:
+      - target: DirFleet-macOS
+    settings:
+      GENERATE_INFOPLIST_FILE: YES
+      TEST_TARGET_NAME: DirFleet-macOS
+      SWIFT_VERSION: "5.0"
+
+schemes:
+  # Performance runs (`just apple-perf`): Release, without the main thread
+  # checker, which slows every AppKit call.
+  DirFleet-perf:
+    build:
+      targets:
+        DirFleet-macOS: all
+        DirFleetTests: [test]
+    test:
+      config: Release
+      targets:
+        - DirFleetTests
+      disableMainThreadChecker: true

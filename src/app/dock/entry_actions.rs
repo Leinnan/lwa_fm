@@ -38,7 +38,8 @@ impl EntryMenu<'_, '_> {
         }
         let path = self.entry.get_path();
         if self.single && self.entry.is_package() && ui.button("Show Package Contents").clicked() {
-            TabAction::ChangePaths(path.clone().into()).schedule_tab(self.tab.id);
+            TabAction::ChangePaths(crate::app::dock::existing_dir(path.clone()))
+                .schedule_tab(self.tab.id);
             ui.close();
         }
         if self.single && self.is_dir {
@@ -312,7 +313,7 @@ impl MyTabViewer<'_> {
             if open_in_new_tab {
                 ActionToPerform::NewTab(path).schedule();
             } else {
-                TabAction::ChangePaths(path.into()).schedule_tab(tab_id);
+                TabAction::ChangePaths(crate::app::dock::existing_dir(path)).schedule_tab(tab_id);
             }
         }
     }

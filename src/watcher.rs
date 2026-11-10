@@ -134,9 +134,9 @@ fn entry_metadata(path: &Path) -> Option<DirEntryMetaData> {
     let meta = std::fs::symlink_metadata(path);
     #[cfg(not(windows))]
     let meta = std::fs::metadata(path).or_else(|_| std::fs::symlink_metadata(path));
-    let mut meta: DirEntryMetaData = meta.ok()?.into();
+    let mut meta: DirEntryMetaData = crate::data::files::metadata_of(&meta.ok()?);
     if meta.entry_type == EntryType::Directory {
-        meta.entry_type = EntryType::of_dir(path);
+        meta.entry_type = crate::data::files::entry_type_of_dir(path);
     }
     Some(meta)
 }
@@ -647,14 +647,21 @@ mod tests {
         let mut watchers = super::DirectoryWatchers::default();
         watchers.start(&first, notify::RecursiveMode::NonRecursive);
         watchers.start(&second, notify::RecursiveMode::NonRecursive);
-        // Watch setup runs on the control thread; give it a moment.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        std::fs::write(first.join("a.txt"), b"a").expect("write first");
-        std::fs::write(second.join("b.txt"), b"b").expect("write second");
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Watch setup runs on the control thread and FSEvents reports nothing
+        // from before a stream starts, which can take a while under load: keep
+        // writing to each root until its change is seen.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut seen = BTreeSet::new();
+        let mut round = 0u32;
         while seen.len() < 2 && std::time::Instant::now() < deadline {
+            if round.is_multiple_of(10) {
+                for (root, file) in [(&first, "a.txt"), (&second, "b.txt")] {
+                    if !seen.contains(&Some(root.clone())) {
+                        std::fs::write(root.join(file), round.to_string()).expect("write");
+                    }
+                }
+            }
+            round += 1;
             watchers.check_for_new_watchers();
             let changes = watchers.check_for_file_system_events();
             for change in changes.changes {

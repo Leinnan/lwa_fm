@@ -1,0 +1,32 @@
+{
+  "fixture": {
+    "root": "/tmp/dirfleet_script_selection",
+    "modified": 1700000000,
+    "entries": [
+      { "path": "alpha.txt", "size": 1 },
+      { "path": "bravo.txt", "size": 2 },
+      { "path": "charlie.txt", "size": 3 },
+      { "path": "delta.txt", "size": 4 },
+      { "path": "echo.txt", "size": 5 }
+    ]
+  },
+  "steps": [
+    { "event": { "NewWindow": { "path": "{root}" } } },
+    { "snapshot": true },
+    { "event": { "Click": { "tab": 1, "row": 1, "command": false, "shift": false } } },
+    { "event": { "Click": { "tab": 1, "row": 3, "command": true, "shift": false } } },
+    { "snapshot": true },
+    { "event": { "Click": { "tab": 1, "row": 4, "command": false, "shift": true } } },
+    { "snapshot": true },
+    { "event": { "SortBy": { "tab": 1, "sort": "Size" } } },
+    { "event": { "SortBy": { "tab": 1, "sort": "Size" } } },
+    { "snapshot": true },
+    { "event": { "InvertSelection": { "tab": 1 } } },
+    { "snapshot": true },
+    { "event": { "SelectAll": { "tab": 1 } } },
+    { "snapshot": true },
+    { "event": { "SetSelection": { "tab": 1, "rows": [0, 2] } } },
+    { "event": { "ClearSelection": { "tab": 1 } } },
+    { "snapshot": true }
+  ]
+}

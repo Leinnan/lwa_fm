@@ -2,7 +2,7 @@
 //! form, jobs, and the cached bar and inspector contents.
 
 use super::discovery::{self, Broken};
-use super::form::{FormState, Outcome, Values};
+use super::form::{FormState, Outcome};
 use super::jobs::{self, JobSpec};
 use super::keymap::{self, PluginBinding};
 use super::manifest::{FormMode, RunMode, TargetInfo};
@@ -15,7 +15,7 @@ use super::{
     Source,
 };
 use crate::app::ui::{DialogButton, dialog_buttons};
-use serde::{Deserialize, Serialize};
+use dirfleet_effects::plugins::ActivationExt as _;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,21 +29,7 @@ const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 /// Errors kept per plugin.
 const MAX_ERRORS: usize = 20;
 
-/// What the user chose for a plugin. Saved with the app settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PluginSettings {
-    /// `None` means the default: on for bundled plugins, off for others.
-    pub enabled: Option<bool>,
-    /// Fingerprint of the permissions the user approved.
-    pub approved: Option<u64>,
-    /// Shortcut overrides by action id; empty text means none.
-    pub shortcuts: BTreeMap<String, String>,
-    /// Last form values by action id, for forms with `remember = true`.
-    pub remembered: BTreeMap<String, Values>,
-}
-
-pub type SettingsMap = BTreeMap<String, PluginSettings>;
+pub use dirfleet_core::plugins::SettingsMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -243,6 +229,7 @@ pub struct PluginHost {
 impl PluginHost {
     /// Loads the bundled plugins and the plugins folder, and watches it.
     pub fn start() -> Self {
+        super::connect();
         let mut host = Self {
             dir: discovery::plugins_dir(),
             ..Self::default()
@@ -258,6 +245,7 @@ impl PluginHost {
     /// A host with these plugins and no folder, for tests.
     #[cfg(test)]
     pub fn with_plugins(codes: Vec<Arc<PluginCode>>) -> Self {
+        super::connect();
         Self {
             plugins: codes.into_iter().map(Plugin::new).collect(),
             ..Self::default()

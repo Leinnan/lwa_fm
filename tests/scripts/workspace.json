@@ -1,0 +1,31 @@
+{
+  "fixture": {
+    "root": "/tmp/dirfleet_script_workspace",
+    "modified": 1700000000,
+    "entries": [
+      { "path": "left", "dir": true },
+      { "path": "right", "dir": true },
+      { "path": "left/l.txt", "size": 1 },
+      { "path": "right/r.txt", "size": 2 },
+      { "path": "top.txt", "size": 3 }
+    ]
+  },
+  "steps": [
+    { "event": { "NewWindow": { "path": "{root}" } } },
+    { "snapshot": true },
+    { "event": { "NewTab": { "window": 1, "path": "{root}/left" } } },
+    { "event": { "NewTab": { "window": 1, "path": "{root}/right" } } },
+    { "snapshot": true },
+    { "event": { "SplitTab": { "tab": 3, "side": "Right" } } },
+    { "snapshot": true },
+    { "event": { "CycleTab": { "window": 1, "forward": false } } },
+    { "event": { "Up": { "tab": 3 } } },
+    { "snapshot": true },
+    { "event": { "Back": { "tab": 3 } } },
+    { "snapshot": true },
+    { "event": { "CloseTab": { "tab": 3 } } },
+    { "snapshot": true },
+    { "event": { "ReopenClosedTab": { "window": 1 } } },
+    { "snapshot": true }
+  ]
+}

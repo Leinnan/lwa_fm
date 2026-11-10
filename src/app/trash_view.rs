@@ -99,7 +99,10 @@ impl App {
         }
         tab.selection
             .rows()
-            .filter_map(|row| tab.entry_at(row).map(|entry| TrashKey::of(&entry)))
+            .filter_map(|row| {
+                tab.entry_at(row)
+                    .map(|entry| crate::fileops::trash_bin::key_of(&entry))
+            })
             .collect()
     }
 

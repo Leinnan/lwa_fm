@@ -2234,6 +2234,7 @@ fn commands_window_opens_plugin_forms() {
             },
             name: action.to_owned().into(),
             shortcut: None,
+            enabled: true,
         }];
         app.display_modal = Some(ModalWindow::Commands);
         for _ in 0..6 {

@@ -1,0 +1,26 @@
+{
+  "fixture": {
+    "root": "/tmp/dirfleet_script_sidebar",
+    "modified": 1700000000,
+    "entries": [
+      { "path": "alpha", "dir": true },
+      { "path": "beta", "dir": true },
+      { "path": "gamma", "dir": true }
+    ]
+  },
+  "steps": [
+    { "event": { "NewWindow": { "path": "{root}" } } },
+    { "event": { "AddFavorite": { "path": "{root}/alpha" } } },
+    { "event": { "AddFavorite": { "path": "{root}/beta" } } },
+    { "snapshot": true },
+    { "event": { "Navigate": { "tab": 1, "path": "{root}/alpha" } } },
+    { "event": { "Navigate": { "tab": 1, "path": "{root}/gamma" } } },
+    { "event": { "MoveFavorite": { "from": 1, "to": 0 } } },
+    { "event": { "SetSectionCollapsed": { "section": "Locations", "collapsed": true } } },
+    { "snapshot": true },
+    { "event": { "RemoveFavorite": { "path": "{root}/alpha" } } },
+    { "event": { "SetSearchText": { "tab": 1, "text": "a" } } },
+    { "event": { "SetSearchFavorites": { "tab": 1, "on": true } } },
+    { "snapshot": true }
+  ]
+}

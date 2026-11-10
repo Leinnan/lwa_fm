@@ -1,0 +1,27 @@
+# `boltffi pack apple` (via `just apple-package`) builds the Swift package the
+# native macOS shell links. macOS only: no iOS slices.
+[package]
+name = "dirfleet_ffi"
+crate = "dirfleet_ffi"
+version = "0.0.1"
+
+[targets.apple]
+output = "../../apple/generated/Shared"
+include_macos = true
+deployment_target = "14.0"
+ios_architectures = []
+simulator_architectures = []
+macos_architectures = ["arm64"]
+
+[targets.apple.swift]
+module_name = "Shared"
+
+[targets.apple.spm]
+package_name = "Shared"
+layout = "ffi-only"
+
+[targets.android]
+enabled = false
+
+[targets.wasm]
+enabled = false

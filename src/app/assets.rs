@@ -3,6 +3,7 @@ use std::collections::BinaryHeap;
 #[cfg(target_os = "macos")]
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
+#[cfg(test)]
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::hash::{Hash, Hasher};
@@ -29,19 +30,28 @@ use crate::app::thumbnail_timeline::{FrameTimeline, Gap};
 use crate::data::files::DirEntry;
 use crate::data::files::EntryRef;
 
-mod cache;
-mod decode;
-mod failures;
-mod ffmpeg_install;
-pub mod kinds;
-mod media;
-pub use media::tool_paths as ffmpeg_tool_paths;
-mod process;
-use cache::thumbnail_cache_path;
-use decode::decoded_from_dynamic;
-use failures::{FailureRecord, Retry};
-use media::{PreviewSpec, PreviewStep, SourceKey, VideoTask};
-use process::{ErrorKind, MediaError};
+use dirfleet_effects::media::cache::{self, thumbnail_cache_path};
+#[cfg(test)]
+use dirfleet_effects::media::decode;
+use dirfleet_effects::media::decode::decoded_from_dynamic;
+#[cfg(test)]
+use dirfleet_effects::media::failures;
+use dirfleet_effects::media::failures::{FailureRecord, Retry};
+pub use dirfleet_effects::media::kinds;
+#[cfg(feature = "profiling")]
+use dirfleet_effects::media::process;
+use dirfleet_effects::media::process::{ErrorKind, MediaError};
+pub use dirfleet_effects::media::video::tool_paths as ffmpeg_tool_paths;
+use dirfleet_effects::media::video::{
+    self as media, PreviewSpec, PreviewStep, SourceKey, VideoTask,
+};
+use dirfleet_effects::media::{
+    AnimatedSourceKind, DecodedAnimation, DecodedImage, THUMBNAIL_DEADLINE, ThumbnailKind,
+    VIDEO_PREVIEW_FRAME_DELAY, cached_shell_poster, load_or_generate_thumbnail,
+    shell_thumbnail_image, thumbnail_kind,
+};
+#[cfg(test)]
+use dirfleet_effects::media::{VIDEO_PREVIEW_FRAMES, encode_animation_gif};
 
 const FOLDER_ICON_KEY: &str = "icon_folder";
 const ICON_EXT_PREFIX: &str = "icon_";
@@ -52,8 +62,6 @@ const MAX_STATIC_TEXTURE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_ANIMATION_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ANIMATION_GPU_BYTES: usize = 16 * 1024 * 1024;
 const PREVIEW_DWELL: Duration = Duration::from_millis(250);
-const VIDEO_PREVIEW_FRAMES: u32 = 12;
-const VIDEO_PREVIEW_FRAME_DELAY: Duration = Duration::from_millis(250);
 #[cfg(test)]
 const VIDEO_PREVIEW_MAX_EDGE: u32 = 240;
 // Bound texture preparation per UI frame. The renderer performs the GPU upload
@@ -69,12 +77,9 @@ static QUEUE_WAIT_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 
 /// Thumbnail edge for list rows: their 24-point icons at up to 2× scale.
 const LIST_THUMBNAIL_EDGE: u32 = 64;
-/// The whole budget for one image thumbnail or video poster.
-const THUMBNAIL_DEADLINE: Duration = Duration::from_secs(5);
 /// Size of the thumbnail picker's frames. Barely slower to extract than small
 /// ones, keeps the large preview sharp and suits any thumbnail size once chosen.
 const PICKER_EDGE: u32 = media::MAX_EDGE;
-pub use kinds::VIDEO_EXTS;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IconSize {
@@ -145,33 +150,6 @@ impl IconSize {
     }
 }
 
-#[derive(Debug, Clone)]
-struct DecodedImage {
-    name: String,
-    width: usize,
-    height: usize,
-    rgba: Arc<[u8]>,
-}
-
-impl DecodedImage {
-    fn byte_len(&self) -> usize {
-        self.rgba.len()
-    }
-}
-
-#[derive(Debug, Clone)]
-struct DecodedAnimation {
-    frames: Vec<DecodedImage>,
-    frame_delays: Vec<Duration>,
-    source_timestamps: Vec<Duration>,
-}
-
-impl DecodedAnimation {
-    fn byte_len(&self) -> usize {
-        self.frames.iter().map(DecodedImage::byte_len).sum()
-    }
-}
-
 struct AnimatedPreview {
     frames: Vec<DecodedImage>,
     frame_delays: Vec<Duration>,
@@ -230,12 +208,6 @@ impl AnimatedPreview {
                 .unwrap_or(VIDEO_PREVIEW_FRAME_DELAY),
         )
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum AnimatedSourceKind {
-    Gif,
-    Video,
 }
 
 /// Makes animated previews one step at a time, so the worker can yield to
@@ -766,12 +738,6 @@ enum AssetJobResult {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThumbnailKind {
-    Image,
-    Video,
-}
-
 /// Why a preview is wanted; later variants win when several apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PreviewIntent {
@@ -905,6 +871,7 @@ impl AssetManager {
         reason = "owned backend is shared with worker threads"
     )]
     fn with_media_backend(media_backend: Arc<dyn MediaBackend>) -> Self {
+        connect_media_service();
         let (result_tx, result_rx) = mpsc::sync_channel::<AssetJobResult>(32);
         let scheduler = Arc::new(JobScheduler::default());
         let preview_scheduler = Arc::new(JobScheduler::default());
@@ -2082,6 +2049,28 @@ impl AssetManager {
     }
 }
 
+/// Tells the shared media service where this app keeps its files, how its
+/// notices become toasts, and where chosen video thumbnails are kept. Only
+/// the first call counts.
+fn connect_media_service() {
+    use dirfleet_effects::media::{MediaDirs, Notice};
+    if let Some(dirs) = crate::paths::project_dirs() {
+        dirfleet_effects::media::configure(MediaDirs {
+            cache: dirs.cache_dir,
+            data: dirs.data_local_dir,
+        });
+    }
+    dirfleet_effects::media::set_notifier(|level, text| {
+        let kind = match level {
+            Notice::Info => egui_mev_widgets::ToastKind::Info,
+            Notice::Success => egui_mev_widgets::ToastKind::Ok,
+            Notice::Warning => egui_mev_widgets::ToastKind::Warn,
+        };
+        crate::app::queue_toast(kind, text.to_owned());
+    });
+    dirfleet_effects::media::set_chosen_frames(thumbnail_choice::get);
+}
+
 impl Default for AssetManager {
     fn default() -> Self {
         Self::new()
@@ -2586,198 +2575,6 @@ pub fn entry_has_animated_preview(entry: &EntryRef<'_>) -> bool {
     kinds::media_kind(Path::new(entry.file_name)).is_some_and(kinds::MediaKind::is_animated)
 }
 
-fn thumbnail_kind(path: &Path) -> Option<ThumbnailKind> {
-    // A GIF's thumbnail is its first frame, like any other image.
-    kinds::media_kind(path).map(|kind| match kind {
-        kinds::MediaKind::Image | kinds::MediaKind::AnimatedImage => ThumbnailKind::Image,
-        kinds::MediaKind::Video => ThumbnailKind::Video,
-    })
-}
-
-/// The thumbnail of an image or video: from our disk cache when it is still
-/// current, otherwise decoded (or, for video, sampled) and cached.
-fn load_or_generate_thumbnail(
-    source_path: &Path,
-    kind: ThumbnailKind,
-    target_edge: u32,
-    source_revision: u128,
-    source_size: u64,
-    cancel: &AtomicBool,
-) -> Result<DecodedImage, MediaError> {
-    let deadline = Instant::now() + THUMBNAIL_DEADLINE;
-    process::check(cancel, deadline)?;
-    let name = source_path.to_string_lossy().into_owned();
-    // Without a revision (metadata unavailable) we can't tell a stale cache
-    // entry from a current one, so the disk cache is skipped.
-    let cacheable = source_revision != 0;
-    let path = thumbnail_cache_path(source_path, target_edge, source_revision, source_size);
-    let source = SourceKey::new(source_path, source_revision, source_size);
-    if kind == ThumbnailKind::Video
-        && let Some(at) = thumbnail_choice::get(source_path, source_revision, source_size)
-    {
-        // The shell's poster can't show the chosen frame, so it is skipped.
-        let _access_time = crate::access_time::PreserveAccessTime::new(source_path);
-        let path = cacheable.then(|| {
-            cache::chosen_poster_cache_path(
-                source_path,
-                target_edge,
-                source_revision,
-                source_size,
-                at.as_millis() as u64,
-            )
-        });
-        return media::chosen_poster(&source, target_edge, at, path, cancel);
-    }
-    if kind == ThumbnailKind::Video {
-        if let Some(image) = media::cached_poster_image(&source, target_edge, cancel) {
-            // Posters made while building an overview live only in memory;
-            // save them once so they survive a restart, without rewriting
-            // the file on every hit.
-            if cacheable && !path.is_file() {
-                media::schedule_poster_cache(source, path, target_edge, image.clone());
-            }
-            return Ok(image);
-        }
-    } else if cacheable && let Some(cached) = cache::cached_variant(&path) {
-        if let Some(image) = decode::cached_thumbnail(&cached, name.clone()) {
-            cache::touch(&cached);
-            return Ok(image);
-        }
-        let _ = fs::remove_file(&cached);
-    }
-    // Making a thumbnail must not count as the user opening the file.
-    let _access_time = crate::access_time::PreserveAccessTime::new(source_path);
-    let image = match kind {
-        ThumbnailKind::Video => {
-            if let Some(image) = generate_shell_poster(source_path, target_edge, &path, cacheable) {
-                return Ok(image);
-            }
-            media::poster_cached_to(
-                &source,
-                target_edge,
-                cancel,
-                cacheable.then(|| path.clone()),
-            )?
-        }
-        ThumbnailKind::Image => {
-            let image = decode::thumbnail_from_source(source_path, target_edge)?;
-            process::check(cancel, deadline)?;
-            if cacheable && source.unchanged() {
-                // Encode before taking the publication lock; hold it only to
-                // check the source is still current and to rename the file.
-                if let Some((bytes, ext)) = cache::encode_thumbnail(&image) {
-                    let _publication = media::PUBLICATION.lock().expect("asset publication");
-                    if source.unchanged() {
-                        cache::atomic_write_thumbnail(&path, &bytes, ext);
-                    }
-                }
-            }
-            decode::decoded_from_dynamic(&image, name)
-        }
-    };
-    process::check(cancel, deadline)?;
-    Ok(image)
-}
-
-/// Thumbnail from the Windows shell thumbnail cache, fitted to `edge`. Used
-/// for video posters, where it replaces an ffmpeg process. For images it is
-/// not worth it: measured on a 12 MP JPEG, a cache-miss probe costs ~7 ms and
-/// a cold generation ~90 ms, versus ~23 ms for our DCT-scaled decode.
-/// Disabled in tests so snapshots do not depend on host thumbnail handlers.
-#[cfg(all(windows, not(test)))]
-fn shell_thumbnail_image(path: &Path, edge: u32, cached_only: bool) -> Option<DecodedImage> {
-    let (width, height, pixels) = crate::windows_tools::shell_thumbnail(path, edge, cached_only)?;
-    let mut image = image::RgbaImage::from_raw(width, height, pixels)?;
-    let longest = width.max(height);
-    if longest > edge {
-        let scale =
-            |side: u32| (u64::from(side) * u64::from(edge) / u64::from(longest)).max(1) as u32;
-        image = image::imageops::thumbnail(&image, scale(width), scale(height));
-    }
-    Some(DecodedImage {
-        name: path.to_string_lossy().into_owned(),
-        width: image.width() as usize,
-        height: image.height() as usize,
-        rgba: image.into_raw().into(),
-    })
-}
-
-/// Where a poster made by the Windows Shell is cached, next to (not in) our
-/// `FFmpeg` posters: Shell posters aren't frames at a known time, so they must
-/// not seed video overviews.
-fn shell_poster_path(cache_path: &Path) -> PathBuf {
-    cache_path.with_extension("shell.jpg")
-}
-
-fn cached_shell_poster(cache_path: &Path, source_path: &Path) -> Option<DecodedImage> {
-    let path = shell_poster_path(cache_path);
-    let image = decode::cached_thumbnail(&path, source_path.to_string_lossy().into_owned())?;
-    cache::touch(&path);
-    Some(image)
-}
-
-/// How long the Windows Shell may take to make a video thumbnail.
-#[cfg(all(windows, not(test)))]
-const SHELL_GENERATION_TIMEOUT: Duration = Duration::from_secs(3);
-/// Shell calls that timed out and are still running; past this many we stop
-/// asking the Shell until they finish.
-#[cfg(all(windows, not(test)))]
-const MAX_STUCK_SHELL_CALLS: usize = 2;
-
-/// Asks the Windows Shell to make a video thumbnail, giving up after
-/// [`SHELL_GENERATION_TIMEOUT`] (third-party handlers, offline shares). The
-/// result is cached so it is made only once.
-#[cfg(all(windows, not(test)))]
-fn generate_shell_poster(
-    source_path: &Path,
-    edge: u32,
-    cache_path: &Path,
-    cacheable: bool,
-) -> Option<DecodedImage> {
-    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-    if IN_FLIGHT.load(AtomicOrdering::Acquire) > MAX_STUCK_SHELL_CALLS {
-        return None;
-    }
-    IN_FLIGHT.fetch_add(1, AtomicOrdering::AcqRel);
-    let (sender, receiver) = mpsc::channel();
-    let source = source_path.to_path_buf();
-    thread::spawn(move || {
-        let _ = sender.send(shell_thumbnail_image(&source, edge, false));
-        IN_FLIGHT.fetch_sub(1, AtomicOrdering::AcqRel);
-    });
-    let image = receiver
-        .recv_timeout(SHELL_GENERATION_TIMEOUT)
-        .ok()
-        .flatten()?;
-    if cacheable
-        && let Some(rgba) =
-            image::RgbaImage::from_raw(image.width as u32, image.height as u32, image.rgba.to_vec())
-        && let Some((bytes, _)) = cache::encode_thumbnail(&image::DynamicImage::ImageRgba8(rgba))
-    {
-        cache::atomic_save_bytes(&bytes, &shell_poster_path(cache_path));
-    }
-    Some(image)
-}
-
-#[cfg(not(all(windows, not(test))))]
-const fn generate_shell_poster(
-    _source_path: &Path,
-    _edge: u32,
-    _cache_path: &Path,
-    _cacheable: bool,
-) -> Option<DecodedImage> {
-    None
-}
-
-#[cfg(not(all(windows, not(test))))]
-const fn shell_thumbnail_image(
-    _path: &Path,
-    _edge: u32,
-    _cached_only: bool,
-) -> Option<DecodedImage> {
-    None
-}
-
 #[allow(
     clippy::items_after_statements,
     reason = "test fixture bypass precedes platform icon extraction"
@@ -2906,39 +2703,15 @@ fn decode_gif_preview(bytes: &[u8], _kind: AnimatedSourceKind) -> Result<Decoded
     media::decode_gif(bytes, PreviewSpec::new(240), &AtomicBool::new(false))
         .map_err(|error| error.to_string())
 }
+
 #[cfg(test)]
-fn encode_animation_gif(animation: &DecodedAnimation) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    {
-        let mut encoder = GifEncoder::new(&mut bytes);
-        encoder
-            .set_repeat(Repeat::Infinite)
-            .map_err(|err| format!("Could not configure animated preview cache: {err}"))?;
-        for (frame, delay) in animation.frames.iter().zip(&animation.frame_delays) {
-            let width = u32::try_from(frame.width)
-                .map_err(|_| "Animated preview frame is too wide".to_owned())?;
-            let height = u32::try_from(frame.height)
-                .map_err(|_| "Animated preview frame is too tall".to_owned())?;
-            let image = RgbaImage::from_raw(width, height, frame.rgba.to_vec())
-                .ok_or_else(|| "Animated preview frame has invalid pixel data".to_owned())?;
-            let delay_ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
-            encoder
-                .encode_frame(Frame::from_parts(
-                    image,
-                    0,
-                    0,
-                    Delay::from_numer_denom_ms(delay_ms, 1),
-                ))
-                .map_err(|err| format!("Could not encode animated preview cache: {err}"))?;
-        }
-    }
-    Ok(bytes)
-}
+#[path = "assets/integration_tests.rs"]
+mod media_integration_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helper::PathHelper;
+    use dirfleet_effects::paths::PathHelper;
     use media::load_or_generate_animated_preview;
 
     /// Test backends that produce a whole preview in one call.
@@ -2997,6 +2770,54 @@ mod tests {
     }
     /// Thumbnail decode paths for a 12 MP JPEG. Run with
     /// `cargo test --release perf_thumbnail -- --ignored --nocapture`.
+    #[test]
+    fn a_resumed_preview_yields_to_visible_thumbnails() {
+        let source = SourceKey::new(Path::new("queued.mp4"), 0, 0);
+        let mut task =
+            VideoTask::refinement_fixture(source, PreviewSpec::new(160), AnimatedSourceKind::Video);
+        assert!(matches!(
+            task.step(&AtomicBool::new(false)),
+            Ok(PreviewStep::Complete(_))
+        ));
+        let scheduler = JobScheduler::default();
+        scheduler.enqueue(
+            AssetJob::AnimatedPreview {
+                source_path: PathBuf::from("queued.mp4"),
+                request_key: "preview".into(),
+                source_revision: 0,
+                source_size: 0,
+                source_kind: AnimatedSourceKind::Video,
+                request_id: 1,
+                cancel: std::sync::Arc::new(AtomicBool::new(false)),
+                spec: PreviewSpec::new(160),
+                task: Some(Box::new(task)),
+            },
+            AssetJobClass::HoveredPreview,
+            None,
+        );
+        let entry = scheduler.recv_entry().expect("asset fixture operation");
+        scheduler.resume(entry);
+        scheduler.enqueue(
+            AssetJob::SystemIcon {
+                request_key: "visible".into(),
+                lookup_arg: "folder".into(),
+                icon_size: IconSize::Small,
+                request_id: 2,
+                cancel: std::sync::Arc::new(AtomicBool::new(false)),
+            },
+            AssetJobClass::VisibleThumbnail,
+            None,
+        );
+        assert_eq!(
+            scheduler
+                .recv_entry()
+                .expect("asset fixture operation")
+                .job
+                .request_key(),
+            "visible"
+        );
+    }
+
     #[test]
     #[ignore = "performance baseline; run explicitly"]
     fn perf_thumbnail_decode_paths() {
@@ -3323,8 +3144,8 @@ mod tests {
         }
         let path = std::env::temp_dir().join(format!("lwa_fm_mutating_{}.mp4", std::process::id()));
         fs::write(&path, b"old").expect("source fixture");
-        let metadata: crate::data::files::DirEntryMetaData =
-            fs::metadata(&path).expect("source metadata").into();
+        let metadata =
+            crate::data::files::metadata_of(&fs::metadata(&path).expect("source metadata"));
         let step = process_asset_job(
             AssetJob::AnimatedPreview {
                 source_path: path.clone(),
@@ -3943,7 +3764,7 @@ mod tests {
         )
         .expect("write source GIF");
         let metadata = fs::metadata(&source).expect("source metadata");
-        let meta: crate::data::files::DirEntryMetaData = metadata.into();
+        let meta = crate::data::files::metadata_of(&metadata);
         let cache_path = animated_preview_cache_path(&source, meta.source_revision, meta.size);
         let _ = fs::remove_file(&cache_path);
         let cancel = AtomicBool::new(false);
@@ -4077,7 +3898,7 @@ mod tests {
         }
         rgba.save(&source).expect("save source image");
         let metadata = fs::metadata(&source).expect("source metadata");
-        let meta: crate::data::files::DirEntryMetaData = metadata.into();
+        let meta = crate::data::files::metadata_of(&metadata);
         let cache_path = thumbnail_cache_path(&source, 64, meta.source_revision, meta.size);
         let _ = fs::remove_file(&cache_path);
 

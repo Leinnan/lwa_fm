@@ -1,0 +1,24 @@
+{
+  "fixture": {
+    "root": "/tmp/dirfleet_script_fixture",
+    "modified": 1700000000,
+    "entries": [
+      { "path": "Alpha", "dir": true },
+      { "path": "beta", "dir": true },
+      { "path": "Alpha/inner.txt", "size": 3 },
+      { "path": "c.txt", "size": 5 },
+      { "path": "D.md", "size": 1200 }
+    ]
+  },
+  "steps": [
+    { "event": { "NewWindow": { "path": null } } },
+    { "event": { "Navigate": { "tab": 1, "path": "{root}" } } },
+    { "snapshot": true },
+    { "event": { "ViewportChanged": { "tab": 1, "first_row": 0, "rows": 10 } } },
+    { "snapshot": true },
+    { "event": { "OpenRow": { "tab": 1, "row": 0 } } },
+    { "snapshot": true },
+    { "event": { "Back": { "tab": 1 } } },
+    { "snapshot": true }
+  ]
+}

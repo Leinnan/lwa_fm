@@ -470,7 +470,7 @@ impl App {
         let Ok(metadata) = std::fs::metadata(path) else {
             return;
         };
-        let meta = crate::data::files::DirEntryMetaData::from(metadata);
+        let meta = crate::data::files::metadata_of(&metadata);
         self.set_thumbnail_choice_for(path, meta.source_revision, meta.size, at);
     }
 

@@ -3,6 +3,7 @@
 use super::permissions::PermissionSet;
 use super::sandbox::{self, JobLink, Vm};
 use super::{CallContext, PluginCode, TargetInfo};
+use dirfleet_effects::plugins::ActivationExt as _;
 use mlua::{Table, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -281,7 +282,7 @@ fn git_bar_and_inspector_in_a_repository() {
     );
 
     // Commit through the action, as the form would submit it.
-    let mut values = super::form::Values::new();
+    let mut values = dirfleet_core::plugins::Values::new();
     values.insert("message".into(), "First".into());
     values.insert("all".into(), true.into());
     values.insert("push".into(), false.into());

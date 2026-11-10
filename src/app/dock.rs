@@ -2,9 +2,6 @@ use egui::text::{LayoutJob, TextWrapping};
 use egui::{Color32, Context, FontId, FontSelection, Galley, Id, TextFormat, Ui, WidgetText};
 use egui_dock::TabViewer;
 use egui_mev_widgets::text_fit;
-use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
-use icu_collator::{Collator, CollatorBorrowed};
-use icu_locale_core::Locale;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
@@ -32,13 +29,15 @@ mod entry_actions;
 mod grid_view;
 mod interaction;
 mod list_view;
+mod mirror;
 mod quick_look;
 mod workspace;
 
+pub use columns::ListColumns;
 pub use columns::kind_label;
 #[cfg(test)]
-pub use columns::{CELL_PADDING, Column, ListColumns};
-pub use workspace::{SavedWindow, WindowId, Workspace};
+pub use columns::{CELL_PADDING, Column};
+pub use workspace::{SavedWindow, WindowId, Workspace, viewport};
 
 thread_local! {
     pub static TIME_POOL: RefCell<LruCache<ElapsedTime, Arc<Galley>>> =
@@ -222,113 +221,14 @@ pub fn populate_sizes_pool(components: impl Iterator<Item = u64>, ui: &Context) 
     });
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Default, Hash)]
-pub enum CurrentPath {
-    #[default]
-    None,
-    One(PathBuf),
-    Multiple(Vec<PathBuf>),
-    /// The Recycle Bin / Trash, listed by `fileops::trash_bin`.
-    Trash,
-}
+pub use dirfleet_core::{CurrentPath, TabId};
 
-impl CurrentPath {
-    /// Every folder shown: one, several (favorites search) or none.
-    pub fn get_paths(&self) -> Vec<PathBuf> {
-        match self {
-            Self::None | Self::Trash => Vec::new(),
-            Self::One(path) => vec![path.clone()],
-            Self::Multiple(paths) => paths.clone(),
-        }
-    }
-
-    pub fn get_path(&self) -> Option<PathBuf> {
-        match self {
-            Self::None | Self::Trash => None,
-            Self::One(path) => Some(path.clone()),
-            Self::Multiple(paths) => {
-                let mut common_path = paths.first()?.clone();
-                for path in paths.iter().skip(1) {
-                    let mut common_components = Vec::new();
-                    let common_iter = common_path.components().zip(path.components());
-
-                    for (a, b) in common_iter {
-                        if a == b {
-                            common_components.push(a);
-                        } else {
-                            break;
-                        }
-                    }
-
-                    common_path = common_components.into_iter().collect();
-                }
-                Some(common_path)
-            }
-        }
-    }
-}
-
-impl From<PathBuf> for CurrentPath {
-    fn from(path: PathBuf) -> Self {
-        if path.is_dir() {
-            Self::One(path)
-        } else {
-            Self::None
-        }
-    }
-}
-
-impl CurrentPath {
-    pub fn get_name_from_path(&self) -> String {
-        match &self {
-            Self::None => "Empty".into(),
-            Self::One(path) => {
-                #[cfg(not(windows))]
-                {
-                    path.iter()
-                        .next_back()
-                        .expect("FAILED")
-                        .to_string_lossy()
-                        .into_owned()
-                }
-                #[cfg(windows)]
-                {
-                    let mut result = path
-                        .iter()
-                        .next_back()
-                        .expect("FAILED")
-                        .to_string_lossy()
-                        .into_owned();
-                    if result.len() == 1 {
-                        result = path.display().to_string();
-                    }
-                    result
-                }
-            }
-            Self::Multiple(_) => "Multiple".into(),
-            Self::Trash => crate::fileops::trash_bin::LABEL.into(),
-        }
-    }
-    pub fn parent(&self) -> Option<PathBuf> {
-        match self {
-            Self::One(path) => path.parent().map(PathBuf::from),
-            _ => None,
-        }
-    }
-    pub fn single_path(&self) -> Option<PathBuf> {
-        match self {
-            Self::One(path) => Some(path.clone()),
-            _ => None,
-        }
-    }
-
-    pub const fn multiple_paths(&self) -> bool {
-        matches!(self, Self::Multiple(_))
-    }
-
-    /// Whether this is the Recycle Bin view, whose rows are not real files.
-    pub const fn is_trash(&self) -> bool {
-        matches!(self, Self::Trash)
+/// The folder at `path`, or nothing when it is not a folder (any more).
+pub fn existing_dir(path: PathBuf) -> CurrentPath {
+    if path.is_dir() {
+        CurrentPath::One(path)
+    } else {
+        CurrentPath::None
     }
 }
 
@@ -651,6 +551,7 @@ impl TabData {
     pub(crate) fn current_place(&self) -> crate::app::history::Place {
         crate::app::history::Place {
             scroll_y: self.view.scroll_y,
+            first_row: 0,
             selected: self
                 .selection
                 .rows()
@@ -773,43 +674,11 @@ impl TabData {
     }
 }
 
-pub fn build_collator(case_sensitive: bool) -> CollatorBorrowed<'static> {
-    let mut options = CollatorOptions::default();
-    options.strength = if case_sensitive {
-        Some(Strength::Tertiary)
-    } else {
-        Some(Strength::Primary)
-    };
-    options.alternate_handling = Some(AlternateHandling::Shifted);
-    let lang = bevy_device_lang::get_lang().unwrap_or_else(|| "en".to_string());
-    let prefs = Locale::try_from_str(&lang)
-        .unwrap_or_else(|_| Locale::try_from_str("en").expect("Failed to create default locale"));
-    Collator::try_new(prefs.into(), options).expect("Failed to create collator")
-}
-
-/// Names one tab for its whole life, whichever pane or window it is in.
-/// Ids are never reused, so a stale one finds nothing instead of another tab.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TabId(std::num::NonZeroU32);
-
-impl TabId {
-    /// The id as a number, for plugins.
-    pub const fn number(self) -> u32 {
-        self.0.get()
-    }
-
-    fn next() -> Self {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(1);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self(std::num::NonZeroU32::new(id).expect("tab ids start at 1"))
-    }
-}
-
-impl std::fmt::Display for TabId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
+fn next_tab_id() -> TabId {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(1);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    TabId::new(std::num::NonZeroU32::new(id).expect("tab ids start at 1"))
 }
 
 impl TabData {
@@ -866,7 +735,7 @@ impl TabData {
         let mut top_display_path = TopDisplayPath::default();
         top_display_path.build(path);
         Self {
-            id: TabId::next(),
+            id: next_tab_id(),
             listing: Arc::default(),
             order: vec![],
             visible_entries: vec![],
@@ -1373,7 +1242,7 @@ pub mod tests {
         let mut entries: Vec<_> = std::fs::read_dir(fixture_root())
             .expect("grid fixture root must exist")
             .filter_map(std::result::Result::ok)
-            .filter_map(|entry| DirEntry::try_from(entry).ok())
+            .filter_map(|entry| crate::data::files::dir_entry_of(&entry))
             .collect();
         entries.sort_by(|left, right| left.get_splitted_path().1.cmp(right.get_splitted_path().1));
         entries

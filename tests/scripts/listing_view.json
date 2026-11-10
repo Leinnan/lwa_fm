@@ -1,0 +1,34 @@
+{
+  "fixture": {
+    "root": "/tmp/dirfleet_script_view",
+    "modified": 1700000000,
+    "entries": [
+      { "path": "notes", "dir": true },
+      { "path": "big.bin", "size": 3000 },
+      { "path": "small.txt", "size": 10 },
+      { "path": "Medium.md", "size": 400 },
+      { "path": ".secret", "size": 1 },
+      { "path": "notes/inside.txt", "size": 2 }
+    ]
+  },
+  "steps": [
+    { "event": { "NewWindow": { "path": null } } },
+    { "event": { "Navigate": { "tab": 1, "path": "{root}" } } },
+    { "snapshot": true },
+    { "event": { "SortBy": { "tab": 1, "sort": "Size" } } },
+    { "snapshot": true },
+    { "event": { "SortBy": { "tab": 1, "sort": "Size" } } },
+    { "snapshot": true },
+    { "event": { "SetShowHidden": { "tab": 1, "show": true } } },
+    { "snapshot": true },
+    { "event": { "ToggleColumn": { "column": "Kind" } } },
+    { "event": { "ToggleColumn": { "column": "Modified" } } },
+    { "snapshot": true },
+    { "event": { "SetDisplay": { "tab": 1, "display": "Icons" } } },
+    { "snapshot": true },
+    { "event": { "Navigate": { "tab": 1, "path": "{root}/notes" } } },
+    { "snapshot": true },
+    { "event": { "Back": { "tab": 1 } } },
+    { "snapshot": true }
+  ]
+}

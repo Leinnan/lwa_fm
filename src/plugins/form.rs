@@ -4,4 +4,4 @@
 //! manifest. The shared crate checks it, draws it and validates the values, so no
 //! Lua runs while the dialog is open.
 
-pub use egui_mev_data::form::{FieldDef, Form, FormState, Outcome, Values};
+pub use egui_mev_data::form::{Form, FormState, Outcome};

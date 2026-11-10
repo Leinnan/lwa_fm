@@ -228,7 +228,8 @@ impl App {
                         if toolbar_button(ui, Icon::ArrowUp, Command::Up, false).clicked()
                             && let Some(parent) = tab.current_path.parent()
                         {
-                            TabAction::ChangePaths(parent.into()).schedule_tab(tab.id);
+                            TabAction::ChangePaths(crate::app::dock::existing_dir(parent))
+                                .schedule_tab(tab.id);
                         }
                     });
                     // Decide from the space left what fits beside the path,

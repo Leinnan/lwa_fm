@@ -59,7 +59,7 @@ impl App {
             AppRequest::Open(path) => {
                 ActionToPerform::TabAction(
                     TabTarget::ActiveTab,
-                    TabAction::ChangePaths(path.into()),
+                    TabAction::ChangePaths(crate::app::dock::existing_dir(path)),
                 )
                 .schedule();
             }
@@ -156,6 +156,7 @@ impl App {
                     .shortcut
                     .as_ref()
                     .map(|shortcut| ctx.format_shortcut(shortcut)),
+                enabled: true,
             })
             .collect()
     }

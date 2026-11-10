@@ -4,6 +4,7 @@
 
 use crate::helper::DetachedSpawn;
 use anyhow::Context;
+pub use dirfleet_effects::access::{app_bundle, has_full_disk_access, relaunch_after_exit};
 use objc2::{AnyThread, MainThreadMarker, rc::Retained};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSModalResponseOK, NSOpenPanel, NSWorkspace,
@@ -159,60 +160,11 @@ pub fn url_path(url: &NSURL) -> Option<PathBuf> {
     Some(PathBuf::from(path.to_string()))
 }
 
-/// The `.app` bundle this process runs from, `None` for a bare binary (such
-/// as `cargo run`, whose file access macOS charges to the terminal).
-pub fn app_bundle() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let macos = exe.parent()?;
-    let contents = macos.parent()?;
-    let bundle = contents.parent()?;
-    let is_bundle = macos.file_name() == Some(OsStr::new("MacOS"))
-        && contents.file_name() == Some(OsStr::new("Contents"))
-        && bundle.extension() == Some(OsStr::new("app"));
-    is_bundle.then(|| bundle.to_path_buf())
-}
-
-/// Whether `DirFleet` has Full Disk Access, so no folder asks for permission.
-/// Probes the privacy database itself, which only that grant can read; the
-/// probe never shows a prompt.
-pub fn has_full_disk_access() -> bool {
-    let Some(dirs) = directories::BaseDirs::new() else {
-        return true;
-    };
-    let database = dirs
-        .home_dir()
-        .join("Library/Application Support/com.apple.TCC/TCC.db");
-    // Only a refusal counts: anything else can't be told apart, and nagging
-    // about it would not help.
-    !matches!(
-        std::fs::File::open(database),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
-    )
-}
-
 /// Opens System Settings at Privacy & Security > Full Disk Access.
 pub fn open_full_disk_access_settings() {
     const URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
     if let Err(error) = Command::new("open").arg(URL).spawn_detached() {
         log::warn!("Failed to open System Settings: {error}");
-    }
-}
-
-/// Starts this app again once the current process has exited, so a new
-/// Full Disk Access grant takes effect. The caller then closes the window.
-pub fn relaunch_after_exit() {
-    // The shell waits for this process to quit, then reopens the bundle.
-    const SCRIPT: &str = "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; open \"$2\"";
-    let Some(bundle) = app_bundle() else {
-        return;
-    };
-    if let Err(error) = Command::new("/bin/sh")
-        .args(["-c", SCRIPT, "sh"])
-        .arg(std::process::id().to_string())
-        .arg(bundle)
-        .spawn_detached()
-    {
-        log::warn!("Failed to relaunch: {error}");
     }
 }
 

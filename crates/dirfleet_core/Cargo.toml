@@ -1,0 +1,45 @@
+[package]
+name = "dirfleet_core"
+version = "0.0.1"
+description = "DirFleet's model and update logic, shared by every shell. No UI and no I/O."
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+homepage = "https://github.com/Leinnan/lwa_fm"
+
+[features]
+default = ["parallel"]
+# Swift type generation for the native macOS shell (`crates/dirfleet_ffi`).
+facet_typegen = ["crux_core/facet_typegen"]
+# Builds sort keys of large listings on all cores; off for wasm.
+parallel = ["dep:rayon"]
+
+[dependencies]
+# Pinned: the latest release (0.20.0) and the facet version it requires exactly.
+crux_core = "=0.20.0"
+facet = "=0.46.5"
+serde = { version = "1", features = ["derive", "rc"] }
+bincode = "=2.0.1"
+foldhash = "0.2"
+# Only collation is used; the same revision as the egui app.
+icu_collator = { git = "https://github.com/unicode-org/icu4x", rev = "4d2b015" }
+icu_locale_core = { git = "https://github.com/unicode-org/icu4x", rev = "4d2b015" }
+rayon = { version = "1.10", optional = true }
+unicode-normalization = "0.1"
+fuzzy-matcher = "0.3"
+glob = "0.3"
+memchr = "2.7"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+# Selection and undo history; egui-free despite the name.
+egui_mev_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994" }
+egui_mev_data_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994" }
+# Plugin manifests (`plugin.toml`) and the values plugins pass around.
+toml = "1"
+serde_json = "1"
+
+[dev-dependencies]
+crux_core = { version = "=0.20.0", features = ["testing"] }
+serde_json = "1"
+
+[lints]
+workspace = true

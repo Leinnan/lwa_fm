@@ -366,7 +366,7 @@ impl ActionToPerform {
             } else {
                 Some(Self::TabAction(
                     TabTarget::ActiveTab,
-                    TabAction::ChangePaths(path.into()),
+                    TabAction::ChangePaths(crate::app::dock::existing_dir(path)),
                 ))
             }
         })

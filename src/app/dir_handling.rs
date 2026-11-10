@@ -1,34 +1,26 @@
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering as AtomicOrdering},
-    },
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use notify::RecursiveMode;
 
-use icu_collator::CollatorBorrowed;
 use rayon::{
     iter::{IntoParallelRefIterator, ParallelIterator},
-    slice::{ParallelSlice, ParallelSliceMut},
+    slice::ParallelSlice,
 };
 
 use crate::{
     app::{
         Data, Search, Sort, database,
         directory_view_settings::{DirectoryShowHidden, DirectoryViewSettings},
-        dock::{CurrentPath, build_collator},
+        dock::CurrentPath,
         open_history,
     },
-    data::files::{
-        DirEntryMetaData, EntryType, Listing, ListingChange, is_hidden_entry, is_system_clutter,
-    },
+    data::files::{Listing, ListingChange, is_hidden_entry, is_shown},
     helper::{DataHolder, canonical_form, normalize_path},
 };
-pub static COLLATER: std::sync::LazyLock<CollatorBorrowed<'static>> =
-    std::sync::LazyLock::new(|| build_collator(false));
 
 use super::dock::TabData;
 
@@ -51,14 +43,7 @@ pub struct LinkedWatchRoots {
     dirs: Vec<PathBuf>,
 }
 
-/// Result of [`read_directory_streaming`].
-pub struct WalkResult {
-    pub listing: Arc<Listing>,
-    /// Canonical targets of the directory symlinks the walk descended into.
-    /// A recursive watch on the root does not follow them, so each needs its
-    /// own watch. Empty for flat reads.
-    pub linked_dirs: Vec<PathBuf>,
-}
+pub use dirfleet_effects::walk::WalkResult;
 
 /// Memoisation store for `TabData::watcher_specs`, so the change-detection
 /// path (`should_refresh_for_directories`) does not rebuild and re-normalise
@@ -434,112 +419,6 @@ impl TabData {
     }
 }
 
-/// How often a deep walk publishes partial results to the UI.
-const PARTIAL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
-
-/// Shared state of one parallel recursive walk.
-struct Walk<'a> {
-    max_depth: usize,
-    show_hidden: bool,
-    cancel: &'a AtomicBool,
-    /// One listing per visited directory; concatenated at the end.
-    parts: std::sync::Mutex<Vec<Listing>>,
-    entries: std::sync::atomic::AtomicUsize,
-    /// Canonical targets of followed directory symlinks (loop protection).
-    followed: std::sync::Mutex<foldhash::HashSet<PathBuf>>,
-    last_partial: std::sync::Mutex<std::time::Instant>,
-    on_partial: &'a (dyn Fn(Arc<Listing>) + Sync),
-}
-
-impl Walk<'_> {
-    fn cancelled(&self) -> bool {
-        self.cancel.load(AtomicOrdering::Relaxed)
-    }
-
-    /// List `dir` (whose entries sit at `depth`) and recurse into its
-    /// sub-directories in parallel. Entry metadata, attributes and link-ness
-    /// all come from the bulk directory read; the only extra syscall is the
-    /// `canonicalize` that guards against symlink loops.
-    fn visit<'scope>(&'scope self, scope: &rayon::Scope<'scope>, dir: &Path, depth: usize) {
-        if self.cancelled() {
-            return;
-        }
-        let dir_name: Arc<str> = Arc::from(crate::helper::canonical_string(dir));
-        let mut builder = crate::data::files::ListingBuilder::with_capacity(64);
-        let dir_index = builder.intern_dir(&dir_name);
-        let pushed = std::cell::Cell::new(0usize);
-        let mut sink = |entry: &crate::fs_enum::RawEntry<'_>| {
-            if !self.show_hidden
-                && (entry.is_hidden_attr()
-                    || entry.name.starts_with_ascii(b'.')
-                    || (cfg!(windows) && entry.name.starts_with_ascii(b'$')))
-            {
-                return;
-            }
-            let meta = entry.metadata();
-            if meta.entry_type == EntryType::Directory && depth < self.max_depth {
-                let child = dir.join(entry.name.to_os_string());
-                if self.should_descend(&child, entry.is_symlink()) {
-                    scope.spawn(move |scope| self.visit(scope, &child, depth + 1));
-                }
-            }
-            builder.push_raw(dir_index, &entry.name, meta);
-            pushed.set(pushed.get() + 1);
-        };
-        // Fall back to `read_dir` only when the bulk read produced nothing,
-        // so a mid-way failure never lists a directory twice.
-        if crate::fs_enum::enumerate(dir, &mut sink).is_err()
-            && pushed.get() == 0
-            && crate::fs_enum::enumerate_std(dir, &mut sink).is_err()
-        {
-            return;
-        }
-        drop(sink);
-        let listing = builder.finish();
-        if listing.is_empty() {
-            return;
-        }
-        self.entries
-            .fetch_add(listing.len(), AtomicOrdering::Relaxed);
-        if let Ok(mut parts) = self.parts.lock() {
-            parts.push(listing);
-        }
-        self.maybe_publish();
-    }
-
-    fn should_descend(&self, path: &Path, is_symlink: bool) -> bool {
-        if !is_symlink {
-            return true;
-        }
-        let Ok(target) = std::fs::canonicalize(path) else {
-            return false;
-        };
-        self.followed
-            .lock()
-            .is_ok_and(|mut followed| followed.insert(target))
-    }
-
-    fn maybe_publish(&self) {
-        let Ok(mut last) = self.last_partial.try_lock() else {
-            return;
-        };
-        if last.elapsed() < PARTIAL_INTERVAL {
-            return;
-        }
-        *last = std::time::Instant::now();
-        drop(last);
-        let snapshot = self.snapshot();
-        (self.on_partial)(Arc::new(snapshot));
-    }
-
-    fn snapshot(&self) -> Listing {
-        self.parts
-            .lock()
-            .map(|parts| Listing::concat(parts.iter()))
-            .unwrap_or_default()
-    }
-}
-
 /// Read every root (one level for `depth <= 1`, recursively otherwise) into a
 /// single listing. A single flat root returns the cached listing itself, with
 /// no copying.
@@ -588,176 +467,48 @@ pub fn read_directory_streaming(
         };
     }
 
-    // A root nested inside another root is already covered by its walk.
-    let roots: Vec<PathBuf> = roots
-        .iter()
-        .filter(|root| {
-            !roots
+    dirfleet_effects::walk::walk(&roots, depth, show_hidden, cancel, on_partial)
+}
+
+/// "Date opened" and "Times opened" from the app's open history, falling
+/// back to the file system's access time. History is looked up once per
+/// folder, then by name.
+pub struct OpenHistoryKeys;
+
+impl dirfleet_effects::sort::OpeningHistory for OpenHistoryKeys {
+    fn keys(&self, listing: &Listing) -> Vec<(u32, u32)> {
+        let by_dir: Vec<_> = if open_history::is_empty() {
+            Vec::new()
+        } else {
+            listing
+                .dirs()
                 .iter()
-                .any(|other| other != *root && root.starts_with(other))
-        })
-        .cloned()
-        .collect();
-
-    let walk = Walk {
-        // `depth` counts levels below the root, matching the former
-        // `walkdir` `max_depth(depth + 1)`.
-        max_depth: depth + 1,
-        show_hidden,
-        cancel,
-        parts: std::sync::Mutex::new(Vec::new()),
-        entries: std::sync::atomic::AtomicUsize::new(0),
-        followed: std::sync::Mutex::new(foldhash::HashSet::default()),
-        last_partial: std::sync::Mutex::new(std::time::Instant::now()),
-        on_partial,
-    };
-    rayon::scope(|scope| {
-        for root in &roots {
-            let walk = &walk;
-            let root = root.clone();
-            scope.spawn(move |scope| walk.visit(scope, &root, 1));
-        }
-    });
-    if walk.cancelled() {
-        return WalkResult {
-            listing: Arc::default(),
-            linked_dirs: Vec::new(),
+                .map(|dir| open_history::records_in(Path::new(dir.as_ref())))
+                .collect()
         };
-    }
-    let listing = Arc::new(walk.snapshot());
-    let mut linked_dirs: Vec<PathBuf> = walk
-        .followed
-        .into_inner()
-        .unwrap_or_default()
-        .iter()
-        .map(|target| canonical_form(target))
-        .collect();
-    linked_dirs.sort();
-    linked_dirs.dedup();
-    WalkResult {
-        listing,
-        linked_dirs,
-    }
-}
-
-/// A key per entry of `listing` from its open history record (if any) and
-/// metadata. History is looked up once per folder, then by name.
-fn opening_keys(
-    listing: &Listing,
-    key: impl Fn(Option<open_history::OpenRecord>, &DirEntryMetaData) -> (u32, u32),
-) -> Vec<(u32, u32)> {
-    let by_dir: Vec<_> = if open_history::is_empty() {
-        Vec::new()
-    } else {
-        listing
-            .dirs()
-            .iter()
-            .map(|dir| open_history::records_in(Path::new(dir.as_ref())))
+        (0..listing.len())
+            .map(|index| {
+                let record = by_dir
+                    .get(listing.dir_index(index))
+                    .and_then(Option::as_ref)
+                    .and_then(|names| names.get(listing.name(index)).copied());
+                (
+                    record.map_or(0, |record| record.count),
+                    *open_history::last_opened(record, listing.meta(index).accessed_at),
+                )
+            })
             .collect()
-    };
-    (0..listing.len())
-        .map(|index| {
-            let record = by_dir
-                .get(listing.dir_index(index))
-                .and_then(Option::as_ref)
-                .and_then(|names| names.get(listing.name(index)).copied());
-            key(record, listing.meta(index))
-        })
-        .collect()
-}
-
-/// Folders first in both directions, like the other sorts.
-fn sort_by_opening(
-    order: &mut [u32],
-    keys: &[(u32, u32)],
-    is_file: &(impl Fn(u32) -> bool + Sync),
-    invert: bool,
-) {
-    use std::cmp::Reverse;
-    if invert {
-        order.par_sort_unstable_by_key(|&i| (is_file(i), Reverse(keys[i as usize])));
-    } else {
-        order.par_sort_unstable_by_key(|&i| (is_file(i), keys[i as usize]));
     }
 }
 
 /// Compute the display order (indices into `listing`) for `settings`.
 pub fn sort_order(listing: &Listing, settings: &DirectoryViewSettings) -> Vec<u32> {
-    use std::cmp::Reverse;
-    let mut order: Vec<u32> = (0..listing.len() as u32).collect();
-    let is_file = |index: u32| listing.is_file(index as usize);
-    let meta = |index: u32| listing.meta(index as usize);
-    match (settings.sorting, settings.invert_sort) {
-        (Sort::Name, invert) => {
-            let keys = listing.sort_keys();
-            // Folders stay first in both directions; only names reverse.
-            order.par_sort_unstable_by(|a, b| {
-                let names = keys.get(*a as usize).cmp(keys.get(*b as usize));
-                is_file(*a)
-                    .cmp(&is_file(*b))
-                    .then(if invert { names.reverse() } else { names })
-            });
-        }
-        (Sort::Modified, false) => {
-            order.par_sort_unstable_by_key(|&i| (is_file(i), meta(i).modified_at));
-        }
-        (Sort::Modified, true) => {
-            order.par_sort_unstable_by_key(|&i| (is_file(i), Reverse(meta(i).modified_at)));
-        }
-        (Sort::Created, false) => {
-            order.par_sort_unstable_by_key(|&i| (is_file(i), meta(i).created_at));
-        }
-        (Sort::Created, true) => {
-            order.par_sort_unstable_by_key(|&i| (is_file(i), Reverse(meta(i).created_at)));
-        }
-        (Sort::Accessed, invert) => {
-            let opened = opening_keys(listing, |record, meta| {
-                (0, *open_history::last_opened(record, meta.accessed_at))
-            });
-            sort_by_opening(&mut order, &opened, &is_file, invert);
-        }
-        (Sort::MostOpened, invert) => {
-            // Ties (most files: never opened here) fall back to recency.
-            let opened = opening_keys(listing, |record, meta| {
-                (
-                    record.map_or(0, |record| record.count),
-                    *open_history::last_opened(record, meta.accessed_at),
-                )
-            });
-            sort_by_opening(&mut order, &opened, &is_file, invert);
-        }
-        (Sort::Size, false) => {
-            order.par_sort_unstable_by_key(|&i| (is_file(i), meta(i).size));
-        }
-        (Sort::Size, true) => {
-            order.par_sort_unstable_by_key(|&i| (is_file(i), Reverse(meta(i).size)));
-        }
-        (Sort::Kind, invert) => {
-            // By extension, then name; folders first in both directions.
-            let keys = listing.sort_keys();
-            let kinds: Vec<String> = (0..listing.len())
-                .map(|index| {
-                    crate::app::dock::kind_label(
-                        listing.name(index),
-                        listing.meta(index).entry_type,
-                    )
-                })
-                .collect();
-            order.par_sort_unstable_by(|a, b| {
-                let (a, b) = (*a as usize, *b as usize);
-                let kind = kinds[a].cmp(&kinds[b]);
-                listing.is_file(a).cmp(&listing.is_file(b)).then(
-                    (if invert { kind.reverse() } else { kind })
-                        .then_with(|| keys.get(a).cmp(keys.get(b))),
-                )
-            });
-        }
-        (Sort::Random, _) => {
-            use rand::seq::SliceRandom;
-            order.shuffle(&mut rand::thread_rng());
-        }
-    }
-    order
+    dirfleet_effects::sort::sort_order(
+        listing,
+        settings.sorting,
+        settings.invert_sort,
+        &OpenHistoryKeys,
+    )
 }
 
 /// Snapshot of the inputs of the last filter run, used to detect when a new
@@ -823,20 +574,31 @@ pub fn filter_visible(
     show_hidden: bool,
     search: Option<&Search>,
 ) -> Vec<u32> {
-    let compiled = crate::app::search::filter::CompiledQuery::new(search);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let compiled = crate::app::search::filter::CompiledQuery::new(search, now);
     let folded = compiled
         .as_ref()
         .filter(|query| query.needs_folded)
         .map(|_| listing.folded_names());
+    let opened: Vec<u32> = if compiled.as_ref().is_some_and(|query| query.needs_opened) {
+        dirfleet_effects::sort::OpeningHistory::keys(&OpenHistoryKeys, listing)
+            .into_iter()
+            .map(|(_, last)| last)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let keep = |&index: &u32| -> bool {
         let index = index as usize;
         let name = listing.name(index);
-        if is_system_clutter(name) || (!show_hidden && is_hidden_entry(name, listing.meta(index))) {
+        if !is_shown(name, listing.meta(index), show_hidden) {
             return false;
         }
         compiled
             .as_ref()
-            .is_none_or(|cs| cs.matches(listing, folded, index))
+            .is_none_or(|cs| cs.matches(listing, folded, &opened, index))
     };
     if candidates.len() < PARALLEL_FILTER_THRESHOLD {
         return candidates.iter().copied().filter(|i| keep(i)).collect();

@@ -1,0 +1,33 @@
+# The core is pure: I/O, threads, processes and clocks belong to effect handlers.
+disallowed-methods = [
+    { path = "std::fs::read_dir", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::fs::metadata", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::fs::symlink_metadata", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::fs::canonicalize", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::fs::read", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::fs::read_to_string", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::fs::write", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::fs::create_dir_all", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::fs::remove_file", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::fs::rename", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::path::Path::exists", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::path::Path::is_dir", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::path::Path::is_file", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::path::Path::metadata", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::path::Path::symlink_metadata", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::path::Path::canonicalize", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::path::Path::read_dir", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::thread::spawn", reason = "threads belong in dirfleet_effects" },
+    { path = "std::time::Instant::now", reason = "time comes from a Time effect" },
+    { path = "std::time::SystemTime::now", reason = "time comes from a Time effect" },
+    { path = "std::env::var", reason = "the environment is read by the shell" },
+    { path = "std::env::current_dir", reason = "the environment is read by the shell" },
+]
+disallowed-types = [
+    { path = "std::fs::File", reason = "I/O belongs in dirfleet_effects" },
+    { path = "std::process::Command", reason = "processes belong in dirfleet_effects" },
+]
+
+# facet's derived description of `app::Event` (a hundred-odd variants) is one
+# array; the core has no large arrays of its own.
+array-size-threshold = 65536
