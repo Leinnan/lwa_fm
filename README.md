@@ -1,4 +1,4 @@
-# lwa_fm
+# DirFleet
 
 [![build](https://github.com/Leinnan/lwa_fm/actions/workflows/rust.yml/badge.svg)](https://github.com/Leinnan/lwa_fm/actions/workflows/rust.yml) [![license](https://img.shields.io/github/license/Leinnan/lwa_fm)](LICENSE)
 

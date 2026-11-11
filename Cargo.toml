@@ -186,6 +186,7 @@ name = "DirFleet"
 icon = ["static/icon.ico", "static/window_icon.png"]
 identifier = "io.github.leinnan.dirfleet"
 osx_url_schemes = ["io.github.leinnan.dirfleet"]
+category = "Utility"
 short_description = "File Manager"
 long_description = "File Manager built with egui in Rust"
 # The privacy strings and the rest of the hand-written plist (`just build_mac_app` uses it as is).

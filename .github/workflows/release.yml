@@ -55,7 +55,7 @@ jobs:
           - { system: windows-latest, suffix: windows-x64 }
           - { system: macos-15, suffix: macos-arm64 }
           # Older glibc, so the AppImage runs on more distros.
-          - { system: ubuntu-22.04, suffix: linux-x86_64 }
+          - { system: ubuntu-22.04, suffix: x86_64 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -79,6 +79,19 @@ jobs:
           # Ad-hoc signature, CI doesn't have a signing certificate.
           DIRFLEET_SIGN_IDENTITY: "-"
         run: just installer
+      - name: Check AppImage layout
+        # The AppImage catalog rejects an AppImage without these at the top of the AppDir.
+        if: runner.os == 'Linux'
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$GITHUB_WORKSPACE"/target/release/installer/*.AppImage --appimage-extract > /dev/null
+          for file in .DirIcon lwa_fm.desktop lwa_fm.png; do
+            if [ ! -s "squashfs-root/$file" ]; then
+              echo "::error::The AppImage has no $file"
+              exit 1
+            fi
+          done
+          file -L squashfs-root/.DirIcon | grep -q "PNG image data"
       - name: Name installer
         shell: bash
         env:

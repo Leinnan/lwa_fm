@@ -11,7 +11,7 @@ list:
 # Install tools required for bundling
 [group('setup')]
 install-tools:
-    cargo install --git https://github.com/Leinnan/cargo-bundler --rev fd6436deb575361d7d2b467dcffd037bc9e3c936
+    cargo install --git https://github.com/Leinnan/cargo-bundler --rev 3164be6d5738677d7014da67fa18cfdbdff30b03
 
 # Bundles project
 [group('build')]
