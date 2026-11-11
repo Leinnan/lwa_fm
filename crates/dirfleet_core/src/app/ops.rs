@@ -51,6 +51,15 @@ pub enum ListDirOutput {
     Failed(String),
     /// The folder exists but the app may not read it.
     Denied(String),
+    /// The archive lists nothing without its password; `wrong` when the
+    /// one given did not fit.
+    NeedsPassword {
+        wrong: bool,
+    },
+    /// The folder is on a server that is not connected: the connection's id.
+    NeedsConnection {
+        connection: String,
+    },
 }
 
 /// Listings compare by identity: they are shared, never rebuilt equal.
@@ -72,6 +81,7 @@ impl PartialEq for ListDirOutput {
                 },
             ) => Arc::ptr_eq(listing, other_listing) && order == other_order && view == other_view,
             (Self::Failed(a), Self::Failed(b)) | (Self::Denied(a), Self::Denied(b)) => a == b,
+            (Self::NeedsPassword { wrong: a }, Self::NeedsPassword { wrong: b }) => a == b,
             _ => false,
         }
     }
@@ -248,6 +258,9 @@ pub struct PersistedState {
     #[serde(default)]
     #[facet(opaque)]
     pub saved_searches: crate::search::saved::SavedSearches,
+    /// The servers the user saved, without their passwords.
+    #[serde(default)]
+    pub connections: Vec<super::Connection>,
     /// What the user chose for each plugin. Opaque to facet, as above.
     #[serde(default)]
     #[facet(opaque)]

@@ -1,0 +1,48 @@
+[package]
+name = "dirfleet_archive"
+version = "0.0.1"
+description = "Reads and extracts archives: uunpack's extraction core, copied without its Swift bindings."
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "MIT"
+
+[features]
+default = []
+# Falls back to the system's libarchive for formats the native backends
+# don't read; whatever links this crate must then link `-larchive`. Has no
+# effect on Windows.
+libarchive = []
+
+[dependencies]
+rars = { version = "0.12.4", default-features = false, features = ["encryption", "parallel"] }
+bzip2 = "0.6"
+cab = "0.6"
+brotli-decompressor = "6"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["frame", "std"] }
+quick-xml = "0.38"
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "lzip", "optimization"] }
+rayon = "1.10"
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["aes256", "bzip2", "deflate", "zstd", "lz4", "brotli"] }
+tar = { version = "0.4", default-features = false }
+zip = { version = "9.4", default-features = false, features = ["aes-crypto", "bzip2", "deflate64", "deflate-flate2-zlib-rs", "lzma", "ppmd", "xz", "zstd", "legacy-zip"] }
+zstd = "0.14"
+thiserror = "2"
+
+[target.'cfg(not(windows))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+] }
+
+[dev-dependencies]
+rars = { version = "0.12.4", default-features = false, features = ["encryption", "parallel", "write"] }
+tempfile = "3"
+# Writes 7z archives for the tests.
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["aes256", "compress", "util"] }

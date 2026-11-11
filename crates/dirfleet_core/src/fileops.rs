@@ -3,6 +3,52 @@
 
 use std::path::{Path, PathBuf};
 
+use facet::Facet;
+use serde::{Deserialize, Serialize};
+
+/// The kinds of archive the app makes.
+#[derive(Facet, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(C)]
+pub enum ArchiveFormat {
+    #[default]
+    Zip,
+    SevenZip,
+    TarGz,
+    TarZst,
+    TarXz,
+}
+
+impl ArchiveFormat {
+    pub const ALL: [Self; 5] = [
+        Self::Zip,
+        Self::SevenZip,
+        Self::TarGz,
+        Self::TarZst,
+        Self::TarXz,
+    ];
+
+    /// What its files end with, without the dot.
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Zip => "zip",
+            Self::SevenZip => "7z",
+            Self::TarGz => "tar.gz",
+            Self::TarZst => "tar.zst",
+            Self::TarXz => "tar.xz",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Zip => "Zip",
+            Self::SevenZip => "7z",
+            Self::TarGz => "Tar, gzip",
+            Self::TarZst => "Tar, Zstandard",
+            Self::TarXz => "Tar, xz",
+        }
+    }
+}
+
 /// One trashed item, as shown in the view: where it was deleted from, and when.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrashKey {
@@ -59,6 +105,27 @@ pub enum FileOp {
     },
     /// Copy each item next to itself as "name - Copy".
     Duplicate(Vec<PathBuf>),
+    /// Make the archive `dst` of `srcs`, folders with all they hold.
+    Compress {
+        srcs: Vec<PathBuf>,
+        /// The archive's file, which must not exist yet.
+        dst: PathBuf,
+        format: ArchiveFormat,
+    },
+    /// Take items out of an archive into the folder `dst`.
+    Extract {
+        /// The archive's file: a path, or the location of an archive that
+        /// is itself inside another.
+        archive: PathBuf,
+        /// What to take, by path inside the archive, folders with all they
+        /// hold; everything when empty.
+        members: Vec<String>,
+        dst: PathBuf,
+        policy: ConflictPolicy,
+        /// Keep what comes out together: an archive with several items at
+        /// its top goes into a new folder named after it.
+        own_folder: bool,
+    },
     /// Reverts an earlier operation.
     Undo(Undo),
 }
@@ -68,7 +135,9 @@ impl FileOp {
     /// that would keep a drive busy. Recycle Bin entries are not listed.
     pub fn paths(&self) -> Vec<&Path> {
         match self {
-            Self::Copy { srcs, dst, .. } | Self::Move { srcs, dst, .. } => srcs
+            Self::Copy { srcs, dst, .. }
+            | Self::Move { srcs, dst, .. }
+            | Self::Compress { srcs, dst, .. } => srcs
                 .iter()
                 .map(PathBuf::as_path)
                 .chain(std::iter::once(dst.as_path()))
@@ -82,10 +151,34 @@ impl FileOp {
                 .flat_map(|(from, to)| [from.as_path(), to.as_path()])
                 .collect(),
             Self::NewFolder { parent } | Self::NewFile { parent } => vec![parent],
+            // The archive is only read, and may not be a file of its own.
+            Self::Extract { dst, .. } => vec![dst],
             Self::RestoreTrashed(_) | Self::PurgeTrashed(_) | Self::EmptyTrash | Self::Undo(_) => {
                 Vec::new()
             }
         }
+    }
+
+    /// Whether this can take long because of how much data it handles:
+    /// copies, moves and deletions. Such operations wait their turn on the
+    /// drives they use and can be paused; the others are done at once, in
+    /// the order they were asked for.
+    pub const fn is_bulk(&self) -> bool {
+        matches!(
+            self,
+            Self::Copy { .. }
+                | Self::Move { .. }
+                | Self::Duplicate(_)
+                | Self::Delete(_)
+                | Self::Extract { .. }
+                | Self::Compress { .. }
+        )
+    }
+
+    /// Whether it can be held where it is and let go on. An extraction
+    /// waits its turn like a copy but, once started, runs to its end.
+    pub const fn can_pause(&self) -> bool {
+        self.is_bulk() && !matches!(self, Self::Extract { .. })
     }
 
     /// Whether running this can add to or take from the Recycle Bin.
@@ -119,6 +212,14 @@ impl FileOp {
             Self::NewFolder { .. } => "Created a folder".to_owned(),
             Self::NewFile { .. } => "Created a file".to_owned(),
             Self::Duplicate(paths) => format!("Duplicated {}", count(paths.len())),
+            Self::Extract { archive, dst, .. } => format!(
+                "Extracted {} to {}",
+                display_name(archive),
+                display_name(dst)
+            ),
+            Self::Compress { srcs, dst, .. } => {
+                format!("Compressed {} to {}", count(srcs.len()), display_name(dst))
+            }
             Self::Undo(undo) => format!("Undid {}", undo.describe()),
         }
     }
@@ -151,6 +252,14 @@ impl FileOp {
             Self::NewFolder { .. } => "Creating a folder".to_owned(),
             Self::NewFile { .. } => "Creating a file".to_owned(),
             Self::Duplicate(paths) => format!("Duplicating {}", items(paths.len())),
+            Self::Extract { archive, dst, .. } => format!(
+                "Extracting {} to {}",
+                display_name(archive),
+                display_name(dst)
+            ),
+            Self::Compress { srcs, dst, .. } => {
+                format!("Compressing {} to {}", items(srcs.len()), display_name(dst))
+            }
             Self::Undo(undo) => format!("Undo {}", undo.describe()),
         }
     }
@@ -195,6 +304,12 @@ pub enum FileOpEvent {
         /// 0.0 ..= 1.0
         fraction: f32,
         current: String,
+        /// Bytes written so far and bytes to write, while data is copied;
+        /// both zero for operations counted in items.
+        bytes_done: u64,
+        bytes_total: u64,
+        /// How fast it copies now; zero when not known.
+        bytes_per_second: u64,
     },
     Finished(Outcome),
 }
@@ -216,6 +331,12 @@ pub struct Outcome {
     pub created: Vec<PathBuf>,
     /// The Recycle Bin's contents may have changed.
     pub trash_changed: bool,
+    /// Every file it copied was read back and found the same as its
+    /// original.
+    pub verified: bool,
+    /// It stopped because the archive wants a password: `Some(true)` when
+    /// the one it had did not fit.
+    pub needs_password: Option<bool>,
 }
 
 impl Outcome {

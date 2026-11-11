@@ -7,6 +7,7 @@ use crux_core::capability::Operation;
 use facet::Facet;
 use serde::{Deserialize, Serialize};
 
+use super::archives::Opening;
 use super::{DirFleet, Effect, Event, Model, PickFolderOutput, Tab, ToastKind, tab_id};
 use crate::listing::EntryType;
 
@@ -73,12 +74,8 @@ impl Tab {
     /// The selected rows' paths, or the cursor's when nothing is selected,
     /// each with whether it is a folder to browse.
     fn chosen(&self) -> Vec<(String, bool)> {
-        let rows: Vec<usize> = if self.selection.is_empty() {
-            self.selection.cursor().into_iter().collect()
-        } else {
-            self.selection.rows().collect()
-        };
-        rows.into_iter()
+        self.chosen_rows()
+            .into_iter()
             .filter_map(|row| {
                 let entry = *self.order.get(row)? as usize;
                 let folder = self.listing.meta(entry).entry_type == EntryType::Directory;
@@ -88,8 +85,22 @@ impl Tab {
             .collect()
     }
 
-    /// The chosen paths, or the tab's folder when none is chosen.
+    /// The selected rows, or the cursor's when nothing is selected.
+    fn chosen_rows(&self) -> Vec<usize> {
+        if self.selection.is_empty() {
+            self.selection.cursor().into_iter().collect()
+        } else {
+            self.selection.rows().collect()
+        }
+    }
+
+    /// The chosen paths, or the tab's folder when none is chosen. Nothing
+    /// where the tab shows no folder of this machine: other programs can't
+    /// be handed what is inside an archive.
     fn chosen_or_folder(&self) -> Vec<String> {
+        if !self.is_local() {
+            return Vec::new();
+        }
         let chosen: Vec<String> = self.chosen().into_iter().map(|(path, _)| path).collect();
         if chosen.is_empty() {
             self.path.clone().into_iter().collect()
@@ -110,21 +121,12 @@ impl DirFleet {
         let Some(state) = tab_id(tab).and_then(|id| model.tabs.get(&id)) else {
             return Command::done();
         };
-        let Some(entry) = state.order.get(row as usize).map(|&entry| entry as usize) else {
-            return Command::done();
-        };
-        let Some(path) = state.row_path(row as usize) else {
-            return Command::done();
-        };
-        let path = path.to_string_lossy().into_owned();
-        if state.listing.meta(entry).entry_type == EntryType::Directory {
-            Command::event(Event::Navigate { tab, path })
-        } else {
-            Self::system(SystemOp::Open(vec![path.clone()])).and(Self::record_opens(
-                model,
-                tab,
-                vec![path],
-            ))
+        match state.opening(row as usize, model.settings.browse_archives) {
+            None => Command::done(),
+            Some(Opening::Browse(path)) => Command::event(Event::Navigate { tab, path }),
+            Some(Opening::Open(path)) => Self::system(SystemOp::Open(vec![path.clone()]))
+                .and(Self::record_opens(model, tab, vec![path])),
+            Some(Opening::OpenElsewhere(location)) => Self::open_elsewhere(location),
         }
     }
 
@@ -137,13 +139,23 @@ impl DirFleet {
         let Some(state) = model.tabs.get(&id) else {
             return Command::done();
         };
-        let (folders, files): (Vec<_>, Vec<_>) = state.chosen().into_iter().partition(|c| c.1);
-        let files: Vec<String> = files.into_iter().map(|(path, _)| path).collect();
+        let (mut folders, mut files, mut elsewhere) = (Vec::new(), Vec::new(), Vec::new());
+        for row in state.chosen_rows() {
+            match state.opening(row, model.settings.browse_archives) {
+                Some(Opening::Browse(path)) => folders.push((path, true)),
+                Some(Opening::Open(path)) => files.push(path),
+                Some(Opening::OpenElsewhere(location)) => elsewhere.push(location),
+                None => {}
+            }
+        }
         let open_files = if files.is_empty() {
             Command::done()
         } else {
             Self::system(SystemOp::Open(files.clone())).and(Self::record_opens(model, tab, files))
         };
+        let open_files = open_files.and(Command::all(
+            elsewhere.into_iter().map(Self::open_elsewhere),
+        ));
         let browse = match folders.as_slice() {
             [] => Command::done(),
             [(path, _)] => Command::event(Event::Navigate {
@@ -180,6 +192,9 @@ impl DirFleet {
 
     /// The events that hand things to the system.
     pub(super) fn system_event(model: &mut Model, event: Event) -> Command<Effect, Event> {
+        if let Event::Materialized { location, output } = event {
+            return Self::materialized(model, location, output);
+        }
         let state = |tab: u32| tab_id(tab).and_then(|id| model.tabs.get(&id));
         match event {
             Event::RevealSelection { tab } => state(tab)
@@ -199,6 +214,7 @@ impl DirFleet {
                     Self::system(SystemOp::CopyText(paths.join("\n")))
                 }),
             Event::OpenInTerminal { tab } => state(tab)
+                .filter(|state| state.is_local())
                 .and_then(|state| state.path.clone())
                 .map_or_else(Command::done, |folder| {
                     let app = model.settings.terminal.clone();

@@ -1,0 +1,36 @@
+[package]
+name = "dirfleet_remote"
+version = "0.0.1"
+description = "Servers as folders for DirFleet: SFTP, FTP, WebDAV and S3 behind one blocking interface."
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+# FTP, WebDAV and S3 through one interface.
+opendal = { version = "0.59", default-features = false, features = [
+    "http-transport-reqwest",
+    "executors-tokio",
+    "layers-timeout",
+    "layers-retry",
+    "services-ftp",
+    "services-webdav",
+    "services-s3",
+    "services-fs",
+    "services-memory",
+] }
+# SFTP: opendal's own needs the system's ssh and Unix.
+russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh-sftp = "3"
+# Everything above is asynchronous; one small runtime of its own runs it.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"] }
+futures = "0.3"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+# The test SFTP server makes itself a host key.
+rand = { version = "0.10", features = ["thread_rng"] }
+
+[lints]
+workspace = true

@@ -36,6 +36,12 @@ pub struct TabRows {
     pub renaming: Option<Rc<RenameView>>,
 }
 
+/// Whether a tab's path is a folder on this machine, whose entries other
+/// programs can be handed, and not a place inside an archive.
+pub fn is_on_disk(path: &str) -> bool {
+    dirfleet_core::Location::parse(path).as_local().is_some()
+}
+
 impl TabRows {
     /// The row at `index` of the folder, when the core sent it.
     pub fn row(&self, index: u32) -> Option<&Rc<RowView>> {
@@ -45,9 +51,10 @@ impl TabRows {
     }
 
     /// Where the entry `row` is on disk. `None` for what has no path of its
-    /// own to act on: an item in the Recycle Bin, a tab without a folder.
+    /// own to act on: an item in the Recycle Bin, a tab without a folder, an
+    /// entry inside an archive.
     pub fn path_of(&self, row: &RowView) -> Option<PathBuf> {
-        (!self.in_trash && !self.path.is_empty())
+        (!self.in_trash && !self.path.is_empty() && is_on_disk(&self.path))
             .then(|| Path::new(&self.path).join(&row.folder).join(&row.name))
     }
 

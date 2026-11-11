@@ -1,7 +1,7 @@
 //! Moving a tab between folders: every visit is recorded, and Back and
 //! Forward return to where you were (selection and scroll row), as egui's
 //! history does, with the search each entry had.
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crux_core::Command;
 
@@ -104,9 +104,9 @@ impl DirFleet {
     pub(super) fn up(model: &mut Model, tab: u32) -> Command<Effect, Event> {
         let parent = tab_id(tab)
             .and_then(|id: TabId| model.tabs.get(&id))
-            .and_then(|state| state.path.as_deref())
-            .and_then(|path| Path::new(path).parent())
-            .map(|parent| parent.to_string_lossy().into_owned());
+            .and_then(Tab::location)
+            .and_then(|location| location.parent())
+            .map(|parent| parent.to_string());
         parent.map_or_else(Command::done, |path| Self::navigate(model, tab, path))
     }
 }

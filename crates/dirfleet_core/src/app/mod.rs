@@ -7,7 +7,9 @@
 //! current one".
 
 mod access;
+mod archives;
 mod batch;
+mod checksums;
 mod files;
 mod finder;
 pub mod format;
@@ -23,6 +25,7 @@ mod plugin_jobs;
 mod plugin_results;
 mod plugin_views;
 mod plugins;
+mod remote;
 mod saved;
 mod selection;
 mod settings;
@@ -36,7 +39,6 @@ mod workspace;
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
-use std::path::Path;
 use std::sync::Arc;
 
 use crux_core::command::AbortHandle;
@@ -47,21 +49,31 @@ use facet::Facet;
 use serde::{Deserialize, Serialize};
 
 use crate::columns::{Column, ListColumns};
+pub use crate::fileops::ArchiveFormat;
 use crate::history::{History, Place};
 use crate::ids::{IdAllocator, TabId, WindowId};
 use crate::listing::{EntryType, Listing, is_shown};
+use crate::location::Location;
 use crate::plugins::CallContext;
 use crate::search::Search;
 use crate::{DisplayType, Sort};
 pub use access::{
     AccessView, DiskAccess, DiskAccessCheck, DiskAccessPrompt, QuitApp, TerminalCheck,
 };
+pub use archives::{
+    CompressView, FormatChoice, LocationView, Materialize, Materialized, PasswordView, Secret,
+    SetArchivePassword, Unreadable, is_archive_name,
+};
 pub use batch::{BatchFields, BatchItem, BatchMode, BatchRenameView};
+pub use checksums::{
+    Algorithm, ChecksumRow, ChecksumVerdict, ChecksumsView, HashFile, HashUpdate, ReadSidecar,
+    StopHash,
+};
 use egui_mev_core::selection::Selection;
 pub use files::{
     ActivityState, ActivityView, CancelFileOp, ClipboardChanges, ClipboardDone, ClipboardOp,
-    ConflictChoice, ConflictView, Conflicts, FileOpUpdate, FindConflicts, OperationView,
-    RenameView, RunFileOp, TransferTarget,
+    ConflictChoice, ConflictView, Conflicts, FileOpUpdate, FindConflicts, OperationState,
+    OperationView, PauseFileOp, RenameView, RunFileOp, TransferTarget,
 };
 pub use finder::{
     ChipView, Clock, Delay, FilterChoice, FilterGroup, SearchHelpRow, SearchScope, SearchView,
@@ -96,9 +108,13 @@ pub use plugins::{
     PluginControl, PluginFolderChanged, PluginMessages, PluginNotice, PluginShortcutSetting,
     PluginShortcutView, PluginView, PluginsFound, PluginsView, WatchPlugins,
 };
+pub use remote::{
+    Connect, ConnectFields, ConnectOutput, ConnectView, Connection, Disconnect, ForgetSecret,
+    HostKeyView, SchemeChoice,
+};
 pub use saved::{SavedBadge, SavedSearchView};
 pub use selection::RowRange;
-pub use settings::{Appearance, IconSize, IconSizeChoice, Settings};
+pub use settings::{Appearance, IconSize, IconSizeChoice, QueueMode, Settings};
 pub use sidebar::{
     Bookmark, DriveList, DriveStatusView, Eject, EjectConfirmView, EjectDone, SidebarIcon,
     SidebarItem, SidebarSection, SidebarSectionView, UserFolders, WatchDrives,
@@ -810,7 +826,138 @@ pub enum Event {
         tab: u32,
         text: String,
     },
+    /// Hold a copy, move or deletion where it is. One that has not started
+    /// loses its turn; one that runs frees its drive for those waiting.
+    PauseOperation {
+        id: u64,
+    },
+    /// Let a paused operation go on, or wait its turn again.
+    ResumeOperation {
+        id: u64,
+    },
+    PauseAllOperations,
+    ResumeAllOperations,
+    /// Start a waiting operation without waiting for its turn.
+    StartOperationNow {
+        id: u64,
+    },
+    /// Take the selected archives' contents out beside them; inside an
+    /// archive, the selected entries (or the folder shown) into the folder
+    /// the archive is in.
+    ExtractHere {
+        tab: u32,
+    },
+    /// The same, into `folder`.
+    ExtractTo {
+        tab: u32,
+        folder: String,
+    },
+    /// Open the dialog that connects to a server: a new one, or the saved
+    /// connection `edit`. Once connected, `tab` goes there.
+    OpenConnect {
+        tab: u32,
+        edit: Option<String>,
+    },
+    /// What the connect dialog's fields hold now.
+    SetConnect {
+        fields: ConnectFields,
+    },
+    /// Save the dialog's connection and connect, with the password typed
+    /// (empty for the one in the keychain); `remember` keeps it there.
+    SubmitConnect {
+        secret: Secret,
+        remember: bool,
+    },
+    CancelConnect,
+    /// The answer to "is this the right server?" about a key it showed.
+    AcceptHostKey {
+        accept: bool,
+    },
+    /// Forget a saved connection and its password.
+    RemoveConnection {
+        id: String,
+    },
+    /// Close a server's connection; it stays saved.
+    DisconnectServer {
+        id: String,
+    },
+    /// Open the Compress dialog for the tab's selection.
+    StartCompress {
+        tab: u32,
+    },
+    /// The dialog's name (without the format's ending) and format.
+    SetCompress {
+        tab: u32,
+        name: String,
+        format: ArchiveFormat,
+    },
+    /// Make the archive beside what goes into it.
+    ApplyCompress {
+        tab: u32,
+    },
+    CancelCompress {
+        tab: u32,
+    },
+    /// The password an archive asked for; what waited for it goes on.
+    SubmitArchivePassword {
+        password: Secret,
+    },
+    /// No password: what waited for it is given up.
+    CancelArchivePassword,
+    /// Work out one of a file's checksums, for the inspector.
+    ComputeChecksum {
+        path: String,
+        algorithm: Algorithm,
+    },
+    /// Stop reading the file for its checksums.
+    CancelChecksum {
+        path: String,
+    },
+    /// Compare the file with a checksum the user pasted: the text may hold
+    /// more than the checksum, and its length says which kind it is. Empty
+    /// text ends the comparison.
+    VerifyChecksum {
+        path: String,
+        expected: String,
+    },
+    /// Compare the file with the checksum the checksum file `sidecar`, in
+    /// the same folder, holds for it.
+    VerifySidecar {
+        path: String,
+        sidecar: String,
+    },
+    /// Copy one of the file's checksums as text.
+    CopyChecksum {
+        path: String,
+        algorithm: Algorithm,
+    },
 
+    #[serde(skip)]
+    #[facet(skip)]
+    ConnectAnswered {
+        id: String,
+        output: ConnectOutput,
+    },
+    #[serde(skip)]
+    #[facet(skip)]
+    Materialized {
+        location: String,
+        output: Materialized,
+    },
+    #[serde(skip)]
+    #[facet(skip)]
+    ChecksumUpdated {
+        id: u64,
+        path: String,
+        update: HashUpdate,
+    },
+    #[serde(skip)]
+    #[facet(skip)]
+    SidecarRead {
+        path: String,
+        sidecar: String,
+        expected: Option<String>,
+    },
     #[serde(skip)]
     #[facet(skip)]
     Listed {
@@ -1204,6 +1351,55 @@ impl Event {
         )
     }
 
+    /// Checksums, archives and servers: see [`DirFleet::place_event`].
+    const fn is_place(&self) -> bool {
+        self.is_checksum() || self.is_archive() || self.is_remote()
+    }
+
+    /// Connecting to servers (`remote`).
+    const fn is_remote(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenConnect { .. }
+                | Self::SetConnect { .. }
+                | Self::SubmitConnect { .. }
+                | Self::CancelConnect
+                | Self::AcceptHostKey { .. }
+                | Self::RemoveConnection { .. }
+                | Self::DisconnectServer { .. }
+                | Self::ConnectAnswered { .. }
+        )
+    }
+
+    /// Extracting, and archive passwords (`archives`).
+    const fn is_archive(&self) -> bool {
+        matches!(
+            self,
+            Self::ExtractHere { .. }
+                | Self::ExtractTo { .. }
+                | Self::SubmitArchivePassword { .. }
+                | Self::CancelArchivePassword
+                | Self::StartCompress { .. }
+                | Self::SetCompress { .. }
+                | Self::ApplyCompress { .. }
+                | Self::CancelCompress { .. }
+        )
+    }
+
+    /// The inspector's checksums (`checksums`).
+    const fn is_checksum(&self) -> bool {
+        matches!(
+            self,
+            Self::ComputeChecksum { .. }
+                | Self::CancelChecksum { .. }
+                | Self::VerifyChecksum { .. }
+                | Self::VerifySidecar { .. }
+                | Self::CopyChecksum { .. }
+                | Self::ChecksumUpdated { .. }
+                | Self::SidecarRead { .. }
+        )
+    }
+
     /// File operations, renames and the clipboard (`files`).
     const fn is_file(&self) -> bool {
         matches!(
@@ -1222,6 +1418,11 @@ impl Event {
                 | Self::Undo
                 | Self::Redo
                 | Self::CancelOperation { .. }
+                | Self::PauseOperation { .. }
+                | Self::ResumeOperation { .. }
+                | Self::PauseAllOperations
+                | Self::ResumeAllOperations
+                | Self::StartOperationNow { .. }
                 | Self::CopySelection { .. }
                 | Self::CutSelection { .. }
                 | Self::Paste { .. }
@@ -1258,6 +1459,7 @@ impl Event {
                 | Self::ClearOpenHistory
                 | Self::AppPicked { .. }
                 | Self::SystemDone { .. }
+                | Self::Materialized { .. }
         )
     }
 
@@ -1321,8 +1523,17 @@ pub enum Effect {
     ChildDirs(ChildDirs),
     OpenHistory(OpenHistoryOp),
     FolderSize(FolderSize),
+    HashFile(HashFile),
+    Materialize(Materialize),
+    SetArchivePassword(SetArchivePassword),
+    Connect(Connect),
+    Disconnect(Disconnect),
+    ForgetSecret(ForgetSecret),
+    StopHash(StopHash),
+    ReadSidecar(ReadSidecar),
     RunFileOp(RunFileOp),
     CancelFileOp(CancelFileOp),
+    PauseFileOp(PauseFileOp),
     FindConflicts(FindConflicts),
     Clipboard(ClipboardOp),
     ClipboardChanges(ClipboardChanges),
@@ -1373,6 +1584,9 @@ pub struct Model {
     palette: Option<String>,
     /// Folder sizes asked for in the inspector.
     sizes: inspector::Sizes,
+    checksums: checksums::Checksums,
+    archives: archives::Archives,
+    remote: remote::Remote,
     thumbnails: thumbnails::Thumbnails,
     access: access::Access,
     plugins: plugins::Plugins,
@@ -1481,6 +1695,8 @@ struct Tab {
     denied: bool,
     /// The batch rename dialog, while it is open.
     batch: Option<batch::BatchRename>,
+    /// The Compress dialog, while it is open.
+    compress: Option<archives::Compress>,
     /// The folder is being read: a listing was asked for and hasn't come.
     reading: bool,
     /// The watcher started, or a change came, while the folder was being
@@ -1603,6 +1819,12 @@ pub struct ViewModel {
     pub redo: Option<String>,
     /// A copy or move waiting for the user to say how clashing names go.
     pub conflict: Option<ConflictView>,
+    /// An archive asks for its password.
+    pub archive_password: Option<PasswordView>,
+    /// The dialog that connects to a server, while it is open.
+    pub connect: Option<ConnectView>,
+    /// A server showed a key nobody accepted yet.
+    pub host_key: Option<HostKeyView>,
 }
 
 #[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1673,6 +1895,13 @@ pub struct TabTitle {
 pub struct TabViewModel {
     pub id: u32,
     pub path: String,
+    /// What sort of place `path` is, and what can be done there.
+    pub location: LocationView,
+    /// Extract has something to take: archives are selected, or the tab is
+    /// inside one.
+    pub can_extract: bool,
+    /// The Compress dialog, while it is open.
+    pub compress: Option<CompressView>,
     pub title: String,
     /// How the folder is shown.
     pub view: FolderView,
@@ -1782,10 +2011,7 @@ fn window_id(number: u32) -> Option<WindowId> {
 }
 
 fn title_of(path: &str) -> String {
-    Path::new(path).file_name().map_or_else(
-        || path.to_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    )
+    Location::parse(path).title()
 }
 
 #[derive(Default)]
@@ -1955,6 +2181,7 @@ impl DirFleet {
         model.inspector_shown = state.inspector_shown;
         model.settings = state.settings;
         model.saved = state.saved_searches.normalized();
+        model.remote.connections = state.connections;
         model.plugins.settings = state.plugins;
         if let Some(path) = open {
             return Self::new_window(model, Some(path));
@@ -2044,6 +2271,7 @@ impl DirFleet {
             inspector_shown: model.inspector_shown,
             settings: model.settings.clone(),
             saved_searches: model.saved.clone(),
+            connections: model.remote.connections.clone(),
             plugins: model.plugins.settings.clone(),
         }
     }
@@ -2110,10 +2338,18 @@ impl DirFleet {
             model.plugins.forget_activation(&path);
             model.plugins.views.folder_changed(&path);
         }
+        if let ListDirOutput::NeedsPassword { wrong } = output {
+            return Self::listing_needs_password(model, tab, wrong);
+        }
+        if let ListDirOutput::NeedsConnection { connection } = &output {
+            return Self::listing_needs_connection(model, tab, connection);
+        }
         let Some(state) = Self::current(model, tab, generation) else {
             return Command::done();
         };
         match output {
+            // Answered above.
+            ListDirOutput::NeedsPassword { .. } | ListDirOutput::NeedsConnection { .. } => {}
             ListDirOutput::Listed {
                 listing,
                 order,
@@ -2542,7 +2778,13 @@ impl DirFleet {
     }
 
     fn tab_view(id: TabId, tab: &Tab, model: &Model) -> TabViewModel {
-        let (crumbs_above, crumbs) = tab.crumb_views(&model.home);
+        let (crumbs_above, mut crumbs) = tab.crumb_views(&model.home);
+        // A server's top is called what its connection is.
+        for crumb in &mut crumbs {
+            if let Some(name) = model.remote.top_title(&crumb.path) {
+                crumb.title = name;
+            }
+        }
         let listing = &tab.listing;
         let total_rows = u32::try_from(tab.order.len()).unwrap_or(u32::MAX);
         let (first_row, end) = row_window(tab.first_row, tab.visible_rows, total_rows);
@@ -2567,11 +2809,14 @@ impl DirFleet {
             0
         };
         let path = tab.path.clone().unwrap_or_default();
-        let can_go_up = Path::new(&path).parent().is_some();
+        let can_go_up = Location::parse(&path).parent().is_some();
         TabViewModel {
             id: id.number(),
-            title: tab.title(),
+            title: model.remote.top_title(&path).unwrap_or_else(|| tab.title()),
             path,
+            location: tab.location_view(),
+            can_extract: tab.can_extract(),
+            compress: tab.compress_view(),
             view: tab.view,
             nav: NavView {
                 back: tab.history.can_go_back(),
@@ -2618,7 +2863,7 @@ impl DirFleet {
             goto: Self::goto_view(model, tab),
             inspector: model
                 .inspector_shown
-                .then(|| tab.inspector_view(&model.sizes, &model.thumbnails)),
+                .then(|| tab.inspector_view(&model.sizes, &model.thumbnails, &model.checksums)),
             saved: tab.saved_badge(&model.saved.searches),
             selection: tab.selected_ranges(),
             selected_count: u32::try_from(tab.selection.len()).unwrap_or(u32::MAX),
@@ -2758,6 +3003,7 @@ impl DirFleet {
             event if event.is_saved() => Self::saved_event(model, event),
             event if event.is_picker() => Self::picker_event(model, event),
             event if event.is_plugin() => Self::plugin_event(model, event),
+            event if event.is_place() => Self::place_event(model, event),
             event if event.is_panel() => Self::panel_event(model, event),
             event if event.is_system() => Self::system_event(model, event),
             event if event.is_file() => Self::file_event(model, event),
@@ -2766,6 +3012,17 @@ impl DirFleet {
                 debug_assert!(event.is_workspace(), "unrouted event: {event:?}");
                 Self::workspace_event(model, event)
             }
+        }
+    }
+
+    /// The events of checksums, archives and servers: each module has its own.
+    fn place_event(model: &mut Model, event: Event) -> Command<Effect, Event> {
+        if event.is_checksum() {
+            Self::checksum_event(model, event)
+        } else if event.is_archive() {
+            Self::archive_event(model, event)
+        } else {
+            Self::remote_event(model, event)
         }
     }
 
@@ -2786,7 +3043,11 @@ impl DirFleet {
             let tab = model.tabs.get(id)?;
             Some(TabTitle {
                 id: id.number(),
-                title: tab.title(),
+                title: tab
+                    .path
+                    .as_deref()
+                    .and_then(|path| model.remote.top_title(path))
+                    .unwrap_or_else(|| tab.title()),
             })
         };
         let tab_view = |id: TabId| {
@@ -2823,6 +3084,7 @@ impl DirFleet {
                 model.tabs.get(&window.focused),
                 &model.settings,
                 &model.saved.searches,
+                &model.remote,
             ),
         }
     }
@@ -2888,6 +3150,9 @@ impl DirFleet {
             undo: model.files.undo_label(),
             redo: model.files.redo_label(),
             conflict: model.files.conflict(),
+            archive_password: model.archives.password_view(),
+            connect: model.remote.connect_view(),
+            host_key: model.remote.host_key_view(),
         }
     }
 }

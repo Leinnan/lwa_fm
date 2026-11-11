@@ -1,8 +1,8 @@
 [workspace]
-members = [".", "crates/dirfleet_core", "crates/dirfleet_effects", "crates/dirfleet_ffi", "crates/dirfleet_winshell", "windows"]
+members = [".", "crates/dirfleet_archive", "crates/dirfleet_core", "crates/dirfleet_effects", "crates/dirfleet_remote", "crates/dirfleet_ffi", "crates/dirfleet_winshell", "windows"]
 # vendor/puffin_egui joins as a path dependency; plain `cargo test` leaves it out.
 # `windows` (the native Windows shell) is built by name: `cargo run -p dirfleet_windows`.
-default-members = [".", "crates/dirfleet_core", "crates/dirfleet_effects", "crates/dirfleet_ffi", "crates/dirfleet_winshell"]
+default-members = [".", "crates/dirfleet_archive", "crates/dirfleet_core", "crates/dirfleet_effects", "crates/dirfleet_remote", "crates/dirfleet_ffi", "crates/dirfleet_winshell"]
 resolver = "3"
 
 [workspace.package]

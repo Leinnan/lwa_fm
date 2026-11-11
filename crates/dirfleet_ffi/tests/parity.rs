@@ -57,6 +57,11 @@ enum Status {
     Na,
 }
 
+/// The ledger's areas: 1–23 are `parity.md`'s, taken from the egui app; the
+/// rest hold features that app never had (24 Archives, 25 Remote locations,
+/// 26 Results, 27 Tags).
+const AREAS: std::ops::RangeInclusive<u32> = 1..=27;
+
 /// The Windows shell's status where the ledger does not say.
 const fn open() -> Status {
     Status::Open
@@ -175,10 +180,12 @@ fn problems(ledger: &Ledger, rust: &BTreeSet<String>, swift: &BTreeSet<String>) 
         if !ids.insert(id.as_str()) {
             problems.push(format!("{id}: listed twice"));
         }
-        if !(1..=23).contains(&f.area) {
+        if !AREAS.contains(&f.area) {
             problems.push(format!(
-                "{id}: area {} is not one of parity.md's 1–23",
-                f.area
+                "{id}: area {} is not one of the ledger's {}–{}",
+                f.area,
+                AREAS.start(),
+                AREAS.end()
             ));
         }
         match (f.status, &f.na_mac) {

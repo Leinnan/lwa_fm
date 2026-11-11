@@ -10,6 +10,7 @@ use crux_core::render::render;
 use facet::Facet;
 use serde::{Deserialize, Serialize};
 
+use super::checksums::{Checksums, ChecksumsView};
 use super::format;
 use super::thumbnails::{PREVIEW_EDGE, PreviewState, Thumbnails, plays};
 use super::{DirFleet, Effect, Event, Model, Tab};
@@ -51,6 +52,8 @@ pub struct ItemInfo {
     pub preview: PreviewState,
     /// A video's or GIF's frames as an animated GIF to play, or "".
     pub animation: String,
+    /// A file's checksums, worked out or not; folders have none.
+    pub checksums: Option<ChecksumsView>,
 }
 
 #[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -98,10 +101,7 @@ fn date(time: crate::listing::TimestampSeconds) -> String {
 }
 
 fn bytes(size: u64) -> String {
-    format::size(&crate::listing::DirEntryMetaData {
-        size,
-        ..crate::listing::DirEntryMetaData::from(EntryType::File)
-    })
+    format::bytes(size)
 }
 
 impl Tab {
@@ -132,7 +132,12 @@ impl Tab {
         .join("\n")
     }
 
-    pub(super) fn inspector_view(&self, sizes: &Sizes, thumbnails: &Thumbnails) -> InspectorView {
+    pub(super) fn inspector_view(
+        &self,
+        sizes: &Sizes,
+        thumbnails: &Thumbnails,
+        checksums: &Checksums,
+    ) -> InspectorView {
         // One item (or the cursor's), nothing, or a summary of several.
         let Some(row) = self.single_item() else {
             return InspectorView {
@@ -141,7 +146,7 @@ impl Tab {
             };
         };
         InspectorView {
-            item: self.item_info(row, sizes, thumbnails),
+            item: self.item_info(row, sizes, thumbnails, checksums),
             summary: None,
         }
     }
@@ -184,7 +189,13 @@ impl Tab {
         summary
     }
 
-    fn item_info(&self, row: usize, sizes: &Sizes, thumbnails: &Thumbnails) -> Option<ItemInfo> {
+    fn item_info(
+        &self,
+        row: usize,
+        sizes: &Sizes,
+        thumbnails: &Thumbnails,
+        checksums: &Checksums,
+    ) -> Option<ItemInfo> {
         let entry = *self.order.get(row)? as usize;
         let meta = self.listing.meta(entry);
         let name = self.listing.name(entry);
@@ -208,6 +219,9 @@ impl Tab {
             } else {
                 String::new()
             },
+            // The Trash's rows are not files to read where they are shown.
+            checksums: (meta.entry_type.is_leaf() && !self.trash)
+                .then(|| self.checksums_view(checksums, entry, &path)),
             path,
             kind: kind_label(name, meta.entry_type),
             is_dir,

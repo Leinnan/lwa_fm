@@ -3,7 +3,8 @@
 use std::rc::Rc;
 
 use dirfleet_core::app::{
-    Appearance, Event, IconSize, PaletteItem, PaletteTarget, PaletteView, Settings, ViewModel,
+    Appearance, Event, IconSize, PaletteItem, PaletteTarget, PaletteView, QueueMode, Settings,
+    ViewModel,
 };
 use windows_reactor::{
     Border, Button, ButtonStyle, Callback, ComboBox, Grid, GridLength, HorizontalAlignment,
@@ -281,6 +282,28 @@ pub fn settings(core: &CoreLink, shared: &ViewModel) -> View {
             now.track_open_history,
             |settings, on| settings.track_open_history = on,
         ),
+        toggle(
+            "Open archives as folders",
+            now.browse_archives,
+            |settings, on| settings.browse_archives = on,
+        ),
+        toggle(
+            "Check each copy against its original",
+            now.verify_copies,
+            |settings, on| settings.verify_copies = on,
+        ),
+        choice(
+            "Copies, moves and deletions run",
+            &QueueMode::ALL.map(QueueMode::label),
+            QueueMode::ALL
+                .iter()
+                .position(|mode| *mode == now.queue_mode)
+                .unwrap_or(0),
+            |settings, index| {
+                settings.queue_mode = QueueMode::ALL[index.min(QueueMode::ALL.len() - 1)];
+            },
+        )
+        .into(),
         heading("Terminal"),
         terminal.into(),
         heading("About"),

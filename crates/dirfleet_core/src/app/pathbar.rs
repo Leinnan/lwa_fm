@@ -15,6 +15,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use serde::{Deserialize, Serialize};
 
 use super::{DirFleet, Effect, Event, Model, Tab, tab_id, title_of};
+use crate::location::Location;
 
 /// Matches shown by Go to Folder at most.
 const MATCHES_SHOWN: usize = 50;
@@ -222,11 +223,54 @@ fn child_matches(goto: &GoTo, parent: &str, leaf: &str) -> Vec<GoToMatch> {
         .unwrap_or_default()
 }
 
+/// The crumbs of a place: a folder's are its path's; an archive's are those
+/// of the archive's file, which leads to the archive's top, then its
+/// folders inside.
+pub fn location_crumbs(location: &Location, home: &str) -> (Vec<CrumbView>, Vec<CrumbView>) {
+    match location {
+        Location::Local(path) => crumbs(path, home),
+        Location::Archive { outer, inner } => {
+            let (above, mut shown) = location_crumbs(outer, home);
+            let mut place = (**outer).clone().into_archive();
+            if let Some(file) = shown.last_mut() {
+                file.path = place.to_string();
+            }
+            for folder in inner.split('/').filter(|part| !part.is_empty()) {
+                place = place.join(folder);
+                shown.push(CrumbView {
+                    title: folder.to_owned(),
+                    path: place.to_string(),
+                    anchor: None,
+                });
+            }
+            (above, shown)
+        }
+        Location::Remote { .. } => {
+            let mut shown = Vec::new();
+            let mut place = Some(location.clone());
+            while let Some(here) = place {
+                shown.push(CrumbView {
+                    title: here.title(),
+                    path: here.to_string(),
+                    anchor: None,
+                });
+                place = here.parent();
+            }
+            shown.reverse();
+            if let Some(first) = shown.first_mut() {
+                first.anchor = Some(Anchor::Root);
+            }
+            (Vec::new(), shown)
+        }
+    }
+}
+
 impl Tab {
     pub(super) fn crumb_views(&self, home: &str) -> (Vec<CrumbView>, Vec<CrumbView>) {
-        self.path
-            .as_deref()
-            .map_or_else(|| (Vec::new(), Vec::new()), |path| crumbs(path, home))
+        self.location().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |location| location_crumbs(&location, home),
+        )
     }
 
     pub(super) fn children_view(&self) -> Option<ChildrenView> {

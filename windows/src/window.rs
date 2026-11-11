@@ -169,6 +169,9 @@ pub enum WindowMessage {
     Activated,
     Run(CommandId),
     Split(Side),
+    /// Open the dialog that connects to a server: a new one, or (`true`)
+    /// the one the focused tab is on.
+    Connect(bool),
     SplitPressed(Drag, PointerEventInfo),
     SplitMoved(PointerEventInfo),
     SplitReleased,
@@ -294,7 +297,11 @@ impl Component for WindowRoot {
                 _ = sender.send(WindowMessage::Run(command));
             }),
             on_menu: Callback::new(move |key: Key| {
-                let message = if key == Key::from(SPLIT_RIGHT) {
+                let message = if key == Key::from(CONNECT) {
+                    WindowMessage::Connect(false)
+                } else if key == Key::from(EDIT_SERVER) {
+                    WindowMessage::Connect(true)
+                } else if key == Key::from(SPLIT_RIGHT) {
                     WindowMessage::Split(Side::Right)
                 } else if key == Key::from(SPLIT_BELOW) {
                     WindowMessage::Split(Side::Below)
@@ -453,6 +460,11 @@ impl Component for WindowRoot {
                         _ => {}
                     }
                 }
+                // The connect dialog's answer needs what the dialog showed.
+                if self.asking.is_none() && self.dialog == Dialog::Connect {
+                    self.core
+                        .send(Dialog::connect_closed(&self.input.shared, result));
+                }
                 let target = &self.target;
                 self.dialog.with(self.asking.take()).closed(
                     &self.core,
@@ -558,6 +570,10 @@ impl Component for WindowRoot {
                 tab: self.target.tab,
                 side,
             }),
+            WindowMessage::Connect(this_server) => self.core.send(Event::OpenConnect {
+                tab: self.target.tab,
+                edit: server_of(&self.input.chrome.active.path).filter(|_| this_server),
+            }),
             WindowMessage::SplitPressed(drag, info) => {
                 self.drag = Some(Drag {
                     from: if drag.vertical {
@@ -617,7 +633,11 @@ impl Component for WindowRoot {
             .style(ButtonStyle::Subtle)
             .automation_name("More")
             .content(glyph("\u{E712}", 14.0))
-            .menu(more_menu(&input.shared, self.on_menu.clone()));
+            .menu(more_menu(
+                &input.shared,
+                server_of(&input.chrome.active.path).is_some(),
+                self.on_menu.clone(),
+            ));
         let side = if self.sidebar_shown {
             sidebar::WIDTH
         } else {
@@ -958,6 +978,16 @@ impl WindowRoot {
                     });
                 });
             }
+            Action::ExtractTo => {
+                let core = self.core.clone();
+                ui_thread::defer(move || {
+                    let Some(folder) = dirfleet_winshell::pick_folder(owner, None) else {
+                        return;
+                    };
+                    let folder = folder.to_string_lossy().into_owned();
+                    core.send(Event::ExtractTo { tab, folder });
+                });
+            }
             Action::Plugin { action, confirm } => {
                 if confirm.is_empty() {
                     self.core.send(Event::RunPluginAction { tab, action });
@@ -1015,7 +1045,7 @@ impl WindowRoot {
         let Some(pane) = self.input.panes.iter().find(|pane| pane.tab.id == tab) else {
             return Vec::new();
         };
-        if pane.tab.path.is_empty() {
+        if pane.tab.path.is_empty() || !crate::store::is_on_disk(&pane.tab.path) {
             return Vec::new();
         }
         let folder = Path::new(&pane.tab.path);
@@ -1030,6 +1060,8 @@ impl WindowRoot {
 
 const SPLIT_RIGHT: &str = "split-right";
 const SPLIT_BELOW: &str = "split-below";
+const CONNECT: &str = "connect-server";
+const EDIT_SERVER: &str = "edit-server";
 
 /// The key a command has in menus.
 fn command_key(command: CommandId) -> Key {
@@ -1037,7 +1069,15 @@ fn command_key(command: CommandId) -> Key {
 }
 
 /// The commands a window has no button for, grouped as the Mac app's menus are.
-fn more_menu(shared: &ViewModel, on_click: Callback<Key>) -> Menu {
+/// The saved connection a tab's folder is on, when it is on a server.
+fn server_of(path: &str) -> Option<String> {
+    match dirfleet_core::Location::parse(path) {
+        dirfleet_core::Location::Remote { connection, .. } => Some(connection),
+        _ => None,
+    }
+}
+
+fn more_menu(shared: &ViewModel, on_server: bool, on_click: Callback<Key>) -> Menu {
     const GROUPS: [&[CommandId]; 6] = [
         &[
             CommandId::NewWindow,
@@ -1088,6 +1128,12 @@ fn more_menu(shared: &ViewModel, on_click: Callback<Key>) -> Menu {
         if group == 1 {
             items.push(MenuItem::item(SPLIT_RIGHT, "Split Right"));
             items.push(MenuItem::item(SPLIT_BELOW, "Split Below"));
+        }
+        if group == 2 {
+            items.push(MenuItem::item(CONNECT, "Connect to Server\u{2026}"));
+            if on_server {
+                items.push(MenuItem::item(EDIT_SERVER, "Edit This Server\u{2026}"));
+            }
         }
     }
     Menu::new(items, on_click)

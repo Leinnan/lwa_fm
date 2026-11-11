@@ -1,15 +1,18 @@
 //! The questions a window asks in a dialog over its content: one at a time,
 //! the most pressing first.
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use dirfleet_core::app::{
-    BatchFields, BatchMode, BatchRenameView, ConflictChoice, ConflictView, Event, GoToView,
-    PaletteTarget, TabViewModel, ViewModel,
+    BatchFields, BatchMode, BatchRenameView, CompressView, ConflictChoice, ConflictView,
+    ConnectFields, ConnectView, Event, GoToView, PaletteTarget, Secret, TabViewModel, ViewModel,
 };
+use dirfleet_core::location::Scheme;
 use windows_reactor::{
-    Border, Button, ButtonStyle, Callback, Color, ContentDialog, ContentDialogButton,
-    ContentDialogResult, HorizontalAlignment, Orientation, ScrollBarVisibility, ScrollViewer,
-    StackPanel, TextBlock, TextBox, TextWrapping, View,
+    Border, Button, ButtonStyle, Callback, Color, ComboBox, ContentDialog, ContentDialogButton,
+    ContentDialogResult, Grid, GridLength, HorizontalAlignment, Orientation, PasswordBox,
+    ScrollBarVisibility, ScrollViewer, StackPanel, TextBlock, TextBox, TextWrapping,
+    VerticalAlignment, View,
 };
 
 use crate::core_link::CoreLink;
@@ -17,6 +20,7 @@ use crate::picker;
 use crate::plugins;
 use crate::saved::{self, Draft};
 use crate::sheets;
+use crate::theme;
 
 /// Something the window asks before it tells the core to do it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +77,259 @@ pub struct Hooks<'a> {
     pub draft: &'a Draft,
 }
 
+/// The archive's name and format, what it will be called, and why not.
+fn compress_form(core: &CoreLink, tab: u32, compress: &CompressView) -> View {
+    let named = {
+        let (core, format) = (core.clone(), compress.format);
+        Callback::new(move |text: Rc<str>| {
+            core.send(Event::SetCompress {
+                tab,
+                name: text.to_string(),
+                format,
+            });
+        })
+    };
+    let chosen = compress
+        .formats
+        .iter()
+        .position(|choice| choice.format == compress.format)
+        .unwrap_or(0);
+    let formats = {
+        let (core, name) = (core.clone(), compress.name.clone());
+        let formats: Vec<_> = compress
+            .formats
+            .iter()
+            .map(|choice| choice.format)
+            .collect();
+        ComboBox::new()
+            .automation_name("Format")
+            .items_source(compress.formats.iter().map(|choice| choice.label.clone()))
+            .selected_index(chosen)
+            .on_selection_changed(move |index: Option<usize>| {
+                let picked = index.filter(|index| *index != chosen);
+                if let Some(format) = picked.and_then(|index| formats.get(index)) {
+                    core.send(Event::SetCompress {
+                        tab,
+                        name: name.clone(),
+                        format: *format,
+                    });
+                }
+            })
+    };
+    let mut lines: Vec<View> = vec![
+        TextBox::new()
+            .automation_name("Archive name")
+            .text(compress.name.clone())
+            .placeholder_text("Name")
+            .on_text_changed(named)
+            .into(),
+        formats.into(),
+        TextBlock::new()
+            .text(compress.file_name.clone())
+            .opacity(0.6)
+            .text_wrapping(TextWrapping::Wrap)
+            .into(),
+    ];
+    if !compress.error.is_empty() {
+        lines.push(
+            TextBlock::new()
+                .text(compress.error.clone())
+                .foreground(Color::rgb(0xE0, 0x50, 0x50))
+                .text_wrapping(TextWrapping::Wrap)
+                .into(),
+        );
+    }
+    StackPanel::new()
+        .orientation(Orientation::Vertical)
+        .spacing(8.0)
+        .children(lines)
+        .into()
+}
+
+/// The connect dialog's fields: which kind of server, where, as whom.
+#[expect(clippy::too_many_lines, reason = "a line or two for each field")]
+fn connect_form(core: &CoreLink, connect: &ConnectView) -> View {
+    let fields = &connect.fields;
+    // Each field tells the core all of them, with its own changed.
+    let text = |label: &str, value: &str, apply: fn(&mut ConnectFields, String)| -> View {
+        let (core, fields) = (core.clone(), fields.clone());
+        TextBox::new()
+            .automation_name(label)
+            .header(label)
+            .text(value)
+            .is_enabled(!connect.busy)
+            .on_text_changed(move |text: Rc<str>| {
+                let mut fields = fields.clone();
+                apply(&mut fields, text.to_string());
+                core.send(Event::SetConnect { fields });
+            })
+            .into()
+    };
+    let chosen = connect
+        .schemes
+        .iter()
+        .position(|choice| choice.scheme == fields.scheme)
+        .unwrap_or(0);
+    let kinds = {
+        let (core, fields) = (core.clone(), fields.clone());
+        let schemes: Vec<_> = connect.schemes.iter().map(|choice| choice.scheme).collect();
+        ComboBox::new()
+            .automation_name("Kind of server")
+            .items_source(connect.schemes.iter().map(|choice| choice.label.clone()))
+            .selected_index(chosen)
+            .on_selection_changed(move |index: Option<usize>| {
+                let picked = index.filter(|index| *index != chosen);
+                if let Some(scheme) = picked.and_then(|index| schemes.get(index)) {
+                    let mut fields = fields.clone();
+                    fields.scheme = *scheme;
+                    core.send(Event::SetConnect { fields });
+                }
+            })
+    };
+    let s3 = fields.scheme == Scheme::S3;
+    let mut lines: Vec<View> = vec![
+        kinds.into(),
+        text("Name", &fields.name, |fields, text| fields.name = text),
+        text(
+            if s3 {
+                "Endpoint (empty for Amazon's)"
+            } else {
+                "Server"
+            },
+            &fields.host,
+            |fields, text| fields.host = text,
+        ),
+        text(
+            "Port (empty for the usual one)",
+            &fields.port,
+            |fields, text| {
+                fields.port = text;
+            },
+        ),
+    ];
+    if s3 {
+        lines.push(text("Bucket", &fields.bucket, |fields, text| {
+            fields.bucket = text;
+        }));
+        lines.push(text("Region", &fields.region, |fields, text| {
+            fields.region = text;
+        }));
+    }
+    lines.push(text(
+        if s3 { "Access key ID" } else { "User" },
+        &fields.user,
+        |fields, text| fields.user = text,
+    ));
+    lines.push(
+        PasswordBox::new()
+            .header(if s3 { "Secret access key" } else { "Password" })
+            .placeholder_text("Empty for the one kept in the keychain")
+            .is_enabled(!connect.busy)
+            .on_password_changed(|text: Rc<str>| {
+                TYPED_PASSWORD.with(|typed| *typed.borrow_mut() = text.to_string());
+            })
+            .into(),
+    );
+    lines.push(text("Folder to start in", &fields.root, |fields, text| {
+        fields.root = text;
+    }));
+    let switch = |label: &str, on: bool, changed: Callback<bool>| -> View {
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .children((
+                TextBlock::new()
+                    .text(label)
+                    .vertical_alignment(VerticalAlignment::Center),
+                Border::new()
+                    .grid_column(1)
+                    .content(theme::switch(on).automation_name(label).on_toggled(changed)),
+            ))
+            .into()
+    };
+    // SFTP is always encrypted: there is nothing to choose.
+    if fields.scheme != Scheme::Sftp {
+        let (core, now) = (core.clone(), fields.clone());
+        lines.push(switch(
+            "Encrypted connection (TLS)",
+            fields.secure,
+            Callback::new(move |on: bool| {
+                let mut fields = now.clone();
+                fields.secure = on;
+                core.send(Event::SetConnect { fields });
+            }),
+        ));
+    }
+    lines.push(switch(
+        "Keep the password in the keychain",
+        REMEMBER_PASSWORD.with(Cell::get),
+        Callback::new(|on: bool| REMEMBER_PASSWORD.with(|remember| remember.set(on))),
+    ));
+    if connect.busy {
+        lines.push(
+            TextBlock::new()
+                .text("Connecting\u{2026}")
+                .opacity(0.6)
+                .into(),
+        );
+    }
+    if !connect.error.is_empty() {
+        lines.push(
+            TextBlock::new()
+                .text(connect.error.clone())
+                .foreground(Color::rgb(0xE0, 0x50, 0x50))
+                .text_wrapping(TextWrapping::Wrap)
+                .into(),
+        );
+    }
+    ScrollViewer::new()
+        .max_height(460.0)
+        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+        .content(
+            StackPanel::new()
+                .orientation(Orientation::Vertical)
+                .spacing(8.0)
+                .children(lines),
+        )
+        .into()
+}
+
+thread_local! {
+    /// Whether the connect dialog's password goes to the keychain: the
+    /// window's own choice, kept between dialogs.
+    static REMEMBER_PASSWORD: Cell<bool> = const { Cell::new(true) };
+}
+
+thread_local! {
+    /// The password being typed into the archive password dialog, until the
+    /// dialog is answered. Only the window's thread sees it.
+    static TYPED_PASSWORD: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// The field an archive's password is typed into, and a word when the one
+/// given before did not fit.
+fn archive_password(wrong: bool) -> View {
+    let field = PasswordBox::new()
+        .placeholder_text("Password")
+        .on_password_changed(|text: Rc<str>| {
+            TYPED_PASSWORD.with(|typed| *typed.borrow_mut() = text.to_string());
+        });
+    let mut lines: Vec<View> = Vec::new();
+    if wrong {
+        lines.push(
+            TextBlock::new()
+                .text("That password did not fit. Try again.")
+                .text_wrapping(TextWrapping::Wrap)
+                .into(),
+        );
+    }
+    lines.push(field.into());
+    StackPanel::new()
+        .orientation(Orientation::Vertical)
+        .spacing(8.0)
+        .children(lines)
+        .into()
+}
+
 /// Which dialog a window shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dialog {
@@ -82,6 +339,12 @@ pub enum Dialog {
     Conflict,
     /// A drive still in use is about to be ejected.
     Eject,
+    /// An archive asks for its password.
+    ArchivePassword,
+    /// A server showed a key nobody accepted yet.
+    HostKey,
+    /// Connecting to a server.
+    Connect,
     Ask(Asking),
     /// The command palette.
     Palette,
@@ -95,6 +358,8 @@ pub enum Dialog {
     PluginConfirm,
     /// Renaming several items at once, in the focused tab.
     Batch,
+    /// Naming the archive to make of the selection, in the focused tab.
+    Compress,
     /// Go to Folder, in the focused tab.
     GoTo,
 }
@@ -115,6 +380,12 @@ impl Dialog {
             Self::Conflict
         } else if here.leads && shared.eject_confirm.is_some() {
             Self::Eject
+        } else if here.leads && shared.archive_password.is_some() {
+            Self::ArchivePassword
+        } else if here.leads && shared.host_key.is_some() {
+            Self::HostKey
+        } else if here.leads && shared.connect.is_some() {
+            Self::Connect
         } else if here.palette && shared.palette.is_some() {
             Self::Palette
         } else if shared
@@ -137,6 +408,8 @@ impl Dialog {
             Self::PluginResults
         } else if tab.batch_rename.is_some() {
             Self::Batch
+        } else if tab.compress.is_some() {
+            Self::Compress
         } else if tab.goto.is_some() {
             Self::GoTo
         } else {
@@ -149,9 +422,31 @@ impl Dialog {
     /// what the whole app asks comes first, a tab's dialog last.
     pub const fn with(self, asking: Option<Asking>) -> Self {
         match (self, asking) {
-            (Self::None | Self::GoTo | Self::Batch, Some(Asking::Plugin)) => Self::PluginConfirm,
-            (Self::None | Self::GoTo | Self::Batch, Some(asking)) => Self::Ask(asking),
+            (Self::None | Self::GoTo | Self::Batch | Self::Compress, Some(Asking::Plugin)) => {
+                Self::PluginConfirm
+            }
+            (Self::None | Self::GoTo | Self::Batch | Self::Compress, Some(asking)) => {
+                Self::Ask(asking)
+            }
             (dialog, _) => dialog,
+        }
+    }
+
+    /// How the connect dialog was answered: connect with what was typed,
+    /// forget the connection being edited, or leave it.
+    pub fn connect_closed(shared: &ViewModel, result: ContentDialogResult) -> Event {
+        let typed = TYPED_PASSWORD.with(RefCell::take);
+        match (result, shared.connect.as_ref()) {
+            (ContentDialogResult::Primary, _) => Event::SubmitConnect {
+                secret: Secret::new(typed),
+                remember: REMEMBER_PASSWORD.with(Cell::get),
+            },
+            (ContentDialogResult::Secondary, Some(connect)) if connect.editing => {
+                Event::RemoveConnection {
+                    id: connect.id.clone(),
+                }
+            }
+            _ => Event::CancelConnect,
         }
     }
 
@@ -182,8 +477,9 @@ impl Dialog {
             Self::PluginForm => Event::CancelPluginForm,
             // Closing the results leaves a running job to finish on its own.
             Self::PluginResults => Event::HidePluginResults,
-            // The window acts on this one: it holds the action.
-            Self::PluginConfirm => return,
+            // The window acts on these: it holds the action, and knows
+            // which connection the dialog was about.
+            Self::PluginConfirm | Self::Connect => return,
             Self::Conflict => Event::ResolveConflict {
                 choice: match result {
                     ContentDialogResult::Primary => ConflictChoice::Replace,
@@ -194,6 +490,18 @@ impl Dialog {
             },
             Self::Eject if confirmed => Event::ConfirmEject,
             Self::Eject => Event::CancelEject,
+            Self::HostKey => Event::AcceptHostKey { accept: confirmed },
+            // What was typed is taken either way: it is kept nowhere here.
+            Self::ArchivePassword => {
+                let typed = TYPED_PASSWORD.with(RefCell::take);
+                if confirmed {
+                    Event::SubmitArchivePassword {
+                        password: Secret::new(typed),
+                    }
+                } else {
+                    Event::CancelArchivePassword
+                }
+            }
             Self::Ask(_) if !confirmed => return,
             Self::Ask(Asking::Trash) => Event::TrashSelection { tab },
             // The Recycle Bin's items are purged; a folder's are deleted for good.
@@ -202,6 +510,8 @@ impl Dialog {
             Self::Ask(Asking::EmptyTrash) => Event::EmptyTrash,
             Self::Batch if confirmed => Event::ApplyBatchRename { tab },
             Self::Batch => Event::CancelBatchRename { tab },
+            Self::Compress if confirmed => Event::ApplyCompress { tab },
+            Self::Compress => Event::CancelCompress { tab },
             Self::GoTo if confirmed => Event::GoToSubmit { tab, path: None },
             Self::GoTo => Event::CloseGoTo { tab },
         };
@@ -267,6 +577,58 @@ impl Dialog {
                         .close_button_text("Cancel")
                         .default_button(ContentDialogButton::Close),
                     text(ask.map_or("", |ask| ask.message.as_str())),
+                )
+            }
+            Self::HostKey => {
+                let ask = shared.host_key.as_ref();
+                (
+                    dialog
+                        .title("Is this the right server?")
+                        .primary_button_text("Trust and Connect")
+                        .close_button_text("Cancel")
+                        .default_button(ContentDialogButton::Close),
+                    text(&ask.map_or_else(String::new, |ask| {
+                        format!(
+                            "{} shows a key this app has not seen for it:\n\n{}\n\nConnect \
+                             only if that is the key you expect.",
+                            ask.host, ask.fingerprint
+                        )
+                    })),
+                )
+            }
+            Self::Connect => {
+                let connect = shared.connect.as_ref();
+                let dialog = dialog
+                    .title(connect.map_or("", |connect| connect.title.as_str()))
+                    .primary_button_text("Connect")
+                    .is_primary_button_enabled(connect.is_some_and(|connect| !connect.busy))
+                    .close_button_text("Cancel")
+                    .default_button(ContentDialogButton::Primary);
+                // A saved connection can be forgotten from here.
+                let dialog = if connect.is_some_and(|connect| connect.editing) {
+                    dialog.secondary_button_text("Remove")
+                } else {
+                    dialog
+                };
+                (
+                    dialog,
+                    connect.map_or_else(
+                        || Border::new().into(),
+                        |connect| connect_form(core, connect),
+                    ),
+                )
+            }
+            Self::ArchivePassword => {
+                let ask = shared.archive_password.as_ref();
+                (
+                    dialog
+                        .title(ask.map_or_else(String::new, |ask| {
+                            format!("\u{201c}{}\u{201d} needs a password", ask.archive)
+                        }))
+                        .primary_button_text("OK")
+                        .close_button_text("Cancel")
+                        .default_button(ContentDialogButton::Primary),
+                    archive_password(ask.is_some_and(|ask| ask.wrong)),
                 )
             }
             Self::Ask(Asking::Trash) => (
@@ -406,6 +768,29 @@ impl Dialog {
                     .default_button(ContentDialogButton::Close),
                 Border::new().into(),
             ),
+            Self::Compress => {
+                let compress = tab.compress.as_ref();
+                (
+                    dialog
+                        .title(compress.map_or_else(String::new, |compress| {
+                            if compress.count == 1 {
+                                "Compress 1 Item".to_owned()
+                            } else {
+                                format!("Compress {} Items", compress.count)
+                            }
+                        }))
+                        .primary_button_text("Compress")
+                        .is_primary_button_enabled(
+                            compress.is_some_and(|compress| compress.error.is_empty()),
+                        )
+                        .close_button_text("Cancel")
+                        .default_button(ContentDialogButton::Primary),
+                    compress.map_or_else(
+                        || Border::new().into(),
+                        |compress| compress_form(core, tab.id, compress),
+                    ),
+                )
+            }
             Self::Batch => {
                 let batch = tab.batch_rename.as_ref();
                 let ready = batch.is_some_and(|batch| batch.changes > 0 && batch.problems == 0);

@@ -1,8 +1,9 @@
-use super::worker::execute;
+use super::worker::{OpControl, execute};
 use super::{ConflictPolicy, FileOp, Origin, Outcome, Undo, UndoStack, copy_name, validate_name};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// A fresh directory under the system temp dir, removed on drop.
 struct Sandbox(PathBuf);
@@ -42,7 +43,7 @@ impl Drop for Sandbox {
 }
 
 fn run(op: FileOp) -> Outcome {
-    execute(1, op, Origin::User, &AtomicBool::new(false), &|_| {})
+    execute(1, op, Origin::User, &OpControl::default(), &|_| {})
 }
 
 fn read(path: &Path) -> String {
@@ -128,7 +129,7 @@ fn cancelling_stops_a_copy_and_removes_the_partial_file() {
     let big = sandbox.path("big.bin");
     fs::write(&big, vec![7_u8; 4 * 1024 * 1024]).expect("write");
     fs::create_dir(sandbox.path("dst")).expect("dst");
-    let cancel = AtomicBool::new(false);
+    let control = OpControl::default();
     let outcome = execute(
         1,
         FileOp::Copy {
@@ -137,10 +138,10 @@ fn cancelling_stops_a_copy_and_removes_the_partial_file() {
             policy: ConflictPolicy::KeepBoth,
         },
         Origin::User,
-        &cancel,
+        &control,
         &|event| {
             if matches!(event, super::FileOpEvent::Progress { .. }) {
-                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                control.cancel();
             }
         },
     );
@@ -153,6 +154,150 @@ fn cancelling_stops_a_copy_and_removes_the_partial_file() {
         assert_eq!(outcome.created, vec![copy.clone()]);
         assert_eq!(fs::metadata(&copy).expect("copy").len(), 4 * 1024 * 1024);
     }
+}
+
+/// A copy held at its first report: what it is told, and how many reports
+/// came. An APFS clone is done in one step, so there is nothing to hold.
+#[cfg(not(target_os = "macos"))]
+fn held_copy(
+    sandbox: &Sandbox,
+    control: &OpControl,
+    reports: &AtomicU64,
+    total: &AtomicU64,
+) -> Outcome {
+    const SIZE: usize = 8 * 1024 * 1024;
+    let big = sandbox.path("big.bin");
+    fs::write(&big, vec![7_u8; SIZE]).expect("write");
+    fs::create_dir(sandbox.path("dst")).expect("dst");
+    execute(
+        1,
+        FileOp::Copy {
+            srcs: vec![big],
+            dst: sandbox.path("dst"),
+            policy: ConflictPolicy::KeepBoth,
+        },
+        Origin::User,
+        control,
+        &|event| {
+            if let super::FileOpEvent::Progress { bytes_total, .. } = event {
+                total.store(bytes_total, Ordering::Relaxed);
+                if reports.fetch_add(1, Ordering::Relaxed) == 0 {
+                    control.set_paused(true);
+                }
+            }
+        },
+    )
+}
+
+/// Waits for the copy's first report, then until no more come.
+#[cfg(not(target_os = "macos"))]
+fn wait_until_held(reports: &AtomicU64) -> u64 {
+    while reports.load(Ordering::Relaxed) == 0 {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(150));
+    reports.load(Ordering::Relaxed)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_paused_copy_waits_and_goes_on_when_resumed() {
+    let sandbox = Sandbox::new("pause");
+    let (control, reports, total) = (OpControl::default(), AtomicU64::new(0), AtomicU64::new(0));
+    let outcome = std::thread::scope(|scope| {
+        let copy = scope.spawn(|| held_copy(&sandbox, &control, &reports, &total));
+        let held = wait_until_held(&reports);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            reports.load(Ordering::Relaxed),
+            held,
+            "nothing is copied while it is paused"
+        );
+        assert!(!copy.is_finished());
+        control.set_paused(false);
+        copy.join().expect("the copy ends")
+    });
+    assert!(outcome.succeeded(), "{outcome:?}");
+    let copied = fs::metadata(sandbox.path("dst/big.bin")).expect("copy");
+    assert_eq!(copied.len(), 8 * 1024 * 1024);
+    assert_eq!(
+        total.load(Ordering::Relaxed),
+        8 * 1024 * 1024,
+        "a copy says how many bytes it has to write"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_paused_copy_can_be_stopped() {
+    let sandbox = Sandbox::new("pause_cancel");
+    let (control, reports, total) = (OpControl::default(), AtomicU64::new(0), AtomicU64::new(0));
+    let outcome = std::thread::scope(|scope| {
+        let copy = scope.spawn(|| held_copy(&sandbox, &control, &reports, &total));
+        wait_until_held(&reports);
+        control.cancel();
+        copy.join().expect("the copy ends")
+    });
+    assert!(outcome.cancelled);
+    assert!(
+        !sandbox.path("dst/big.bin").exists(),
+        "the partial copy is removed"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_checked_copy_is_read_back_and_one_that_differs_is_removed() {
+    let sandbox = Sandbox::new("verify");
+    let src = sandbox.write("a.bin", &"data".repeat(1000));
+    fs::create_dir(sandbox.path("good")).expect("good");
+    fs::create_dir(sandbox.path("bad")).expect("bad");
+    let copy_to = |folder: &str| FileOp::Copy {
+        srcs: vec![src.clone()],
+        dst: sandbox.path(folder),
+        policy: ConflictPolicy::KeepBoth,
+    };
+
+    let said_so = std::cell::Cell::new(false);
+    let outcome = execute(
+        1,
+        copy_to("good"),
+        Origin::User,
+        &OpControl::with_verify(true),
+        &|event| {
+            if let super::FileOpEvent::Progress { current, .. } = event {
+                said_so.set(said_so.get() || current == "Verifying a.bin");
+            }
+        },
+    );
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert!(outcome.verified);
+    assert!(said_so.get(), "progress says the copy is being read back");
+    assert_eq!(read(&sandbox.path("good/a.bin")), "data".repeat(1000));
+
+    // Unchecked, nothing says the copy was verified.
+    let plain = run(copy_to("good"));
+    assert!(plain.succeeded() && !plain.verified);
+
+    // The copy changes on the disk before it is read back.
+    let target = sandbox.path("bad/a.bin");
+    let outcome = execute(
+        2,
+        copy_to("bad"),
+        Origin::User,
+        &OpControl::with_verify(true),
+        &|event| {
+            if matches!(&event, super::FileOpEvent::Progress { current, .. } if current.starts_with("Verifying"))
+            {
+                fs::write(&target, "something else").expect("tamper");
+            }
+        },
+    );
+    assert!(!outcome.verified);
+    assert_eq!(outcome.errors.len(), 1, "{outcome:?}");
+    assert!(outcome.errors[0].contains("not the same as the original"));
+    assert!(!target.exists(), "the bad copy is removed");
+    assert!(src.exists(), "the original stays");
 }
 
 #[test]
@@ -176,7 +321,7 @@ fn move_rename_and_their_undo_round_trip() {
         2,
         FileOp::Undo(undo),
         Origin::Undo,
-        &AtomicBool::new(false),
+        &OpControl::default(),
         &|_| {},
     );
     assert!(file.exists());

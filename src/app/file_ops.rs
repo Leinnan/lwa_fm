@@ -682,6 +682,7 @@ impl App {
                 id,
                 fraction,
                 current,
+                ..
             } => {
                 if let Some(op) = self.file_ops.running.iter_mut().find(|op| op.id == id) {
                     op.fraction = fraction;

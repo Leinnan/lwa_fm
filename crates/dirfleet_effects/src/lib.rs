@@ -10,11 +10,15 @@ pub mod access;
 pub mod access_time;
 pub mod child_process;
 pub mod clipboard;
+pub mod compressing;
+pub mod credentials;
 pub mod drives;
+pub mod extracting;
 mod file_jobs;
 pub mod fileops;
 pub mod fs_enum;
 pub mod fs_ops;
+pub mod hashing;
 mod list;
 pub mod listing_io;
 pub mod media;
@@ -34,6 +38,7 @@ pub mod trash_bin;
 pub mod usage;
 #[cfg(target_os = "macos")]
 mod usage_bulk;
+pub mod vfs;
 pub mod walk;
 mod watch;
 #[cfg(windows)]
@@ -45,11 +50,14 @@ use std::sync::{Arc, Weak};
 use crux_core::effects::ResolveSink;
 use dirfleet_core::app::{
     CheckActivation, ChildDirs, ClipboardChanges, ClipboardOp, Clock, Delay, DiskAccessCheck,
-    Effect, Eject, FindConflicts, FolderSize, ListDir, ListTrash, LoadPlugins, LoadState,
+    Effect, Eject, FindConflicts, FolderSize, HashFile, ListDir, ListTrash, LoadPlugins, LoadState,
     MediaNotices, OpenHistoryOp, OrderListing, PickerFrame, PickerTiming, PluginMessages,
-    RunFileOp, SearchWalk, SystemOp, TerminalCheck, Thumbnail, ThumbnailChoiceOp, TrashOp,
-    UserFolders, Watch, WatchDrives, WatchPlugins,
+    ReadSidecar, RunFileOp, SearchWalk, SystemOp, TerminalCheck, Thumbnail, ThumbnailChoiceOp,
+    TrashOp, UserFolders, Watch, WatchDrives, WatchPlugins,
 };
+use dirfleet_core::app::{Connect, ConnectOutput, Connection};
+use dirfleet_core::app::{Materialize, Materialized, Unreadable};
+use dirfleet_core::location::Location;
 
 pub use list::list_dir;
 pub use storage::{load as load_state, save as save_state};
@@ -65,6 +73,12 @@ pub struct Handlers {
     walk: searching::WalkHandler,
     history: Arc<open_history::OpenHistory>,
     files: file_jobs::FileJobs,
+    hashes: hashing::HashHandler,
+    materialize: Threaded<Materialize>,
+    connect: Threaded<Connect>,
+    secrets: Arc<dyn credentials::Secrets>,
+    vfs: Arc<vfs::Vfs>,
+    sidecar: Threaded<ReadSidecar>,
     storage: storage::StorageHandler,
     thumbnails: thumbnails::ThumbnailHandler,
     notices: Arc<dyn Fn(crux_core::Request<MediaNotices>) + Send + Sync>,
@@ -87,6 +101,7 @@ impl Handlers {
     /// folder, and downloaded tools go beside the state file; `FFmpeg` is
     /// then fetched at start when it is missing, unless the
     /// `DIRFLEET_NO_DOWNLOADS` environment variable is set (tests set it).
+    #[allow(clippy::too_many_lines, reason = "a line or two for each handler")]
     pub fn new<R>(sink: &Weak<R>, state_file: Option<PathBuf>) -> Self
     where
         R: ResolveSink<ListDir>
@@ -105,6 +120,10 @@ impl Handlers {
             + ResolveSink<ClipboardOp>
             + ResolveSink<ChildDirs>
             + ResolveSink<FolderSize>
+            + ResolveSink<HashFile>
+            + ResolveSink<Materialize>
+            + ResolveSink<Connect>
+            + ResolveSink<ReadSidecar>
             + ResolveSink<LoadState>
             + ResolveSink<Thumbnail>
             + ResolveSink<MediaNotices>
@@ -137,12 +156,25 @@ impl Handlers {
         ));
         choices.install();
         configure_plugins(state_file.as_deref());
+        let vfs = Arc::new(vfs::Vfs::default());
+        // Runs that keep no files keep no passwords either.
+        let secrets: Arc<dyn credentials::Secrets> = if keeps_files {
+            Arc::new(credentials::Keychain)
+        } else {
+            Arc::new(credentials::Memory::default())
+        };
         Self {
-            list: list::ListHandler::new(sink.clone(), Arc::clone(&history)),
+            list: list::ListHandler::new(sink.clone(), Arc::clone(&history), Arc::clone(&vfs)),
             watch: watch::WatchHandler::new(sink.clone()),
             walk: searching::WalkHandler::new(sink.clone(), Arc::clone(&history)),
             history,
-            files: file_jobs::FileJobs::new(sink.clone()),
+            files: file_jobs::FileJobs::new(sink.clone(), Arc::clone(&vfs)),
+            vfs: Arc::clone(&vfs),
+            hashes: hashing::HashHandler::new(sink.clone()),
+            materialize: materializer(sink, &vfs),
+            connect: connector(sink, &vfs, &secrets),
+            secrets,
+            sidecar: on_thread(sink, hashing::read_sidecar),
             storage: storage::StorageHandler::new(sink.clone(), state_file),
             thumbnails: thumbnails::ThumbnailHandler::new(sink),
             notices: {
@@ -263,8 +295,28 @@ impl Handlers {
                     }
                 });
             }
+            Effect::HashFile(request) => self.hashes.start(request),
+            Effect::Materialize(request) => (self.materialize)(request),
+            Effect::Connect(request) => (self.connect)(request),
+            Effect::Disconnect(request) => self.vfs.disconnect(&request.operation.id),
+            Effect::ForgetSecret(request) => self.secrets.forget(&request.operation.id),
+            Effect::SetArchivePassword(request) => {
+                // Done before the next effect is looked at: what waited for
+                // the password is asked for right after it.
+                let archive = Location::parse(&request.operation.archive);
+                let password = request.operation.password.reveal().to_owned();
+                if let Err(error) = self.vfs.set_password(&archive, password) {
+                    log::warn!("the archive's password was not kept: {error}");
+                }
+            }
+            Effect::StopHash(request) => self.hashes.stop(request.operation.id),
+            Effect::ReadSidecar(request) => (self.sidecar)(request),
             Effect::RunFileOp(request) => self.files.run(request),
             Effect::CancelFileOp(request) => self.files.cancel(request.operation.id),
+            Effect::PauseFileOp(request) => {
+                self.files
+                    .pause(request.operation.id, request.operation.paused);
+            }
             effect @ (Effect::UserFolders(_)
             | Effect::WatchDrives(_)
             | Effect::Eject(_)
@@ -305,6 +357,106 @@ impl Handlers {
         }
         None
     }
+}
+
+/// What `connection` and `secret` are to the remote crate.
+fn endpoint_of(connection: &Connection, secret: String) -> dirfleet_remote::Endpoint {
+    use dirfleet_core::location::Scheme;
+    dirfleet_remote::Endpoint {
+        kind: match connection.scheme {
+            Scheme::Sftp => dirfleet_remote::Kind::Sftp,
+            Scheme::Ftp => dirfleet_remote::Kind::Ftp,
+            Scheme::Dav => dirfleet_remote::Kind::WebDav,
+            Scheme::S3 => dirfleet_remote::Kind::S3,
+        },
+        host: connection.host.clone(),
+        port: connection.port,
+        user: connection.user.clone(),
+        secret,
+        root: connection.root.clone(),
+        secure: connection.secure,
+        bucket: connection.bucket.clone(),
+        region: connection.region.clone(),
+        host_key: connection.host_key.clone(),
+    }
+}
+
+/// Connects to `request`'s server with the password given, or else the
+/// keychain's, and keeps the one given there when asked to.
+pub fn connect(
+    vfs: &vfs::Vfs,
+    secrets: &dyn credentials::Secrets,
+    request: &Connect,
+) -> ConnectOutput {
+    let connection = &request.connection;
+    let given = request
+        .secret
+        .as_ref()
+        .map(|secret| secret.reveal().to_owned());
+    let secret = given
+        .clone()
+        .or_else(|| secrets.get(&connection.id))
+        .unwrap_or_default();
+    match vfs.connect(&connection.id, &endpoint_of(connection, secret)) {
+        Ok(()) => {
+            if let (true, Some(given)) = (request.remember, &given) {
+                secrets.set(&connection.id, given);
+            }
+            ConnectOutput::Connected
+        }
+        Err(dirfleet_remote::ConnectError::NeedsSecret) => ConnectOutput::NeedsSecret,
+        Err(dirfleet_remote::ConnectError::UnknownHostKey { fingerprint }) => {
+            ConnectOutput::UnknownHostKey { fingerprint }
+        }
+        Err(dirfleet_remote::ConnectError::Failed(reason)) => ConnectOutput::Failed(reason),
+    }
+}
+
+/// Connects to servers, each try on a thread of its own: a server may
+/// take its time to answer.
+fn connector<R>(
+    sink: &Weak<R>,
+    vfs: &Arc<vfs::Vfs>,
+    secrets: &Arc<dyn credentials::Secrets>,
+) -> Threaded<Connect>
+where
+    R: ResolveSink<Connect> + Send + Sync + 'static,
+{
+    let (sink, vfs, secrets) = (sink.clone(), Arc::clone(vfs), Arc::clone(secrets));
+    Arc::new(move |mut request: crux_core::Request<Connect>| {
+        let (sink, vfs, secrets) = (sink.clone(), Arc::clone(&vfs), Arc::clone(&secrets));
+        std::thread::spawn(move || {
+            let output = connect(&vfs, secrets.as_ref(), &request.operation);
+            if let Some(sink) = sink.upgrade() {
+                let _ = sink.resolve_request(&mut request, output);
+            }
+        });
+    })
+}
+
+/// Takes a file out of an archive (or wherever it is) to be opened, each on
+/// a thread of its own: it may take a while.
+fn materializer<R>(sink: &Weak<R>, vfs: &Arc<vfs::Vfs>) -> Threaded<Materialize>
+where
+    R: ResolveSink<Materialize> + Send + Sync + 'static,
+{
+    let (sink, vfs) = (sink.clone(), Arc::clone(vfs));
+    Arc::new(move |mut request: crux_core::Request<Materialize>| {
+        let (sink, vfs) = (sink.clone(), Arc::clone(&vfs));
+        std::thread::spawn(move || {
+            let location = Location::parse(&request.operation.location);
+            let copy = vfs
+                .local_file(&location)
+                .map(|file| file.to_string_lossy().into_owned())
+                .map_err(|error| match error {
+                    vfs::VfsError::Password { wrong } => Unreadable::Password { wrong },
+                    other => Unreadable::Failed(other.to_string()),
+                });
+            if let Some(sink) = sink.upgrade() {
+                let _ = sink.resolve_request(&mut request, Materialized(copy));
+            }
+        });
+    })
 }
 
 /// Answers a request on the spot with `answer`.

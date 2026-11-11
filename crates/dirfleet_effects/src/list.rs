@@ -8,6 +8,7 @@ use dirfleet_core::app::{
     ListDir, ListDirOutput, ListTrash, ListView, OrderListing, Ordered, TrashDone, TrashOp,
 };
 use dirfleet_core::listing::{Listing, is_shown};
+use dirfleet_core::location::Location;
 use dirfleet_core::search::filter::CompiledQuery;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
@@ -15,6 +16,7 @@ use rayon::slice::ParallelSlice;
 use crate::listing_io::read_listing;
 use crate::open_history::OpenHistory;
 use crate::sort::{AccessTimes, OpeningHistory, sort_order};
+use crate::vfs::{Vfs, VfsError};
 
 enum Job {
     List(Request<ListDir>),
@@ -24,12 +26,16 @@ enum Job {
 }
 
 /// Lists and re-orders folders on one background thread, in the order asked.
+/// A place that is not a folder on this machine (inside an archive) is
+/// listed on a thread of its own: opening it may take a while, and folders
+/// here must not wait for that.
 pub struct ListHandler {
     jobs: Sender<Job>,
+    list_elsewhere: Box<dyn Fn(Request<ListDir>, Location) + Send + Sync>,
 }
 
 impl ListHandler {
-    pub fn new<R>(sink: Weak<R>, history: Arc<OpenHistory>) -> Self
+    pub fn new<R>(sink: Weak<R>, history: Arc<OpenHistory>, vfs: Arc<Vfs>) -> Self
     where
         R: ResolveSink<ListDir>
             + ResolveSink<OrderListing>
@@ -40,6 +46,24 @@ impl ListHandler {
             + 'static,
     {
         let (jobs, requests) = channel::<Job>();
+        let list_elsewhere = {
+            let (sink, history) = (sink.clone(), Arc::clone(&history));
+            move |mut request: Request<ListDir>, location: Location| {
+                let (sink, history, vfs) = (sink.clone(), Arc::clone(&history), Arc::clone(&vfs));
+                let spawned = std::thread::Builder::new()
+                    .name("dirfleet_list_elsewhere".into())
+                    .spawn(move || {
+                        let view = request.operation.view.clone();
+                        let output = list_location(&vfs, &location, view, &history);
+                        if let Some(sink) = sink.upgrade() {
+                            let _ = sink.resolve_request(&mut request, output);
+                        }
+                    });
+                if let Err(error) = spawned {
+                    log::error!("could not start a listing's thread: {error}");
+                }
+            }
+        };
         std::thread::Builder::new()
             .name("dirfleet_list".into())
             .spawn(move || {
@@ -85,11 +109,17 @@ impl ListHandler {
                 }
             })
             .expect("start the listing thread");
-        Self { jobs }
+        Self {
+            jobs,
+            list_elsewhere: Box::new(list_elsewhere),
+        }
     }
 
     pub fn process(&self, request: Request<ListDir>) {
-        self.send(Job::List(request));
+        match Location::parse(&request.operation.path) {
+            Location::Local(_) => self.send(Job::List(request)),
+            elsewhere => (self.list_elsewhere)(request, elsewhere),
+        }
     }
 
     pub fn order(&self, request: Request<OrderListing>) {
@@ -138,6 +168,30 @@ pub fn list_dir_with(path: &Path, view: ListView, history: &OpenHistory) -> List
         listing: Arc::new(listing),
         order,
         view,
+    }
+}
+
+/// The entries of a place that is not a folder on this machine, shown with
+/// `view`, in display order.
+pub fn list_location(
+    vfs: &Vfs,
+    location: &Location,
+    view: ListView,
+    history: &OpenHistory,
+) -> ListDirOutput {
+    match vfs.listing(location) {
+        Ok(listing) => {
+            let order = display_order_with(&listing, &view, history);
+            ListDirOutput::Listed {
+                opened: Arc::default(),
+                listing: Arc::new(listing),
+                order,
+                view,
+            }
+        }
+        Err(VfsError::Password { wrong }) => ListDirOutput::NeedsPassword { wrong },
+        Err(VfsError::NotConnected(connection)) => ListDirOutput::NeedsConnection { connection },
+        Err(reason) => ListDirOutput::Failed(reason.to_string()),
     }
 }
 

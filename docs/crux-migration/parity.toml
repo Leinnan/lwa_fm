@@ -4,6 +4,10 @@
 # app adds), grouped by the areas of `parity.md`. Checked by `just parity`
 # (`crates/dirfleet_ffi/tests/parity.rs`).
 #
+# Features the egui app never had go in areas 24 and up (24 Archives,
+# 25 Remote locations, 26 Results, 27 Tags) or in the area they belong to.
+# Such an entry has no `egui_ref` and its `notes` start "Not in the egui app".
+#
 # status:       "open" — the Mac app doesn't have it through the core yet
 #               "done" — it does, and `core_test` and `swift_test` prove it
 #               "na"   — not wanted in the Mac app; `na_mac` says why
@@ -1516,6 +1520,47 @@ core_test = ["finished_operations_and_drives_coming_and_going_show_toasts_that_e
 swift_test = ["testAFinishedOperationShowsAToastThatGoesAway"]
 notes = "Done, stopped and failed; the undo hint is the Edit menu's titled Undo"
 
+[[feature]]
+id = "fileops.queue"
+area = 9
+summary = "Copies, moves and deletions take turns on each drive; one that waits can be started now or dropped"
+status = "open"
+windows = "done"
+events = ["StartOperationNow"]
+core_test = ["copies_on_one_drive_take_turns_and_those_on_another_start_at_once", "a_waiting_operation_can_be_started_now_or_dropped"]
+windows_test = ["an_operation_s_button_follows_its_state"]
+notes = "Not in the egui app. Renames, new folders and undo never wait. Windows: a waiting line says so and has Start now beside Stop. Mac: nothing drawn yet"
+
+[[feature]]
+id = "fileops.pause_resume"
+area = 9
+summary = "Pause and resume a copy, move or deletion; a paused one lets the next go"
+status = "open"
+windows = "done"
+events = ["PauseOperation", "ResumeOperation", "PauseAllOperations", "ResumeAllOperations"]
+core_test = ["a_paused_operation_lets_the_next_go_and_resumes"]
+windows_test = ["an_operation_s_button_follows_its_state"]
+notes = "Not in the egui app. Windows: Pause or Resume beside each line's Stop; nothing there pauses or resumes all at once yet. Mac: nothing drawn yet"
+
+[[feature]]
+id = "fileops.progress_detail"
+area = 9
+summary = "A copy says how much is written and how fast"
+status = "open"
+windows = "done"
+core_test = ["a_copy_says_how_much_is_done_and_how_fast"]
+windows_test = ["an_operation_s_line_names_its_item_and_how_it_stands"]
+notes = "Not in the egui app. Mac: nothing drawn yet"
+
+[[feature]]
+id = "fileops.verify"
+area = 9
+summary = "Copies are read back and compared with their originals when the setting says so; one that differs is removed and reported"
+status = "open"
+windows = "done"
+core_test = ["copies_are_checked_when_the_setting_says_so"]
+notes = "Not in the egui app. An APFS clone is not read back, so an operation made of clones is not called verified. Windows: Settings > Files. Mac: no control yet"
+
 
 # 10. Trash
 
@@ -1974,6 +2019,37 @@ events = ["RetryPreview"]
 core_test = ["the_inspector_previews_its_item_and_retries_when_asked"]
 swift_test = ["testImagesGetThumbnailsInRowsTilesAndTheInspector"]
 notes = "Images and videos show the core's thumbnail (loading, ready, unavailable with Try Again); other files keep Quick Look's thumbnail"
+
+[[feature]]
+id = "inspector.checksums"
+area = 15
+summary = "A file's CRC32, MD5, SHA-1, SHA-256 or BLAKE3, worked out on request with progress and Stop, and copied as text"
+status = "open"
+windows = "done"
+events = ["ComputeChecksum", "CancelChecksum", "CopyChecksum"]
+core_test = ["a_file_s_checksum_is_worked_out_on_request_and_copied", "reading_a_file_for_its_checksums_can_be_stopped_and_can_fail", "checksums_of_an_earlier_version_of_a_file_are_not_shown"]
+notes = "Not in the egui app. Windows: a Checksums block under the inspector's facts. Mac: nothing drawn yet"
+
+[[feature]]
+id = "inspector.checksums.verify"
+area = 15
+summary = "Compare a file with a pasted checksum: its length says which kind, and the verdict says match or not"
+status = "open"
+windows = "done"
+events = ["VerifyChecksum"]
+core_test = ["a_pasted_checksum_is_compared_with_the_file_s"]
+windows_test = ["a_checksum_s_verdict_is_marked_as_a_match_or_not"]
+notes = "Not in the egui app. Windows: the box keeps its text when another file is selected. Mac: nothing drawn yet"
+
+[[feature]]
+id = "inspector.checksums.sidecar"
+area = 15
+summary = "Compare a file with the checksum a checksum file beside it holds (name.sha256, SHA256SUMS, .sfv and the like)"
+status = "open"
+windows = "done"
+events = ["VerifySidecar"]
+core_test = ["a_checksum_file_beside_a_file_is_offered_and_compared_with"]
+notes = "Not in the egui app. Checking every file a checksum list names at once is not built. Mac: nothing drawn yet"
 
 
 # 16. Previews & thumbnails
@@ -2568,6 +2644,24 @@ core_test = ["plugin_shortcuts_bind_unless_they_clash", "plugin_shortcuts_can_be
 swift_test = ["testPluginShortcutsTheSandboxAndAnEditedPluginReloading"]
 notes = "Settings > Keyboard lists every shortcut from the core's commands, then the bound plugin shortcuts; the Swift test checks the plugin bindings the page lists, not the page itself"
 
+[[feature]]
+id = "settings.browse_archives"
+area = 20
+summary = "Whether archives open as folders or in their app"
+status = "open"
+windows = "done"
+core_test = ["archives_open_in_their_app_when_the_setting_says_so"]
+notes = "Not in the egui app. Windows: Settings > Files. Mac: no control yet"
+
+[[feature]]
+id = "settings.queue_mode"
+area = 20
+summary = "How many copies, moves and deletions run at a time: one per drive, one in all, or all at once"
+status = "open"
+windows = "done"
+core_test = ["the_queue_setting_says_how_many_copies_run"]
+notes = "Not in the egui app. Windows: Settings > Files. Mac: no control yet"
+
 
 # 21. Toasts
 
@@ -2732,3 +2826,116 @@ status = "na"
 windows = "na"
 na_windows = "there is no earlier native Windows build to import from"
 na_mac = "The Mac app keeps its own data; there is no earlier build of it to import from"
+
+# 24. Archives
+
+[[feature]]
+id = "archive.browse"
+area = 24
+summary = "An archive (zip, 7z, rar, tar and its compressed forms, cab, cpio) opens as a folder; its crumb leads to its top and Up leaves it"
+status = "open"
+windows = "done"
+core_test = ["an_archive_opens_as_a_folder_and_up_leaves_it"]
+windows_test = ["inside_an_archive_entries_only_open_and_nothing_is_made"]
+notes = "Not in the egui app. Read by crates/dirfleet_archive, a copy of uunpack's core; an archive inside an archive opens too. A password-protected list says so and stops there: there is no password prompt yet. Mac: nothing drawn yet"
+
+[[feature]]
+id = "archive.open_member"
+area = 24
+summary = "A file inside an archive is opened from a copy brought out of it"
+status = "open"
+windows = "done"
+core_test = ["a_file_inside_an_archive_is_brought_out_to_be_opened"]
+notes = "Not in the egui app. Copies go under the system's temporary folder and are not cleared by the app. Quick Look, the inspector and thumbnails show nothing for such a file yet"
+
+[[feature]]
+id = "archive.readonly_gating"
+area = 24
+summary = "Inside an archive nothing is made, renamed, removed or pasted, and no path is handed to other programs"
+status = "open"
+windows = "done"
+core_test = ["nothing_is_changed_or_handed_to_other_programs_inside_an_archive"]
+windows_test = ["inside_an_archive_entries_only_open_and_nothing_is_made"]
+notes = "Not in the egui app. Windows: entries there can't be dragged out, and their menu only opens them"
+
+[[feature]]
+id = "archive.extract"
+area = 24
+summary = "Extract Here and Extract To: selected archives whole, or inside an archive the selection or the folder shown, with progress, Stop and undo"
+status = "open"
+windows = "done"
+events = ["ExtractHere", "ExtractTo"]
+core_test = ["selected_archives_are_extracted_beside_them_or_where_asked", "inside_an_archive_the_selection_or_the_folder_shown_is_extracted"]
+windows_test = ["inside_an_archive_entries_only_open_and_nothing_is_made"]
+notes = "Not in the egui app. A whole archive with several items at its top goes into a folder named after it; existing names are kept and the new ones numbered. An extraction waits its turn like a copy but can't be paused. Windows: in the selection's menu and, inside an archive, the folder's. Mac: nothing drawn yet"
+
+[[feature]]
+id = "archive.password"
+area = 24
+summary = "An archive that needs a password asks for it when listed, when a file in it is opened and when it is extracted, then goes on"
+status = "open"
+windows = "done"
+events = ["SubmitArchivePassword", "CancelArchivePassword"]
+core_test = ["an_archive_that_lists_nothing_without_its_password_asks_for_it", "opening_or_extracting_what_is_locked_asks_for_the_password_and_goes_on"]
+notes = "Not in the egui app. The password is kept while the app runs and nowhere else, and never shows in a log. Windows: a dialog with a password box. Mac: nothing drawn yet"
+
+[[feature]]
+id = "archive.create"
+area = 24
+summary = "Compress: the selection becomes a zip, 7z or compressed tar beside it, named in a dialog, with progress, pause, Stop and undo"
+status = "open"
+windows = "done"
+events = ["StartCompress", "SetCompress", "ApplyCompress", "CancelCompress"]
+core_test = ["the_selection_is_compressed_into_an_archive_named_in_a_dialog"]
+notes = "Not in the egui app. One item gives the archive its name, several the folder's; a name already there is refused in the dialog. Links are left out. A zip keeps times in UTC, as zips have no time zone. Windows: Compress… in the selection's menu. Mac: nothing drawn yet"
+
+
+# 25. Remote locations
+
+[[feature]]
+id = "remote.connect"
+area = 25
+summary = "Connect to a server over SFTP, FTP, WebDAV or S3 from a dialog; the tab goes to its top"
+status = "open"
+windows = "done"
+events = ["OpenConnect", "SetConnect", "SubmitConnect", "CancelConnect"]
+core_test = ["a_server_is_connected_to_from_a_dialog_saved_and_shown_in_the_tab"]
+notes = "Not in the egui app. SFTP logs in with a password only: no key files or agent yet. Windows: Connect to Server… in the More menu. Mac: nothing drawn yet"
+
+[[feature]]
+id = "remote.host_key"
+area = 25
+summary = "An SFTP server's key is shown before it is trusted, and asked about again if it changes"
+status = "open"
+windows = "done"
+events = ["AcceptHostKey"]
+core_test = ["a_server_is_connected_to_from_a_dialog_saved_and_shown_in_the_tab"]
+notes = "Not in the egui app. The accepted fingerprint is kept with the saved connection; ~/.ssh/known_hosts is neither read nor written"
+
+[[feature]]
+id = "remote.saved_connections"
+area = 25
+summary = "Connections are saved without their passwords and stand among the drives; one can be left, edited or removed"
+status = "open"
+windows = "done"
+events = ["RemoveConnection", "DisconnectServer"]
+core_test = ["a_server_is_connected_to_from_a_dialog_saved_and_shown_in_the_tab", "a_tab_whose_server_is_not_connected_connects_with_the_kept_password"]
+notes = "Not in the egui app. Windows: a server's sidebar row has Disconnect where a drive has Eject; Edit This Server… in the More menu while a tab is on it, with Remove in that dialog"
+
+[[feature]]
+id = "remote.credentials"
+area = 25
+summary = "A server's password is kept in the system's keychain when asked to, and used when a tab needs the server again"
+status = "open"
+windows = "done"
+core_test = ["a_tab_whose_server_is_not_connected_connects_with_the_kept_password"]
+notes = "Not in the egui app. Windows Credential Manager through the keyring crate; nothing has stored or read a real password in a test"
+
+[[feature]]
+id = "remote.browse"
+area = 25
+summary = "A server's folders list like any folder's, and a file there opens from a copy brought over"
+status = "open"
+windows = "done"
+core_test = ["a_tab_whose_server_is_not_connected_connects_with_the_kept_password"]
+notes = "Not in the egui app. Read only for now: nothing is uploaded, renamed or removed. A server's tab does not refresh by itself"

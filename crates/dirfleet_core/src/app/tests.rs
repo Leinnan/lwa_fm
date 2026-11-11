@@ -1,7 +1,7 @@
 use super::*;
 use crate::listing::{DirEntry, TimestampSeconds};
 use crux_core::Request;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn entry(name: &str, is_dir: bool) -> DirEntry {
     let mut entry = DirEntry::test_new(&format!("/x/{name}"));
@@ -222,7 +222,7 @@ fn opening_a_folder_row_navigates_into_it_and_back_returns() {
         event,
         Event::Navigate {
             tab,
-            path: Path::new("/a").join("sub").to_string_lossy().into()
+            path: "/a/sub".into()
         }
     );
     let mut cmd = app.update(event, &mut model);
@@ -1213,6 +1213,56 @@ fn select_all_is_one_range_and_invert_and_clear_follow() {
 }
 
 #[test]
+fn the_selection_tells_apart_files_of_one_name_in_different_folders() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(&app, &mut model, tab, "/x", &[entry("a", false)]);
+    let _ = app.update(Event::SetSearchDepth { tab, depth: 3 }, &mut model);
+    let mut cmd = search_text(&app, &mut model, tab, "note");
+    let mut walk = walks(&mut cmd).pop().expect("subfolders are walked");
+    let view = walk.operation.view.clone();
+    let found = [
+        DirEntry::test_new("/x/notes.txt"),
+        DirEntry::test_new("/x/deep/notes.txt"),
+    ];
+    walk.resolve(WalkUpdate {
+        output: listing(&found, view),
+        done: true,
+        root: "/x".into(),
+    })
+    .expect("done");
+    let event = cmd.events().next().expect("all results");
+    let _ = app.update(event, &mut model);
+
+    // The one in "deep" is selected, then the rows swap places.
+    click(&app, &mut model, tab, 1, false, false);
+    let mut cmd = app.update(
+        Event::SortBy {
+            tab,
+            sort: Sort::Size,
+        },
+        &mut model,
+    );
+    let mut request = reorders(&mut cmd).remove(0);
+    let read = Arc::clone(&request.operation.listing);
+    let view = request.operation.view.clone();
+    request
+        .resolve(Ordered {
+            listing: read,
+            order: vec![1, 0],
+            view,
+        })
+        .expect("order resolves");
+    let event = cmd.events().next().expect("the order comes back");
+    let _ = app.update(event, &mut model);
+    let view = shown(&app, &model);
+    assert_eq!(view.selection, [RowRange { start: 0, end: 1 }]);
+    assert_eq!(view.cursor, Some(0), "the cursor follows it too");
+    assert_ne!(view.rows[0].folder, "", "the selected one is in \"deep\"");
+}
+
+#[test]
 fn the_selection_stays_on_its_entries_when_rows_move() {
     let app = DirFleet;
     let mut model = Model::default();
@@ -1324,7 +1374,7 @@ fn opening_a_selected_folder_navigates_into_it() {
         cmd.events().next(),
         Some(Event::Navigate {
             tab,
-            path: Path::new("/x").join("sub").to_string_lossy().into()
+            path: "/x/sub".into()
         })
     );
 }
@@ -1357,15 +1407,14 @@ fn quick_look_shows_the_selection_from_the_cursor_and_opens_what_it_shows() {
             _ => None,
         })
         .expect("Quick Look is asked for");
-    let join = |name: &str| Path::new("/x").join(name).to_string_lossy().into_owned();
-    assert_eq!(look.paths, [join("a.png"), join("c.png")]);
+    assert_eq!(look.paths, ["/x/a.png", "/x/c.png"]);
     assert_eq!(look.index, 1, "starting at the cursor, c.png");
     assert_eq!(look.tab, tab);
 
     let mut cmd = app.update(
         Event::OpenPreviewed {
             tab,
-            path: join("b.png"),
+            path: "/x/b.png".into(),
         },
         &mut model,
     );
@@ -1377,7 +1426,7 @@ fn quick_look_shows_the_selection_from_the_cursor_and_opens_what_it_shows() {
     let mut cmd = app.update(
         Event::OpenPreviewed {
             tab,
-            path: join("gone.png"),
+            path: "/x/gone.png".into(),
         },
         &mut model,
     );
@@ -2979,6 +3028,8 @@ fn outcome(op_id: u64, origin: crate::fileops::Origin) -> crate::fileops::Outcom
         affected_dirs: vec![PathBuf::from("/x")],
         created: Vec::new(),
         trash_changed: false,
+        verified: false,
+        needs_password: None,
     }
 }
 
@@ -2999,6 +3050,1485 @@ fn finish(
     app.update(event, model)
 }
 
+/// Two drives: the disk everything is on, and a stick.
+fn two_drives(app: &DirFleet, model: &mut Model) {
+    let usb = crate::drives::test_drive("/Volumes/USB", "USB", crate::drives::DriveKind::Removable);
+    let disk = crate::drives::test_drive("/", "Macintosh HD", crate::drives::DriveKind::Fixed);
+    let _ = app.update(
+        Event::DrivesChanged {
+            drives: DriveList(vec![disk, usb]),
+        },
+        model,
+    );
+}
+
+/// Duplicates the first row of `folder` (a copy on the folder's drive): the
+/// command, and the operation's request when it was started at once.
+fn duplicate_in(
+    app: &DirFleet,
+    model: &mut Model,
+    tab: u32,
+    folder: &str,
+) -> (Command<Effect, Event>, Option<Request<RunFileOp>>) {
+    open(app, model, tab, folder, &[entry("a", false)]);
+    click(app, model, tab, 0, false, false);
+    let mut cmd = app.update(Event::Duplicate { tab }, model);
+    let run = file_ops(&mut cmd).pop();
+    (cmd, run)
+}
+
+/// Ends the operation `run` started by `cmd` and feeds the outcome back.
+fn end(
+    app: &DirFleet,
+    model: &mut Model,
+    cmd: &mut Command<Effect, Event>,
+    run: &mut Request<RunFileOp>,
+) -> Command<Effect, Event> {
+    let id = run.operation.id;
+    run.resolve(FileOpUpdate(crate::fileops::FileOpEvent::Finished(
+        outcome(id, crate::fileops::Origin::User),
+    )))
+    .expect("resolves");
+    let event = cmd.events().next().expect("the outcome comes back");
+    app.update(event, model)
+}
+
+fn states(app: &DirFleet, model: &Model) -> Vec<OperationState> {
+    app.view(model)
+        .operations
+        .iter()
+        .map(|operation| operation.state)
+        .collect()
+}
+
+fn pauses(cmd: &mut Command<Effect, Event>) -> Vec<PauseFileOp> {
+    cmd.effects()
+        .filter_map(|effect| match effect {
+            Effect::PauseFileOp(request) => Some(request.operation),
+            _ => None,
+        })
+        .collect()
+}
+
+fn started_ids(cmd: &mut Command<Effect, Event>) -> Vec<u64> {
+    file_ops(cmd).iter().map(|run| run.operation.id).collect()
+}
+
+#[test]
+fn copies_on_one_drive_take_turns_and_those_on_another_start_at_once() {
+    use OperationState::{Running, Waiting};
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    two_drives(&app, &mut model);
+
+    let (mut first_cmd, first) = duplicate_in(&app, &mut model, tab, "/x");
+    let mut first = first.expect("the first starts at once");
+    let (_, second) = duplicate_in(&app, &mut model, tab, "/x");
+    assert!(second.is_none(), "the second waits for the disk");
+    let (_, third) = duplicate_in(&app, &mut model, tab, "/Volumes/USB/y");
+    assert!(third.is_some(), "the stick is free");
+    assert_eq!(states(&app, &model), [Running, Waiting, Running]);
+    let waiting = &app.view(&model).operations[1];
+    assert_eq!(waiting.detail, "Waiting");
+    assert!(waiting.can_pause);
+
+    // Making a folder is not a copy: it never waits.
+    open(&app, &mut model, tab, "/x", &[entry("a", false)]);
+    let mut cmd = app.update(Event::NewFolder { tab }, &mut model);
+    let folder = file_ops(&mut cmd).pop().expect("made at once");
+    assert!(!folder.operation.op.is_bulk());
+    assert!(!app.view(&model).operations[3].can_pause);
+
+    // The first ends: the second has the disk.
+    let mut next = end(&app, &mut model, &mut first_cmd, &mut first);
+    assert_eq!(started_ids(&mut next), [2]);
+    assert_eq!(states(&app, &model), [Running, Running, Running]);
+}
+
+#[test]
+fn the_queue_setting_says_how_many_copies_run() {
+    use OperationState::{Running, Waiting};
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    two_drives(&app, &mut model);
+    let settings = |queue_mode| Event::ChangeSettings {
+        settings: Settings {
+            queue_mode,
+            ..Settings::default()
+        },
+    };
+
+    let _ = app.update(settings(QueueMode::OneAtATime), &mut model);
+    let (_, first) = duplicate_in(&app, &mut model, tab, "/x");
+    assert!(first.is_some());
+    let (_, second) = duplicate_in(&app, &mut model, tab, "/Volumes/USB/y");
+    assert!(second.is_none(), "one at a time, whatever the drive");
+    let (_, third) = duplicate_in(&app, &mut model, tab, "/x");
+    assert!(third.is_none());
+    assert_eq!(states(&app, &model), [Running, Waiting, Waiting]);
+
+    // One for each drive lets the stick's copy go; the disk's still waits.
+    let mut cmd = app.update(settings(QueueMode::PerVolume), &mut model);
+    assert_eq!(started_ids(&mut cmd), [2]);
+    let mut cmd = app.update(settings(QueueMode::Unlimited), &mut model);
+    assert_eq!(started_ids(&mut cmd), [3], "all at once");
+    let (_, fourth) = duplicate_in(&app, &mut model, tab, "/x");
+    assert!(fourth.is_some());
+}
+
+#[test]
+fn a_paused_operation_lets_the_next_go_and_resumes() {
+    use OperationState::{Paused, Running, Waiting};
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let (_, first) = duplicate_in(&app, &mut model, tab, "/x");
+    assert!(first.is_some());
+    let (_, second) = duplicate_in(&app, &mut model, tab, "/x");
+    assert!(second.is_none());
+    let (_, third) = duplicate_in(&app, &mut model, tab, "/x");
+    assert!(third.is_none());
+
+    // One that waits is paused without a word to the worker, and loses its turn.
+    let mut cmd = app.update(Event::PauseOperation { id: 2 }, &mut model);
+    assert_eq!(pauses(&mut cmd), Vec::new());
+    assert_eq!(states(&app, &model), [Running, Paused, Waiting]);
+    assert_eq!(app.view(&model).operations[1].detail, "Paused");
+
+    // The running one is held where it is, and the next in line starts.
+    let mut cmd = app.update(Event::PauseOperation { id: 1 }, &mut model);
+    let (mut held, mut begun) = (Vec::new(), Vec::new());
+    for effect in cmd.effects() {
+        match effect {
+            Effect::PauseFileOp(request) => held.push(request.operation),
+            Effect::RunFileOp(request) => begun.push(request.operation.id),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        held,
+        [PauseFileOp {
+            id: 1,
+            paused: true
+        }]
+    );
+    assert_eq!(begun, [3], "the paused second is passed over");
+    assert_eq!(states(&app, &model), [Paused, Paused, Running]);
+
+    // Resumed, the first goes on; the second waits its turn again.
+    let mut cmd = app.update(Event::ResumeOperation { id: 1 }, &mut model);
+    assert_eq!(
+        pauses(&mut cmd),
+        [PauseFileOp {
+            id: 1,
+            paused: false
+        }]
+    );
+    let mut cmd = app.update(Event::ResumeOperation { id: 2 }, &mut model);
+    assert!(
+        !cmd.effects()
+            .any(|effect| matches!(effect, Effect::PauseFileOp(_) | Effect::RunFileOp(_))),
+        "nothing is told and nothing starts"
+    );
+    assert_eq!(states(&app, &model), [Running, Waiting, Running]);
+
+    // All at once: only those the worker has are told.
+    let mut cmd = app.update(Event::PauseAllOperations, &mut model);
+    let told: Vec<u64> = pauses(&mut cmd).iter().map(|pause| pause.id).collect();
+    assert_eq!(told, [1, 3]);
+    assert_eq!(states(&app, &model), [Paused, Paused, Paused]);
+    let mut cmd = app.update(Event::ResumeAllOperations, &mut model);
+    assert_eq!(pauses(&mut cmd).len(), 2);
+    assert_eq!(states(&app, &model), [Running, Waiting, Running]);
+}
+
+#[test]
+fn a_waiting_operation_can_be_started_now_or_dropped() {
+    use OperationState::{Running, Waiting};
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let (_, first) = duplicate_in(&app, &mut model, tab, "/x");
+    assert!(first.is_some());
+    let _ = duplicate_in(&app, &mut model, tab, "/x");
+    let _ = duplicate_in(&app, &mut model, tab, "/x");
+    assert_eq!(states(&app, &model), [Running, Waiting, Waiting]);
+
+    let mut cmd = app.update(Event::StartOperationNow { id: 3 }, &mut model);
+    assert_eq!(started_ids(&mut cmd), [3]);
+    assert_eq!(states(&app, &model), [Running, Waiting, Running]);
+
+    // Stopping one that never started tells the worker nothing.
+    let mut cmd = app.update(Event::CancelOperation { id: 2 }, &mut model);
+    assert!(
+        !cmd.effects()
+            .any(|effect| matches!(effect, Effect::CancelFileOp(_)))
+    );
+    let view = app.view(&model);
+    assert_eq!(view.operations.len(), 2);
+    assert_eq!(view.activity[0].state, ActivityState::Stopped);
+    assert_eq!(view.activity[0].text, "Stopped: Duplicating 1 item");
+
+    // One that runs is told to stop.
+    let mut cmd = app.update(Event::CancelOperation { id: 1 }, &mut model);
+    assert!(
+        cmd.effects()
+            .any(|effect| matches!(effect, Effect::CancelFileOp(_)))
+    );
+}
+
+#[test]
+fn a_copy_says_how_much_is_done_and_how_fast() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let (mut cmd, run) = duplicate_in(&app, &mut model, tab, "/x");
+    let mut run = run.expect("it starts");
+    let mut progress = |done, rate| {
+        run.resolve(FileOpUpdate(crate::fileops::FileOpEvent::Progress {
+            id: 1,
+            fraction: 0.5,
+            current: "a".into(),
+            bytes_done: done,
+            bytes_total: 4_000_000_000,
+            bytes_per_second: rate,
+        }))
+        .expect("progress");
+        let event = cmd.events().next().expect("progress comes back");
+        let _ = app.update(event, &mut model);
+        app.view(&model).operations[0].detail.clone()
+    };
+    assert_eq!(progress(1_200_000_000, 0), "1.2 GB of 4.0 GB");
+    assert_eq!(
+        progress(2_000_000_000, 85_000_000),
+        "2.0 GB of 4.0 GB \u{b7} 85.0 MB/s"
+    );
+}
+
+/// The checksums the inspector shows for the tab's one selected file.
+fn checksums(app: &DirFleet, model: &Model) -> ChecksumsView {
+    shown(app, model)
+        .inspector
+        .and_then(|inspector| inspector.item)
+        .and_then(|item| item.checksums)
+        .expect("a file's checksums")
+}
+
+/// The file reads `cmd` asked for.
+fn hashes(cmd: &mut Command<Effect, Event>) -> Vec<Request<HashFile>> {
+    cmd.effects()
+        .filter_map(|effect| match effect {
+            Effect::HashFile(request) => Some(request),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Answers the read `hash` started by `cmd` and feeds the answer back.
+fn hashed(
+    app: &DirFleet,
+    model: &mut Model,
+    cmd: &mut Command<Effect, Event>,
+    hash: &mut Request<HashFile>,
+    update: HashUpdate,
+) -> Command<Effect, Event> {
+    hash.resolve(update).expect("resolves");
+    let event = cmd.events().next().expect("the update comes back");
+    app.update(event, model)
+}
+
+const SHA_OF_A: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+/// A tab on `/x` with `a.txt` selected and the inspector shown.
+fn inspecting(app: &DirFleet, model: &mut Model, entries: &[DirEntry]) -> u32 {
+    let tab = window(app, model);
+    open(app, model, tab, "/x", entries);
+    click(app, model, tab, 0, false, false);
+    let _ = app.update(Event::SetInspector { shown: true }, model);
+    tab
+}
+
+#[test]
+fn a_file_s_checksum_is_worked_out_on_request_and_copied() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = inspecting(
+        &app,
+        &mut model,
+        &[entry("a.txt", false), entry("sub", true)],
+    );
+    let view = checksums(&app, &model);
+    let labels: Vec<&str> = view.rows.iter().map(|row| row.label.as_str()).collect();
+    assert_eq!(labels, ["CRC32", "MD5", "SHA-1", "SHA-256", "BLAKE3"]);
+    assert!(
+        view.rows
+            .iter()
+            .all(|row| row.value.is_empty() && !row.computing)
+    );
+    assert_eq!(view.progress, None);
+
+    let path = "/x/a.txt".to_owned();
+    let mut cmd = app.update(
+        Event::ComputeChecksum {
+            path: path.clone(),
+            algorithm: Algorithm::Sha256,
+        },
+        &mut model,
+    );
+    let mut hash = hashes(&mut cmd).pop().expect("the file is read");
+    assert_eq!(hash.operation.path, path);
+    assert_eq!(hash.operation.algorithms, [Algorithm::Sha256]);
+    let view = checksums(&app, &model);
+    assert!(view.rows[3].computing);
+    assert_eq!(view.progress, Some(0));
+
+    let _ = hashed(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut hash,
+        HashUpdate::Progress { done: 5, total: 10 },
+    );
+    assert_eq!(checksums(&app, &model).progress, Some(500));
+    let _ = hashed(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut hash,
+        HashUpdate::Done(vec![(Algorithm::Sha256, SHA_OF_A.into())]),
+    );
+    let view = checksums(&app, &model);
+    assert_eq!(view.rows[3].value, SHA_OF_A);
+    assert!(!view.rows[3].computing);
+    assert_eq!(view.progress, None);
+
+    // Asked again, nothing is read; copied, it goes to the clipboard as text.
+    let mut again = app.update(
+        Event::ComputeChecksum {
+            path: path.clone(),
+            algorithm: Algorithm::Sha256,
+        },
+        &mut model,
+    );
+    assert!(hashes(&mut again).is_empty());
+    let mut copy = app.update(
+        Event::CopyChecksum {
+            path,
+            algorithm: Algorithm::Sha256,
+        },
+        &mut model,
+    );
+    assert!(copy.effects().any(|effect| matches!(
+        effect,
+        Effect::System(request) if request.operation == SystemOp::CopyText(SHA_OF_A.into())
+    )));
+
+    // A folder has no checksums.
+    click(&app, &mut model, tab, 1, false, false);
+    let folder = shown(&app, &model)
+        .inspector
+        .and_then(|inspector| inspector.item)
+        .expect("the folder");
+    assert_eq!(folder.checksums, None);
+}
+
+#[test]
+fn a_pasted_checksum_is_compared_with_the_file_s() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    inspecting(&app, &mut model, &[entry("a.txt", false)]);
+    let path = "/x/a.txt".to_owned();
+    let verify = |expected: &str| Event::VerifyChecksum {
+        path: path.clone(),
+        expected: expected.into(),
+    };
+
+    // 64 digits may be SHA-256 or BLAKE3: one read works out both.
+    let pasted = format!("SHA256: {}", SHA_OF_A.to_uppercase());
+    let mut cmd = app.update(verify(&pasted), &mut model);
+    let mut hash = hashes(&mut cmd).pop().expect("the file is read");
+    assert_eq!(
+        hash.operation.algorithms,
+        [Algorithm::Sha256, Algorithm::Blake3]
+    );
+    let view = checksums(&app, &model);
+    assert_eq!(view.expected, SHA_OF_A);
+    assert_eq!(view.verdict, ChecksumVerdict::Checking);
+    let _ = hashed(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut hash,
+        HashUpdate::Done(vec![
+            (Algorithm::Sha256, SHA_OF_A.into()),
+            (Algorithm::Blake3, "0".repeat(64)),
+        ]),
+    );
+    let view = checksums(&app, &model);
+    assert_eq!(view.verdict, ChecksumVerdict::Match);
+    assert_eq!(view.message, "Matches the file's SHA-256");
+
+    // Another of the same length matches neither: nothing is read again.
+    let mut cmd = app.update(verify(&"f".repeat(64)), &mut model);
+    assert!(hashes(&mut cmd).is_empty());
+    let view = checksums(&app, &model);
+    assert_eq!(view.verdict, ChecksumVerdict::Mismatch);
+    assert_eq!(view.message, "Does not match the file's SHA-256 or BLAKE3");
+
+    // Text that holds no checksum says so; empty text ends the comparison.
+    let _ = app.update(verify("hello"), &mut model);
+    assert_eq!(checksums(&app, &model).verdict, ChecksumVerdict::Unknown);
+    let _ = app.update(verify(""), &mut model);
+    let view = checksums(&app, &model);
+    assert_eq!(view.verdict, ChecksumVerdict::None);
+    assert_eq!(view.expected, "");
+}
+
+#[test]
+fn reading_a_file_for_its_checksums_can_be_stopped_and_can_fail() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    inspecting(&app, &mut model, &[entry("a.txt", false)]);
+    let path = "/x/a.txt".to_owned();
+    let compute = |algorithm| Event::ComputeChecksum {
+        path: path.clone(),
+        algorithm,
+    };
+    let stops = |cmd: &mut Command<Effect, Event>| -> Vec<u64> {
+        cmd.effects()
+            .filter_map(|effect| match effect {
+                Effect::StopHash(request) => Some(request.operation.id),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let mut first = app.update(compute(Algorithm::Md5), &mut model);
+    let first_id = hashes(&mut first).pop().expect("read").operation.id;
+    // Another asked for meanwhile: one new read serves both.
+    let mut second = app.update(compute(Algorithm::Sha1), &mut model);
+    let mut started = Vec::new();
+    let mut stopped = Vec::new();
+    for effect in second.effects() {
+        match effect {
+            Effect::HashFile(request) => started.push(request),
+            Effect::StopHash(request) => stopped.push(request.operation.id),
+            _ => {}
+        }
+    }
+    assert_eq!(stopped, [first_id]);
+    let hash = started.pop().expect("read again");
+    assert_eq!(hash.operation.algorithms, [Algorithm::Sha1, Algorithm::Md5]);
+
+    let mut cancel = app.update(Event::CancelChecksum { path: path.clone() }, &mut model);
+    assert_eq!(stops(&mut cancel), [hash.operation.id]);
+    let view = checksums(&app, &model);
+    assert_eq!(view.progress, None);
+    assert!(view.rows.iter().all(|row| !row.computing));
+
+    // A read that fails says why.
+    let mut cmd = app.update(compute(Algorithm::Crc32), &mut model);
+    let mut hash = hashes(&mut cmd).pop().expect("read");
+    let _ = hashed(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut hash,
+        HashUpdate::Failed("a.txt can't be read: denied".into()),
+    );
+    let view = checksums(&app, &model);
+    assert_eq!(view.message, "a.txt can't be read: denied");
+    assert_eq!(view.progress, None);
+}
+
+#[test]
+fn a_checksum_file_beside_a_file_is_offered_and_compared_with() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    inspecting(
+        &app,
+        &mut model,
+        &[
+            entry("a.txt", false),
+            entry("a.txt.sha256", false),
+            entry("SHA256SUMS", false),
+            entry("b.txt.md5", false),
+        ],
+    );
+    assert_eq!(
+        checksums(&app, &model).sidecars,
+        ["SHA256SUMS", "a.txt.sha256"]
+    );
+
+    let path = "/x/a.txt".to_owned();
+    let mut cmd = app.update(
+        Event::VerifySidecar {
+            path: path.clone(),
+            sidecar: "SHA256SUMS".into(),
+        },
+        &mut model,
+    );
+    let mut read = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::ReadSidecar(request) => Some(request),
+            _ => None,
+        })
+        .expect("the checksum file is read");
+    assert_eq!(read.operation.sidecar, "/x/SHA256SUMS");
+    assert_eq!(read.operation.name, "a.txt");
+    read.resolve(Some(SHA_OF_A.into())).expect("resolves");
+    let event = cmd.events().next().expect("its checksum comes back");
+    let mut cmd = app.update(event, &mut model);
+    assert_eq!(hashes(&mut cmd).len(), 1, "the file is read to compare");
+    assert_eq!(checksums(&app, &model).expected, SHA_OF_A);
+
+    // A checksum file with nothing for this file says so.
+    let _ = app.update(
+        Event::SidecarRead {
+            path,
+            sidecar: "a.txt.sha256".into(),
+            expected: None,
+        },
+        &mut model,
+    );
+    let view = checksums(&app, &model);
+    assert_eq!(view.message, "a.txt.sha256 has no checksum for this file");
+    assert_eq!(view.expected, "");
+}
+
+#[test]
+fn checksums_of_an_earlier_version_of_a_file_are_not_shown() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = inspecting(&app, &mut model, &[entry("a.txt", false)]);
+    let path = "/x/a.txt".to_owned();
+    let mut cmd = app.update(
+        Event::ComputeChecksum {
+            path,
+            algorithm: Algorithm::Md5,
+        },
+        &mut model,
+    );
+    let mut hash = hashes(&mut cmd).pop().expect("read");
+    let _ = hashed(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut hash,
+        HashUpdate::Done(vec![(Algorithm::Md5, "0".repeat(32))]),
+    );
+    assert_eq!(checksums(&app, &model).rows[1].value, "0".repeat(32));
+
+    // The file grew: what was worked out is about what it used to hold.
+    let mut changed = entry("a.txt", false);
+    changed.meta.size = 11;
+    open(&app, &mut model, tab, "/x", &[changed]);
+    click(&app, &mut model, tab, 0, false, false);
+    assert_eq!(checksums(&app, &model).rows[1].value, "");
+}
+
+#[test]
+fn copies_are_checked_when_the_setting_says_so() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let (_, plain) = duplicate_in(&app, &mut model, tab, "/x");
+    assert!(!plain.expect("starts").operation.verify);
+
+    let _ = app.update(
+        Event::ChangeSettings {
+            settings: Settings {
+                verify_copies: true,
+                queue_mode: QueueMode::Unlimited,
+                ..Settings::default()
+            },
+        },
+        &mut model,
+    );
+    let (mut cmd, checked) = duplicate_in(&app, &mut model, tab, "/x");
+    let mut checked = checked.expect("starts");
+    assert!(checked.operation.verify);
+    let id = checked.operation.id;
+    checked
+        .resolve(FileOpUpdate(crate::fileops::FileOpEvent::Finished(
+            crate::fileops::Outcome {
+                verified: true,
+                ..outcome(id, crate::fileops::Origin::User)
+            },
+        )))
+        .expect("resolves");
+    let event = cmd.events().next().expect("the outcome comes back");
+    let _ = app.update(event, &mut model);
+    let view = app.view(&model);
+    assert_eq!(
+        view.toasts.last().map(|toast| toast.text.as_str()),
+        Some("Duplicated 1 item (verified)")
+    );
+    assert_eq!(view.activity[0].text, "Duplicated 1 item (verified)");
+}
+
+/// The files the system is asked to open by `cmd`.
+fn opened(cmd: &mut Command<Effect, Event>) -> Vec<String> {
+    cmd.effects()
+        .filter_map(|effect| match effect {
+            Effect::System(request) => match request.operation {
+                SystemOp::Open(paths) => Some(paths),
+                _ => None,
+            },
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+#[test]
+fn an_archive_opens_as_a_folder_and_up_leaves_it() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let files = [entry("pack.zip", false), entry("notes.txt", false)];
+    open(&app, &mut model, tab, "/x", &files);
+    let here = shown(&app, &model);
+    assert_eq!(here.location.kind, crate::location::LocationKind::Local);
+    assert!(here.location.caps.writable);
+
+    let mut cmd = app.update(Event::OpenRow { tab, row: 0 }, &mut model);
+    let inside = "archive:/x/pack.zip!/";
+    assert_eq!(
+        cmd.events().next(),
+        Some(Event::Navigate {
+            tab,
+            path: inside.into()
+        })
+    );
+    // Another file opens in its app, as ever.
+    let mut cmd = app.update(Event::OpenRow { tab, row: 1 }, &mut model);
+    assert_eq!(opened(&mut cmd), ["/x/notes.txt"]);
+
+    open(
+        &app,
+        &mut model,
+        tab,
+        inside,
+        &[entry("docs", true), entry("readme.txt", false)],
+    );
+    let view = shown(&app, &model);
+    assert_eq!(view.title, "pack.zip");
+    assert_eq!(view.location.kind, crate::location::LocationKind::Archive);
+    assert!(!view.location.caps.writable && !view.location.caps.real_paths);
+    let crumbs: Vec<(&str, &str)> = view
+        .crumbs
+        .iter()
+        .map(|crumb| (crumb.title.as_str(), crumb.path.as_str()))
+        .collect();
+    assert_eq!(
+        crumbs.last(),
+        Some(&("pack.zip", inside)),
+        "the archive's crumb leads to its top: {crumbs:?}"
+    );
+    assert!(view.nav.up);
+
+    // A folder inside is browsed into; its crumb follows the archive's.
+    let mut cmd = app.update(Event::OpenRow { tab, row: 0 }, &mut model);
+    let docs = "archive:/x/pack.zip!/docs";
+    assert_eq!(
+        cmd.events().next(),
+        Some(Event::Navigate {
+            tab,
+            path: docs.into()
+        })
+    );
+    open(&app, &mut model, tab, docs, &[entry("a.md", false)]);
+    let view = shown(&app, &model);
+    assert_eq!(view.title, "docs");
+    assert_eq!(
+        view.crumbs.last().map(|crumb| crumb.path.as_str()),
+        Some(docs)
+    );
+
+    // Up goes to the archive's top, then out to the folder it is in.
+    let mut cmd = app.update(Event::Up { tab }, &mut model);
+    assert_eq!(listed_paths(&mut cmd), [inside]);
+    open(&app, &mut model, tab, inside, &[entry("docs", true)]);
+    let mut cmd = app.update(Event::Up { tab }, &mut model);
+    assert_eq!(listed_paths(&mut cmd), ["/x"]);
+}
+
+#[test]
+fn archives_open_in_their_app_when_the_setting_says_so() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let _ = app.update(
+        Event::ChangeSettings {
+            settings: Settings {
+                browse_archives: false,
+                ..Settings::default()
+            },
+        },
+        &mut model,
+    );
+    open(&app, &mut model, tab, "/x", &[entry("pack.zip", false)]);
+    let mut cmd = app.update(Event::OpenRow { tab, row: 0 }, &mut model);
+    assert_eq!(opened(&mut cmd), ["/x/pack.zip"]);
+}
+
+#[test]
+fn a_file_inside_an_archive_is_brought_out_to_be_opened() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let inside = "archive:/x/pack.zip!/";
+    open(&app, &mut model, tab, inside, &[entry("readme.txt", false)]);
+    let materialize = |cmd: &mut Command<Effect, Event>| {
+        cmd.effects()
+            .find_map(|effect| match effect {
+                Effect::Materialize(request) => Some(request),
+                _ => None,
+            })
+            .expect("a copy is asked for")
+    };
+
+    // The selection opens the same way as a row does.
+    click(&app, &mut model, tab, 0, false, false);
+    for event in [Event::OpenRow { tab, row: 0 }, Event::OpenSelection { tab }] {
+        let mut cmd = app.update(event, &mut model);
+        let mut copy = materialize(&mut cmd);
+        assert_eq!(copy.operation.location, "archive:/x/pack.zip!/readme.txt");
+        copy.resolve(Materialized(Ok("/tmp/copies/readme.txt".into())))
+            .expect("resolves");
+        let event = cmd.events().next().expect("the copy comes back");
+        let mut cmd = app.update(event, &mut model);
+        assert_eq!(opened(&mut cmd), ["/tmp/copies/readme.txt"]);
+    }
+
+    // A copy that can't be made says why.
+    let mut cmd = app.update(Event::OpenRow { tab, row: 0 }, &mut model);
+    let mut copy = materialize(&mut cmd);
+    copy.resolve(Materialized(Err(Unreadable::Failed(
+        "The archive is damaged: bad header".into(),
+    ))))
+    .expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let _ = app.update(event, &mut model);
+    let toast = app.view(&model).toasts.last().cloned().expect("a toast");
+    assert_eq!(toast.text, "The archive is damaged: bad header");
+    assert_eq!(toast.kind, ToastKind::Error);
+}
+
+#[test]
+fn nothing_is_changed_or_handed_to_other_programs_inside_an_archive() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let inside = "archive:/x/pack.zip!/";
+    open(&app, &mut model, tab, inside, &[entry("readme.txt", false)]);
+    click(&app, &mut model, tab, 0, false, false);
+
+    // Making, removing, renaming and copying beside: no operation runs.
+    for event in [
+        Event::NewFolder { tab },
+        Event::NewTextFile { tab },
+        Event::TrashSelection { tab },
+        Event::DeleteSelection { tab },
+        Event::Duplicate { tab },
+        Event::StartRename { tab },
+    ] {
+        let mut cmd = app.update(event.clone(), &mut model);
+        assert!(file_ops(&mut cmd).is_empty(), "{event:?}");
+    }
+    let view = app.view(&model);
+    assert_eq!(view.operations, Vec::new());
+    assert!(
+        view.toasts
+            .iter()
+            .any(|toast| toast.text == "What is inside an archive can't be changed"),
+        "making a folder says why not: {:?}",
+        view.toasts
+    );
+    assert_eq!(shown(&app, &model).renaming, None);
+
+    // Dropping files in asks nothing and copies nothing.
+    let mut cmd = app.update(
+        Event::DropItems {
+            tab,
+            paths: vec!["/y/new.txt".into()],
+            target: None,
+            copy: true,
+            force_move: false,
+        },
+        &mut model,
+    );
+    assert!(
+        cmd.effects()
+            .all(|effect| !matches!(effect, Effect::FindConflicts(_) | Effect::RunFileOp(_)))
+    );
+
+    // The file manager, a terminal and the clipboard get no made-up path.
+    for event in [
+        Event::RevealSelection { tab },
+        Event::OpenInTerminal { tab },
+        Event::CopyPaths { tab },
+        Event::GetInfo { tab },
+    ] {
+        let mut cmd = app.update(event.clone(), &mut model);
+        assert!(
+            cmd.effects()
+                .all(|effect| !matches!(effect, Effect::System(_))),
+            "{event:?}"
+        );
+    }
+
+    // Searching stays in the folder shown, whatever the depth asked for.
+    let _ = app.update(Event::SetSearchDepth { tab, depth: 3 }, &mut model);
+    let mut cmd = search_text(&app, &mut model, tab, "read");
+    assert!(walks(&mut cmd).is_empty());
+}
+
+/// The extraction `cmd` started: its archive, what it takes, where to, and
+/// whether what comes out is kept together.
+fn extraction(cmd: &mut Command<Effect, Event>) -> Option<(String, Vec<String>, String, bool)> {
+    file_ops(cmd)
+        .into_iter()
+        .find_map(|run| match run.operation.op {
+            crate::fileops::FileOp::Extract {
+                archive,
+                members,
+                dst,
+                own_folder,
+                ..
+            } => Some((
+                archive.to_string_lossy().into_owned(),
+                members,
+                dst.to_string_lossy().into_owned(),
+                own_folder,
+            )),
+            _ => None,
+        })
+}
+
+#[test]
+fn selected_archives_are_extracted_beside_them_or_where_asked() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    model.settings.queue_mode = QueueMode::Unlimited;
+    let tab = window(&app, &mut model);
+    let files = [entry("pack.zip", false), entry("notes.txt", false)];
+    open(&app, &mut model, tab, "/x", &files);
+
+    // Nothing to extract until an archive is selected.
+    click(&app, &mut model, tab, 1, false, false);
+    assert!(!shown(&app, &model).can_extract);
+    let mut cmd = app.update(Event::ExtractHere { tab }, &mut model);
+    assert_eq!(extraction(&mut cmd), None);
+
+    let _ = app.update(Event::SelectAll { tab }, &mut model);
+    assert!(shown(&app, &model).can_extract);
+    let mut cmd = app.update(Event::ExtractHere { tab }, &mut model);
+    assert_eq!(
+        extraction(&mut cmd),
+        Some(("/x/pack.zip".into(), Vec::new(), "/x".into(), true)),
+        "the whole archive, kept together, beside it"
+    );
+    let operation = &app.view(&model).operations[0];
+    assert_eq!(operation.description, "Extracting pack.zip to x");
+    assert!(!operation.can_pause, "an extraction runs to its end");
+
+    let mut cmd = app.update(
+        Event::ExtractTo {
+            tab,
+            folder: "/out".into(),
+        },
+        &mut model,
+    );
+    assert_eq!(
+        extraction(&mut cmd),
+        Some(("/x/pack.zip".into(), Vec::new(), "/out".into(), true))
+    );
+}
+
+#[test]
+fn inside_an_archive_the_selection_or_the_folder_shown_is_extracted() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    model.settings.queue_mode = QueueMode::Unlimited;
+    let tab = window(&app, &mut model);
+    let docs = "archive:/x/pack.zip!/docs";
+    open(
+        &app,
+        &mut model,
+        tab,
+        docs,
+        &[entry("a.md", false), entry("sub", true)],
+    );
+    assert!(shown(&app, &model).can_extract);
+
+    // Nothing selected: the folder shown, into the folder the archive is in.
+    let mut cmd = app.update(Event::ExtractHere { tab }, &mut model);
+    assert_eq!(
+        extraction(&mut cmd),
+        Some((
+            "/x/pack.zip".into(),
+            vec!["docs".into()],
+            "/x".into(),
+            false
+        ))
+    );
+    click(&app, &mut model, tab, 0, false, false);
+    let mut cmd = app.update(
+        Event::ExtractTo {
+            tab,
+            folder: "/out".into(),
+        },
+        &mut model,
+    );
+    assert_eq!(
+        extraction(&mut cmd),
+        Some((
+            "/x/pack.zip".into(),
+            vec!["docs/a.md".into()],
+            "/out".into(),
+            false
+        ))
+    );
+
+    // At the archive's top with nothing selected: all of it, kept together.
+    open(
+        &app,
+        &mut model,
+        tab,
+        "archive:/x/pack.zip!/",
+        &[entry("docs", true)],
+    );
+    let mut cmd = app.update(Event::ExtractHere { tab }, &mut model);
+    assert_eq!(
+        extraction(&mut cmd),
+        Some(("/x/pack.zip".into(), Vec::new(), "/x".into(), true))
+    );
+}
+
+#[test]
+fn an_archive_that_lists_nothing_without_its_password_asks_for_it() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let inside = "archive:/x/pack.rar!/";
+    let mut cmd = app.update(
+        Event::Navigate {
+            tab,
+            path: inside.into(),
+        },
+        &mut model,
+    );
+    let answer = |cmd: &mut Command<Effect, Event>, model: &mut Model, wrong| {
+        let mut list = cmd
+            .effects()
+            .find_map(|effect| match effect {
+                Effect::ListDir(request) => Some(request),
+                _ => None,
+            })
+            .expect("the archive is listed");
+        list.resolve(ListDirOutput::NeedsPassword { wrong })
+            .expect("resolves");
+        let event = cmd.events().next().expect("the answer comes back");
+        let _ = app.update(event, model);
+    };
+    answer(&mut cmd, &mut model, false);
+    assert_eq!(
+        app.view(&model).archive_password,
+        Some(PasswordView {
+            archive: "pack.rar".into(),
+            wrong: false
+        })
+    );
+    assert_eq!(
+        shown(&app, &model).error.as_deref(),
+        Some("This archive is password protected.")
+    );
+
+    // Given, it goes to where archives are read before the tab lists again.
+    let submit = Event::SubmitArchivePassword {
+        password: Secret::new("hunter2"),
+    };
+    assert!(
+        !format!("{submit:?}").contains("hunter2"),
+        "a password never shows in a log"
+    );
+    let mut cmd = app.update(submit, &mut model);
+    let mut order = Vec::new();
+    let mut list = None;
+    for effect in cmd.effects() {
+        match effect {
+            Effect::SetArchivePassword(request) => {
+                assert_eq!(request.operation.archive, "/x/pack.rar");
+                assert_eq!(request.operation.password.reveal(), "hunter2");
+                order.push("password");
+            }
+            Effect::ListDir(request) => {
+                order.push("list");
+                list = Some(request);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(order, ["password", "list"]);
+    assert_eq!(app.view(&model).archive_password, None);
+
+    // It did not fit: asked again, saying so. Giving up asks no more.
+    let mut list = list.expect("listed again");
+    list.resolve(ListDirOutput::NeedsPassword { wrong: true })
+        .expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let _ = app.update(event, &mut model);
+    assert_eq!(
+        app.view(&model).archive_password.map(|prompt| prompt.wrong),
+        Some(true)
+    );
+    let _ = app.update(Event::CancelArchivePassword, &mut model);
+    assert_eq!(app.view(&model).archive_password, None);
+}
+
+#[test]
+fn opening_or_extracting_what_is_locked_asks_for_the_password_and_goes_on() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let inside = "archive:/x/pack.zip!/";
+    open(&app, &mut model, tab, inside, &[entry("secret.txt", false)]);
+    let submit = || Event::SubmitArchivePassword {
+        password: Secret::new("hunter2"),
+    };
+
+    // A locked file is asked to be opened: the password, then the file again.
+    let mut cmd = app.update(Event::OpenRow { tab, row: 0 }, &mut model);
+    let mut copy = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::Materialize(request) => Some(request),
+            _ => None,
+        })
+        .expect("a copy is asked for");
+    copy.resolve(Materialized(Err(Unreadable::Password { wrong: false })))
+        .expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let _ = app.update(event, &mut model);
+    assert_eq!(
+        app.view(&model).archive_password,
+        Some(PasswordView {
+            archive: "pack.zip".into(),
+            wrong: false
+        })
+    );
+    assert_eq!(app.view(&model).toasts, Vec::new(), "asking is no error");
+    let mut cmd = app.update(submit(), &mut model);
+    assert!(cmd.effects().any(|effect| matches!(
+        effect,
+        Effect::Materialize(request)
+            if request.operation.location == "archive:/x/pack.zip!/secret.txt"
+    )));
+
+    // An extraction that stops for the password runs again once it is given.
+    let mut cmd = app.update(Event::ExtractHere { tab }, &mut model);
+    let mut run = file_ops(&mut cmd).pop().expect("the extraction runs");
+    let op = run.operation.op.clone();
+    let id = run.operation.id;
+    run.resolve(FileOpUpdate(crate::fileops::FileOpEvent::Finished(
+        crate::fileops::Outcome {
+            errors: vec!["This archive is password protected.".into()],
+            needs_password: Some(false),
+            ..outcome(id, crate::fileops::Origin::User)
+        },
+    )))
+    .expect("resolves");
+    let event = cmd.events().next().expect("the outcome comes back");
+    let _ = app.update(event, &mut model);
+    let view = app.view(&model);
+    assert!(view.archive_password.is_some());
+    assert_eq!(view.toasts, Vec::new(), "the question says it all");
+    let mut cmd = app.update(submit(), &mut model);
+    let again = file_ops(&mut cmd).pop().expect("it runs again");
+    assert_eq!(again.operation.op, op);
+}
+
+#[test]
+fn the_selection_is_compressed_into_an_archive_named_in_a_dialog() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let files = [
+        entry("report.pdf", false),
+        entry("photos.2024", true),
+        entry("taken.zip", false),
+    ];
+    open(&app, &mut model, tab, "/x", &files);
+    let dialog = |model: &Model| shown(&app, model).compress;
+    assert_eq!(dialog(&model), None);
+
+    // One file: its name without its ending. A folder keeps its dots.
+    click(&app, &mut model, tab, 0, false, false);
+    let _ = app.update(Event::StartCompress { tab }, &mut model);
+    let view = dialog(&model).expect("the dialog opens");
+    assert_eq!((view.name.as_str(), view.count), ("report", 1));
+    assert_eq!(view.format, ArchiveFormat::Zip);
+    assert_eq!(view.file_name, "report.zip");
+    assert_eq!(view.error, "");
+    assert_eq!(view.formats.len(), 5);
+    assert_eq!(view.formats[2].label, "Tar, gzip (.tar.gz)");
+    let _ = app.update(Event::CancelCompress { tab }, &mut model);
+    assert_eq!(dialog(&model), None);
+    click(&app, &mut model, tab, 1, false, false);
+    let _ = app.update(Event::StartCompress { tab }, &mut model);
+    assert_eq!(dialog(&model).expect("open").name, "photos.2024");
+
+    // Several items: the folder's name.
+    let _ = app.update(Event::SelectAll { tab }, &mut model);
+    let _ = app.update(Event::StartCompress { tab }, &mut model);
+    let view = dialog(&model).expect("open");
+    assert_eq!((view.name.as_str(), view.count), ("x", 3));
+
+    // A name that is taken, or none, keeps the dialog open and says why.
+    let set = |name: &str, format| Event::SetCompress {
+        tab,
+        name: name.into(),
+        format,
+    };
+    let _ = app.update(set("taken", ArchiveFormat::Zip), &mut model);
+    assert_eq!(
+        dialog(&model).expect("open").error,
+        "taken.zip already exists."
+    );
+    let mut cmd = app.update(Event::ApplyCompress { tab }, &mut model);
+    assert!(file_ops(&mut cmd).is_empty());
+    assert!(dialog(&model).is_some());
+    let _ = app.update(set("  ", ArchiveFormat::Zip), &mut model);
+    assert_eq!(
+        dialog(&model).expect("open").error,
+        "The archive needs a name."
+    );
+
+    let _ = app.update(set("My stuff", ArchiveFormat::TarGz), &mut model);
+    let view = dialog(&model).expect("open");
+    assert_eq!(view.file_name, "My stuff.tar.gz");
+    assert_eq!(view.error, "");
+    let mut cmd = app.update(Event::ApplyCompress { tab }, &mut model);
+    let run = file_ops(&mut cmd).pop().expect("the archive is made");
+    assert_eq!(
+        run.operation.op,
+        crate::fileops::FileOp::Compress {
+            srcs: vec![
+                PathBuf::from("/x/report.pdf"),
+                PathBuf::from("/x/photos.2024"),
+                PathBuf::from("/x/taken.zip"),
+            ],
+            dst: PathBuf::from("/x").join("My stuff.tar.gz"),
+            format: ArchiveFormat::TarGz,
+        }
+    );
+    assert_eq!(dialog(&model), None);
+    let operation = &app.view(&model).operations[0];
+    assert_eq!(
+        operation.description,
+        "Compressing 3 items to My stuff.tar.gz"
+    );
+    assert!(operation.can_pause);
+
+    // Nothing is compressed from inside an archive.
+    open(
+        &app,
+        &mut model,
+        tab,
+        "archive:/x/taken.zip!/",
+        &[entry("a", false)],
+    );
+    click(&app, &mut model, tab, 0, false, false);
+    let _ = app.update(Event::StartCompress { tab }, &mut model);
+    assert_eq!(dialog(&model), None);
+}
+
+/// The connection `cmd` asks for.
+fn connects(cmd: &mut Command<Effect, Event>) -> Vec<Request<Connect>> {
+    cmd.effects()
+        .filter_map(|effect| match effect {
+            Effect::Connect(request) => Some(request),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Answers the connection `connect` asked for by `cmd` and feeds it back.
+fn connected(
+    app: &DirFleet,
+    model: &mut Model,
+    cmd: &mut Command<Effect, Event>,
+    connect: &mut Request<Connect>,
+    output: ConnectOutput,
+) -> Command<Effect, Event> {
+    connect.resolve(output).expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    app.update(event, model)
+}
+
+fn sftp_fields(host: &str) -> ConnectFields {
+    ConnectFields {
+        name: "Work".into(),
+        host: host.into(),
+        user: "ann".into(),
+        ..ConnectFields::default()
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one story, told in order")]
+fn a_server_is_connected_to_from_a_dialog_saved_and_shown_in_the_tab() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    assert_eq!(app.view(&model).connect, None);
+    let _ = app.update(Event::OpenConnect { tab, edit: None }, &mut model);
+    let dialog = app.view(&model).connect.expect("the dialog opens");
+    assert_eq!(dialog.title, "Connect to Server");
+    assert!(!dialog.editing && !dialog.busy);
+    let labels: Vec<&str> = dialog
+        .schemes
+        .iter()
+        .map(|choice| choice.label.as_str())
+        .collect();
+    assert_eq!(labels, ["SFTP", "FTP", "WebDAV", "S3"]);
+
+    // What is missing keeps the dialog open and says so.
+    let submit = |password: &str| Event::SubmitConnect {
+        secret: Secret::new(password),
+        remember: true,
+    };
+    let mut cmd = app.update(submit("hunter2"), &mut model);
+    assert!(connects(&mut cmd).is_empty());
+    assert_eq!(
+        app.view(&model).connect.expect("open").error,
+        "The server's name or address is needed."
+    );
+    let _ = app.update(
+        Event::SetConnect {
+            fields: ConnectFields {
+                port: "ssh".into(),
+                ..sftp_fields("example.org")
+            },
+        },
+        &mut model,
+    );
+    let _ = app.update(submit("hunter2"), &mut model);
+    assert_eq!(
+        app.view(&model).connect.expect("open").error,
+        "The port is a number up to 65535."
+    );
+
+    let _ = app.update(
+        Event::SetConnect {
+            fields: sftp_fields("example.org"),
+        },
+        &mut model,
+    );
+    let mut cmd = app.update(submit("hunter2"), &mut model);
+    let mut connect = connects(&mut cmd).pop().expect("it connects");
+    let asked = connect.operation.clone();
+    assert_eq!(asked.connection.host, "example.org");
+    assert_eq!(asked.connection.user, "ann");
+    assert_eq!(asked.connection.host_key, None);
+    assert_eq!(asked.secret.as_ref().map(Secret::reveal), Some("hunter2"));
+    assert!(asked.remember);
+    assert!(app.view(&model).connect.expect("open").busy);
+
+    // A server never seen before shows its key: the user says it is right.
+    let _ = connected(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut connect,
+        ConnectOutput::UnknownHostKey {
+            fingerprint: "SHA256:abc".into(),
+        },
+    );
+    assert_eq!(
+        app.view(&model).host_key,
+        Some(HostKeyView {
+            host: "example.org".into(),
+            fingerprint: "SHA256:abc".into()
+        })
+    );
+    let mut cmd = app.update(Event::AcceptHostKey { accept: true }, &mut model);
+    let mut connect = connects(&mut cmd).pop().expect("tried again");
+    assert_eq!(
+        connect.operation.connection.host_key.as_deref(),
+        Some("SHA256:abc")
+    );
+    assert_eq!(
+        connect.operation.secret.as_ref().map(Secret::reveal),
+        Some("hunter2"),
+        "with what was typed"
+    );
+    assert_eq!(app.view(&model).host_key, None);
+
+    // Connected: the dialog closes and the tab goes to the server's top.
+    let id = connect.operation.connection.id.clone();
+    let mut cmd = connected(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut connect,
+        ConnectOutput::Connected,
+    );
+    let top = format!("sftp://{id}/");
+    assert_eq!(listed_paths(&mut cmd), std::slice::from_ref(&top));
+    let view = app.view(&model);
+    assert_eq!(view.connect, None);
+    let tab_view = shown(&app, &model);
+    assert_eq!(
+        tab_view.location.kind,
+        crate::location::LocationKind::Remote
+    );
+    assert!(!tab_view.location.caps.real_paths);
+
+    // It is saved without its password, and stands among the drives.
+    let saved = DirFleet::persisted(&model);
+    assert_eq!(saved.connections.len(), 1);
+    assert_eq!(saved.connections[0].host_key.as_deref(), Some("SHA256:abc"));
+    assert!(!format!("{saved:?}").contains("hunter2"));
+    let server = view.windows[0]
+        .sidebar
+        .iter()
+        .flat_map(|section| &section.items)
+        .find(|item| item.path == top)
+        .cloned()
+        .expect("in the sidebar");
+    assert_eq!(server.title, "Work");
+    assert_eq!(server.eject.as_deref(), Some("Disconnect"));
+
+    // Its "eject" closes the connection; it stays saved.
+    let mut cmd = app.update(Event::EjectDrive { mount: top }, &mut model);
+    assert!(cmd.effects().any(|effect| matches!(
+        effect,
+        Effect::Disconnect(request) if request.operation.id == id
+    )));
+    assert_eq!(DirFleet::persisted(&model).connections.len(), 1);
+}
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one story, told in order")]
+fn a_tab_whose_server_is_not_connected_connects_with_the_kept_password() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    model.remote.connections.push(Connection {
+        id: "c7".into(),
+        name: "NAS".into(),
+        scheme: crate::location::Scheme::Ftp,
+        host: "nas.local".into(),
+        ..Connection::default()
+    });
+    let top = "ftp://c7/";
+    let mut cmd = app.update(
+        Event::Navigate {
+            tab,
+            path: top.into(),
+        },
+        &mut model,
+    );
+    let mut list = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::ListDir(request) => Some(request),
+            _ => None,
+        })
+        .expect("listed");
+    list.resolve(ListDirOutput::NeedsConnection {
+        connection: "c7".into(),
+    })
+    .expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let mut cmd = app.update(event, &mut model);
+    assert_eq!(shown(&app, &model).error.as_deref(), Some("Connecting…"));
+    let mut connect = connects(&mut cmd).pop().expect("it connects by itself");
+    assert_eq!(connect.operation.secret, None, "the keychain's password");
+    assert_eq!(app.view(&model).connect, None, "no dialog yet");
+
+    // The keychain has none that fits: the dialog asks, for that server.
+    let _ = connected(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut connect,
+        ConnectOutput::NeedsSecret,
+    );
+    let dialog = app.view(&model).connect.expect("the dialog opens");
+    assert_eq!(dialog.title, "NAS");
+    assert!(dialog.editing);
+    assert_eq!(dialog.fields.host, "nas.local");
+    assert_eq!(dialog.error, "The server wants the password.");
+
+    // Typed: connected, and the tab that waited is read again.
+    let mut cmd = app.update(
+        Event::SubmitConnect {
+            secret: Secret::new("pw"),
+            remember: false,
+        },
+        &mut model,
+    );
+    let mut connect = connects(&mut cmd).pop().expect("it connects");
+    assert_eq!(connect.operation.connection.id, "c7");
+    let mut cmd = connected(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut connect,
+        ConnectOutput::Connected,
+    );
+    assert_eq!(listed_paths(&mut cmd), [top]);
+    assert_eq!(app.view(&model).connect, None);
+
+    // A server that can't be reached says why on the tab; removing it
+    // forgets its password too.
+    let _ = app.update(
+        Event::OpenConnect {
+            tab,
+            edit: Some("c7".into()),
+        },
+        &mut model,
+    );
+    let mut cmd = app.update(
+        Event::SubmitConnect {
+            secret: Secret::new(""),
+            remember: false,
+        },
+        &mut model,
+    );
+    let mut connect = connects(&mut cmd).pop().expect("it connects");
+    assert_eq!(
+        connect.operation.secret, None,
+        "nothing typed: the keychain's"
+    );
+    let _ = connected(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut connect,
+        ConnectOutput::Failed("No route to nas.local".into()),
+    );
+    assert_eq!(
+        app.view(&model).connect.expect("still open").error,
+        "No route to nas.local"
+    );
+    let mut cmd = app.update(Event::RemoveConnection { id: "c7".into() }, &mut model);
+    let mut forgot = false;
+    for effect in cmd.effects() {
+        forgot |= matches!(effect, Effect::ForgetSecret(request) if request.operation.id == "c7");
+    }
+    assert!(forgot);
+    assert_eq!(app.view(&model).connect, None);
+    assert_eq!(DirFleet::persisted(&model).connections.len(), 0);
+}
+
 #[test]
 fn a_new_folder_is_made_selected_and_renamed_once_listed() {
     let app = DirFleet;
@@ -3017,6 +4547,9 @@ fn a_new_folder_is_made_selected_and_renamed_once_listed() {
         id: run.operation.id,
         fraction: 0.5,
         current: "untitled folder".into(),
+        bytes_done: 0,
+        bytes_total: 0,
+        bytes_per_second: 0,
     }))
     .expect("progress");
     let event = cmd.events().next().expect("progress comes back");
@@ -3144,6 +4677,8 @@ fn renaming_checks_the_name_and_undo_and_redo_run_the_inverse() {
 fn trash_delete_and_duplicate_act_on_the_selection_but_not_in_the_trash() {
     let app = DirFleet;
     let mut model = Model::default();
+    // Each operation here starts at once, whatever still runs.
+    model.settings.queue_mode = QueueMode::Unlimited;
     let tab = window(&app, &mut model);
     open(
         &app,
@@ -3188,6 +4723,8 @@ fn trash_delete_and_duplicate_act_on_the_selection_but_not_in_the_trash() {
 fn copying_asks_how_clashing_names_go_and_copies_into_the_same_folder_duplicate() {
     let app = DirFleet;
     let mut model = Model::default();
+    // Each operation here starts at once, whatever still runs.
+    model.settings.queue_mode = QueueMode::Unlimited;
     let tab = window(&app, &mut model);
     open(&app, &mut model, tab, "/x", &[entry("a", false)]);
     click(&app, &mut model, tab, 0, false, false);

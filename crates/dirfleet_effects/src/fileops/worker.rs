@@ -9,25 +9,89 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// Copies are done in chunks of this size so progress and cancel stay live.
 const CHUNK: usize = 1024 * 1024;
 const REPORT_INTERVAL: Duration = Duration::from_millis(60);
 
+/// How long a copy's speed is measured over before it is told again.
+const RATE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// What whoever started an operation can tell it while it runs: to stop, or
+/// to hold where it is until told to go on.
+#[derive(Debug, Default)]
+pub struct OpControl {
+    cancel: AtomicBool,
+    paused: Mutex<bool>,
+    changed: Condvar,
+    /// Read each copied file back and compare it with its original.
+    verify: bool,
+}
+
+impl OpControl {
+    /// A control for an operation that checks its copies, or doesn't.
+    pub fn with_verify(verify: bool) -> Self {
+        Self {
+            verify,
+            ..Self::default()
+        }
+    }
+
+    /// Asks the operation to stop; a paused one wakes to do so.
+    pub fn cancel(&self) {
+        // Taken so a paused operation can't miss the wake-up between its
+        // check and its wait.
+        let _paused = self.paused.lock().unwrap_or_else(PoisonError::into_inner);
+        self.cancel.store(true, Ordering::Relaxed);
+        self.changed.notify_all();
+    }
+
+    /// Holds the operation at its next step, or lets it go on.
+    pub fn set_paused(&self, paused: bool) {
+        *self.paused.lock().unwrap_or_else(PoisonError::into_inner) = paused;
+        self.changed.notify_all();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Waits here while the operation is paused; says whether it is to stop.
+    pub fn wait_if_paused(&self) -> bool {
+        self.checkpoint().0
+    }
+
+    /// Waits here while the operation is paused. Says whether it is to
+    /// stop, and whether it waited.
+    fn checkpoint(&self) -> (bool, bool) {
+        let mut waited = false;
+        let mut paused = self.paused.lock().unwrap_or_else(PoisonError::into_inner);
+        while *paused && !self.is_cancelled() {
+            waited = true;
+            paused = self
+                .changed
+                .wait(paused)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(paused);
+        (self.is_cancelled(), waited)
+    }
+}
+
 struct Job {
     id: u64,
     op: FileOp,
     origin: Origin,
-    cancel: Arc<AtomicBool>,
+    control: Arc<OpControl>,
 }
 
 /// Runs operations one after another on a dedicated thread.
 pub struct Worker {
     sender: crossbeam::channel::Sender<Job>,
     next_id: AtomicU64,
-    running: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    running: Arc<Mutex<HashMap<u64, Arc<OpControl>>>>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -40,13 +104,13 @@ impl Worker {
     /// Starts the worker thread. `report` is called from that thread.
     pub fn new(report: impl Fn(FileOpEvent) + Send + Sync + 'static) -> Self {
         let (sender, receiver) = crossbeam::channel::unbounded::<Job>();
-        let running: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>> = Arc::default();
+        let running: Arc<Mutex<HashMap<u64, Arc<OpControl>>>> = Arc::default();
         let thread_running = Arc::clone(&running);
         let spawned = std::thread::Builder::new()
             .name("file-ops".into())
             .spawn(move || {
                 for job in receiver {
-                    let outcome = execute(job.id, job.op, job.origin, &job.cancel, &report);
+                    let outcome = execute(job.id, job.op, job.origin, &job.control, &report);
                     thread_running
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -67,18 +131,18 @@ impl Worker {
     /// Queues an operation and returns its id.
     pub fn submit(&self, op: FileOp, origin: Origin) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let cancel = Arc::new(AtomicBool::new(false));
+        let control = Arc::new(OpControl::default());
         self.running
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, Arc::clone(&cancel));
+            .insert(id, Arc::clone(&control));
         if self
             .sender
             .send(Job {
                 id,
                 op,
                 origin,
-                cancel,
+                control,
             })
             .is_err()
         {
@@ -89,23 +153,24 @@ impl Worker {
 
     /// Asks a queued or running operation to stop.
     pub fn cancel(&self, id: u64) {
-        if let Some(cancel) = self
+        if let Some(control) = self
             .running
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&id)
         {
-            cancel.store(true, Ordering::Relaxed);
+            control.cancel();
         }
     }
 }
 
-/// Runs one operation to completion on the calling thread.
+/// Runs one operation to completion on the calling thread. `control` stops
+/// it or holds it between items and between the chunks of a file.
 pub fn execute(
     id: u64,
     op: FileOp,
     origin: Origin,
-    cancel: &AtomicBool,
+    control: &OpControl,
     report: &dyn Fn(FileOpEvent),
 ) -> Outcome {
     let description = op.describe();
@@ -115,10 +180,16 @@ pub fn execute(
     });
     let mut run = Run {
         id,
-        cancel,
+        control,
         report,
         done: 0,
         total: 0,
+        in_bytes: false,
+        verifying: false,
+        verified: 0,
+        unverified: 0,
+        rate: 0,
+        rate_from: (Instant::now(), 0),
         // Report the first chunk right away so short operations show progress.
         last_report: Instant::now()
             .checked_sub(REPORT_INTERVAL)
@@ -133,7 +204,9 @@ pub fn execute(
         id,
         origin,
         description,
-        cancelled: cancel.load(Ordering::Relaxed),
+        cancelled: control.is_cancelled(),
+        verified: run.verified > 0 && run.unverified == 0 && run.errors.is_empty(),
+        needs_password: None,
         errors: run.errors,
         undo,
         affected_dirs: run.affected.into_iter().collect(),
@@ -144,11 +217,23 @@ pub fn execute(
 
 struct Run<'a> {
     id: u64,
-    cancel: &'a AtomicBool,
+    control: &'a OpControl,
     report: &'a dyn Fn(FileOpEvent),
     /// Progress in bytes for copies, in items otherwise.
     done: u64,
     total: u64,
+    /// `done` and `total` count bytes.
+    in_bytes: bool,
+    /// A copy is being read back: progress says so.
+    verifying: bool,
+    /// Files read back and found the same as their originals, and files
+    /// copied without that check (an APFS clone, a link).
+    verified: u64,
+    unverified: u64,
+    /// Bytes a second, as last measured.
+    rate: u64,
+    /// When the speed was last measured, and `done` then.
+    rate_from: (Instant, u64),
     last_report: Instant,
     errors: Vec<String>,
     affected: BTreeSet<PathBuf>,
@@ -205,8 +290,26 @@ fn is_within(inner: &Path, outer: &Path) -> bool {
 }
 
 impl Run<'_> {
-    fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
+    /// Whether to stop. Waits first while the operation is paused.
+    fn cancelled(&mut self) -> bool {
+        let (cancelled, waited) = self.control.checkpoint();
+        if waited {
+            // The time spent paused says nothing about the speed.
+            self.rate_from = (Instant::now(), self.done);
+        }
+        cancelled
+    }
+
+    /// Measures the copy's speed over the last while.
+    fn measure_rate(&mut self) {
+        let (since, done_then) = self.rate_from;
+        let elapsed = since.elapsed();
+        if elapsed < RATE_INTERVAL {
+            return;
+        }
+        let copied = self.done.saturating_sub(done_then);
+        self.rate = (copied as f64 / elapsed.as_secs_f64()) as u64;
+        self.rate_from = (Instant::now(), self.done);
     }
 
     fn progress(&mut self, current: &Path, force: bool) {
@@ -219,10 +322,24 @@ impl Run<'_> {
         } else {
             (self.done as f64 / self.total as f64).min(1.0) as f32
         };
+        let (bytes_done, bytes_total, bytes_per_second) = if self.in_bytes {
+            self.measure_rate();
+            (self.done, self.total, self.rate)
+        } else {
+            (0, 0, 0)
+        };
+        let name = display_name(current);
         (self.report)(FileOpEvent::Progress {
             id: self.id,
             fraction,
-            current: display_name(current),
+            current: if self.verifying {
+                format!("Verifying {name}")
+            } else {
+                name
+            },
+            bytes_done,
+            bytes_total,
+            bytes_per_second,
         });
     }
 
@@ -243,6 +360,12 @@ impl Run<'_> {
             FileOp::Copy { srcs, dst, policy } => self.copy_or_move(&srcs, &dst, policy, false),
             FileOp::Move { srcs, dst, policy } => self.copy_or_move(&srcs, &dst, policy, true),
             FileOp::Duplicate(srcs) => self.duplicate(&srcs),
+            // Run by `extracting::run` and `compressing::run`.
+            FileOp::Extract { .. } | FileOp::Compress { .. } => {
+                self.errors
+                    .push("Archives are made and extracted elsewhere".to_owned());
+                None
+            }
             FileOp::Trash(paths) => self.trash(&paths),
             FileOp::Delete(paths) => {
                 self.delete(&paths);
@@ -296,6 +419,7 @@ impl Run<'_> {
         } else {
             srcs.iter().map(|src| tree_size(src)).sum()
         };
+        self.in_bytes = !moving;
         let mut moved = Vec::new();
         for src in srcs {
             if self.cancelled() {
@@ -362,6 +486,7 @@ impl Run<'_> {
         #[cfg(target_os = "macos")]
         if !exists(target) && super::clone::clone(src, target).is_ok() {
             self.done += tree_size(src);
+            self.unverified += 1;
             self.progress(src, false);
             return Ok(());
         }
@@ -402,6 +527,8 @@ impl Run<'_> {
             let mut writer = File::create(target)?;
             let mut buffer =
                 vec![0; CHUNK.min(usize::try_from(meta.len()).unwrap_or(CHUNK).max(1))];
+            // What was read, to compare with what ends up written.
+            let mut read_sum = self.control.verify.then(blake3::Hasher::new);
             loop {
                 if self.cancelled() {
                     return Err(interrupted());
@@ -411,13 +538,23 @@ impl Run<'_> {
                     break;
                 }
                 writer.write_all(&buffer[..read])?;
+                if let Some(sum) = &mut read_sum {
+                    sum.update(&buffer[..read]);
+                }
                 self.done += read as u64;
                 self.progress(src, false);
             }
             if let Ok(modified) = meta.modified() {
                 let _ = writer.set_times(fs::FileTimes::new().set_modified(modified));
             }
+            if read_sum.is_some() {
+                // On the disk, not in a cache, before it is read back.
+                writer.sync_all()?;
+            }
             drop(writer);
+            if let Some(sum) = read_sum {
+                self.verify_copy(src, target, &sum.finalize())?;
+            }
             #[cfg(target_os = "macos")]
             copy_metadata(src, target);
             fs::set_permissions(target, meta.permissions())
@@ -429,8 +566,28 @@ impl Run<'_> {
         result
     }
 
+    /// Reads the copy at `target` back and compares it with what was read
+    /// from `src`.
+    fn verify_copy(&mut self, src: &Path, target: &Path, read: &blake3::Hash) -> io::Result<()> {
+        self.verifying = true;
+        self.progress(src, true);
+        let written = crate::hashing::fingerprint(target, || self.cancelled());
+        self.verifying = false;
+        match written? {
+            None => Err(interrupted()),
+            Some(written) if written == *read => {
+                self.verified += 1;
+                Ok(())
+            }
+            Some(_) => Err(io::Error::other(
+                "the copy is not the same as the original and was removed",
+            )),
+        }
+    }
+
     fn duplicate(&mut self, srcs: &[PathBuf]) -> Option<Undo> {
         self.total = srcs.iter().map(|src| tree_size(src)).sum();
+        self.in_bytes = true;
         for src in srcs {
             if self.cancelled() {
                 break;

@@ -13,6 +13,8 @@ use crux_core::render::render;
 use facet::Facet;
 use serde::{Deserialize, Serialize};
 
+use super::archives::Retry;
+use super::settings::QueueMode;
 use super::undo::Step;
 use super::{DirFleet, Effect, Event, Model, OpenHistoryOp, Tab, ToastKind, tab_id};
 use crate::fileops::{
@@ -20,6 +22,7 @@ use crate::fileops::{
 };
 use crate::ids::TabId;
 use crate::listing::TimestampSeconds;
+use crate::location::Location;
 
 /// Run `op`, reporting its progress, then how it went.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +30,8 @@ pub struct RunFileOp {
     pub id: u64,
     pub op: FileOp,
     pub origin: Origin,
+    /// Read each copied file back and compare it with its original.
+    pub verify: bool,
 }
 
 /// A file operation's report. Opaque to facet: it never leaves the core.
@@ -48,6 +53,17 @@ pub struct CancelFileOp {
 }
 
 impl Operation for CancelFileOp {
+    type Output = ();
+}
+
+/// Hold the running operation `id` where it is, or let it go on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PauseFileOp {
+    pub id: u64,
+    pub paused: bool,
+}
+
+impl Operation for PauseFileOp {
     type Output = ();
 }
 
@@ -93,7 +109,18 @@ impl Operation for ClipboardChanges {
     type Output = u64;
 }
 
-/// A running operation, for progress UI.
+/// Where an operation is on its way.
+#[derive(Facet, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub enum OperationState {
+    /// Not started: another operation uses its drive.
+    Waiting,
+    Running,
+    /// Held by the user, started or not.
+    Paused,
+}
+
+/// An operation under way or waiting its turn, for progress UI.
 #[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct OperationView {
     pub id: u64,
@@ -102,6 +129,13 @@ pub struct OperationView {
     pub progress: u16,
     /// The item being worked on.
     pub current: String,
+    pub state: OperationState,
+    /// How it stands in words: "Waiting", "Paused", or how much is copied
+    /// and how fast ("1.2 GB of 4.0 GB · 85.0 MB/s"). Empty when there is
+    /// nothing to add.
+    pub detail: String,
+    /// It can be paused and resumed (copies, moves and deletions).
+    pub can_pause: bool,
 }
 
 /// Names clash where items are copied or moved: the shell asks what to do.
@@ -139,6 +173,10 @@ pub(super) struct Renaming {
     error: Option<String>,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about an operation"
+)]
 struct Running {
     description: String,
     progress: u16,
@@ -151,6 +189,54 @@ struct Running {
     done: String,
     /// The items it works on, to tell whether a drive is busy.
     paths: Vec<PathBuf>,
+    /// The operation itself until the worker has it: `Some` while it waits.
+    waiting: Option<(FileOp, Origin)>,
+    /// Held by the user.
+    paused: bool,
+    /// It waits its turn on its drives ([`FileOp::is_bulk`]).
+    bulk: bool,
+    /// It can be held where it is ([`FileOp::can_pause`]).
+    pausable: bool,
+    /// An extraction, kept to run again once the archive's password is given.
+    retry: Option<FileOp>,
+    /// The drives it reads or writes, when it is one that waits its turn.
+    drives: Vec<PathBuf>,
+    /// Bytes written, bytes to write and bytes a second, while it copies.
+    bytes: (u64, u64, u64),
+}
+
+impl Running {
+    const fn state(&self) -> OperationState {
+        if self.paused {
+            OperationState::Paused
+        } else if self.waiting.is_some() {
+            OperationState::Waiting
+        } else {
+            OperationState::Running
+        }
+    }
+
+    fn detail(&self) -> String {
+        let (done, total, rate) = self.bytes;
+        match self.state() {
+            OperationState::Paused => "Paused".to_owned(),
+            OperationState::Waiting => "Waiting".to_owned(),
+            OperationState::Running if total == 0 => String::new(),
+            OperationState::Running if rate == 0 => {
+                format!(
+                    "{} of {}",
+                    super::format::bytes(done),
+                    super::format::bytes(total)
+                )
+            }
+            OperationState::Running => format!(
+                "{} of {} · {}/s",
+                super::format::bytes(done),
+                super::format::bytes(total),
+                super::format::bytes(rate)
+            ),
+        }
+    }
 }
 
 /// Items waiting to be copied or moved until the user picks how clashes go.
@@ -222,6 +308,14 @@ pub struct ActivityView {
 }
 
 impl Files {
+    /// Adds an operation that is over to the Activity list.
+    fn record(&mut self, finished: Finished) {
+        self.activity.push_back(finished);
+        if self.activity.len() > ACTIVITY_KEPT {
+            self.activity.pop_front();
+        }
+    }
+
     /// The Activity list, newest first.
     pub(super) fn activity(&self, now: u64) -> Vec<ActivityView> {
         self.activity
@@ -263,6 +357,9 @@ impl Files {
                 description: running.description.clone(),
                 progress: running.progress,
                 current: running.current.clone(),
+                state: running.state(),
+                detail: running.detail(),
+                can_pause: running.pausable,
             })
             .collect()
     }
@@ -297,7 +394,7 @@ impl Files {
 
 impl Tab {
     /// The selected rows' paths, or the cursor's when nothing is selected.
-    fn targets(&self) -> Vec<PathBuf> {
+    pub(super) fn targets(&self) -> Vec<PathBuf> {
         let rows: Vec<usize> = if self.selection.is_empty() {
             self.selection.cursor().into_iter().collect()
         } else {
@@ -437,7 +534,14 @@ impl DirFleet {
             .windows
             .iter()
             .flat_map(|window| window.layout.tabs())
-            .filter_map(|id| model.tabs.get(&id)?.path.clone())
+            .filter_map(|id| {
+                model
+                    .tabs
+                    .get(&id)
+                    .filter(|tab| tab.is_local())?
+                    .path
+                    .clone()
+            })
             .map(|path| (super::title_of(&path), path, "Tab"));
         let favorites = model
             .sidebar
@@ -472,8 +576,32 @@ impl DirFleet {
         tab: Option<TabId>,
         rename_new: bool,
     ) -> Command<Effect, Event> {
+        // Nothing is written where nothing can be: inside an archive.
+        let unchangeable = op.paths().into_iter().find_map(|path| {
+            super::archives::why_unchangeable(&Location::parse(&path.to_string_lossy()))
+        });
+        if let Some(reason) = unchangeable {
+            return Self::notify(model, reason.to_owned());
+        }
         model.files.next_id += 1;
         let id = model.files.next_id;
+        let paths: Vec<PathBuf> = op.paths().into_iter().map(Path::to_path_buf).collect();
+        let bulk = op.is_bulk();
+        let pausable = op.can_pause();
+        let retry = matches!(op, FileOp::Extract { .. }).then(|| op.clone());
+        let drives = if bulk {
+            let mounts = Self::mounts(model);
+            let mut drives: Vec<PathBuf> = Vec::new();
+            for path in &paths {
+                let drive = drive_of(path, &mounts);
+                if !drives.contains(&drive) {
+                    drives.push(drive);
+                }
+            }
+            drives
+        } else {
+            Vec::new()
+        };
         model.files.running.insert(
             id,
             Running {
@@ -483,12 +611,167 @@ impl DirFleet {
                 current: String::new(),
                 tab,
                 rename_new,
-                paths: op.paths().into_iter().map(Path::to_path_buf).collect(),
+                paths,
+                waiting: Some((op, origin)),
+                paused: false,
+                bulk,
+                pausable,
+                retry,
+                drives,
+                bytes: (0, 0, 0),
             },
         );
-        Command::stream_from_shell(RunFileOp { id, op, origin })
-            .then_send(move |update| Event::FileOpUpdated { id, update })
-            .and(render())
+        Self::pump(model).and(render())
+    }
+
+    /// Where the drives are mounted.
+    fn mounts(model: &Model) -> Vec<PathBuf> {
+        model
+            .sidebar
+            .drives
+            .iter()
+            .map(|drive| drive.mount.clone())
+            .collect()
+    }
+
+    /// Hands the worker every waiting operation whose turn it is. Small
+    /// operations go at once. Copies, moves and deletions go by the queue
+    /// setting: one at a time on each drive they use, one at a time in all,
+    /// or all at once. On a drive they go in the order they were asked for;
+    /// a paused one lets those behind it pass.
+    pub(super) fn pump(model: &mut Model) -> Command<Effect, Event> {
+        let mode = model.settings.queue_mode;
+        // The drives of the operations ahead: running, or waiting first.
+        let mut ahead: Vec<&Path> = Vec::new();
+        let mut any_ahead = false;
+        let mut start: Vec<u64> = Vec::new();
+        for (&id, operation) in &model.files.running {
+            if operation.paused {
+                continue;
+            }
+            if operation.waiting.is_none() {
+                if operation.bulk {
+                    ahead.extend(operation.drives.iter().map(PathBuf::as_path));
+                    any_ahead = true;
+                }
+                continue;
+            }
+            let free = !operation.bulk
+                || match mode {
+                    QueueMode::Unlimited => true,
+                    QueueMode::OneAtATime => !any_ahead,
+                    QueueMode::PerVolume => !operation
+                        .drives
+                        .iter()
+                        .any(|drive| ahead.contains(&drive.as_path())),
+                };
+            if operation.bulk {
+                ahead.extend(operation.drives.iter().map(PathBuf::as_path));
+                any_ahead = true;
+            }
+            if free {
+                start.push(id);
+            }
+        }
+        let started: Vec<_> = start
+            .into_iter()
+            .map(|id| Self::start_operation(model, id))
+            .collect();
+        Command::all(started)
+    }
+
+    /// Hands the waiting operation `id` to the worker.
+    fn start_operation(model: &mut Model, id: u64) -> Command<Effect, Event> {
+        let Some((op, origin)) = model
+            .files
+            .running
+            .get_mut(&id)
+            .and_then(|operation| operation.waiting.take())
+        else {
+            return Command::done();
+        };
+        let verify = model.settings.verify_copies;
+        Command::stream_from_shell(RunFileOp {
+            id,
+            op,
+            origin,
+            verify,
+        })
+        .then_send(move |update| Event::FileOpUpdated { id, update })
+    }
+
+    /// Stops the operation `id`: one that waits is dropped, one that runs
+    /// is told to stop and says so when it has.
+    pub(super) fn cancel_operation(model: &mut Model, id: u64) -> Command<Effect, Event> {
+        let waits = model
+            .files
+            .running
+            .get(&id)
+            .is_some_and(|operation| operation.waiting.is_some());
+        if !waits {
+            return Command::notify_shell(CancelFileOp { id }).into();
+        }
+        if let Some(operation) = model.files.running.remove(&id) {
+            model.files.record(Finished {
+                id,
+                text: format!("Stopped: {}", operation.description),
+                state: ActivityState::Stopped,
+                errors: Vec::new(),
+                at: model.now,
+            });
+        }
+        Self::pump(model).and(render())
+    }
+
+    /// Pauses or resumes the operation `id`, when it is one that can be.
+    /// The worker is told only about one it already has.
+    fn set_paused(model: &mut Model, id: u64, paused: bool) -> Command<Effect, Event> {
+        let Some(operation) = model
+            .files
+            .running
+            .get_mut(&id)
+            .filter(|operation| operation.pausable && operation.paused != paused)
+        else {
+            return Command::done();
+        };
+        operation.paused = paused;
+        if operation.waiting.is_some() {
+            return Command::done();
+        }
+        Command::notify_shell(PauseFileOp { id, paused }).into()
+    }
+
+    /// The events that pause, resume and reorder operations.
+    fn queue_event(model: &mut Model, event: &Event) -> Command<Effect, Event> {
+        let told = match *event {
+            Event::PauseOperation { id } => Self::set_paused(model, id, true),
+            Event::ResumeOperation { id } => Self::set_paused(model, id, false),
+            Event::PauseAllOperations | Event::ResumeAllOperations => {
+                let paused = matches!(event, Event::PauseAllOperations);
+                // Collected first: pausing needs the model.
+                #[allow(clippy::needless_collect)]
+                let ids: Vec<u64> = model.files.running.keys().copied().collect();
+                let told: Vec<_> = ids
+                    .into_iter()
+                    .map(|id| Self::set_paused(model, id, paused))
+                    .collect();
+                Command::all(told)
+            }
+            Event::StartOperationNow { id } => {
+                if let Some(operation) = model
+                    .files
+                    .running
+                    .get_mut(&id)
+                    .filter(|operation| operation.waiting.is_some())
+                {
+                    operation.paused = false;
+                }
+                Self::start_operation(model, id)
+            }
+            _ => return Command::done(),
+        };
+        // A pause frees a drive for those waiting; a resume joins the line.
+        told.and(Self::pump(model)).and(render())
     }
 
     /// Copies or moves `srcs` into `dst`, asking first when names clash.
@@ -500,6 +783,11 @@ impl DirFleet {
         dst: PathBuf,
         copy: bool,
     ) -> Command<Effect, Event> {
+        let unchangeable =
+            super::archives::why_unchangeable(&Location::parse(&dst.to_string_lossy()));
+        if let Some(reason) = unchangeable {
+            return Self::notify(model, reason.to_owned());
+        }
         let srcs: Vec<PathBuf> = srcs
             .into_iter()
             // A folder never goes into itself.
@@ -709,7 +997,12 @@ impl DirFleet {
                     Some(step) => Self::undo_step(model, step, origin),
                 }
             }
-            Event::CancelOperation { id } => Command::notify_shell(CancelFileOp { id }).into(),
+            Event::CancelOperation { id } => Self::cancel_operation(model, id),
+            Event::PauseOperation { .. }
+            | Event::ResumeOperation { .. }
+            | Event::PauseAllOperations
+            | Event::ResumeAllOperations
+            | Event::StartOperationNow { .. } => Self::queue_event(model, &event),
             Event::CopySelection { tab } | Event::CutSelection { tab } => {
                 let Some(id) = tab_of(tab) else {
                     return Command::done();
@@ -818,11 +1111,17 @@ impl DirFleet {
                 render()
             }
             FileOpEvent::Progress {
-                fraction, current, ..
+                fraction,
+                current,
+                bytes_done,
+                bytes_total,
+                bytes_per_second,
+                ..
             } => {
                 if let Some(running) = model.files.running.get_mut(&id) {
                     running.progress = (fraction.clamp(0.0, 1.0) * 1000.0).round() as u16;
                     running.current = current;
+                    running.bytes = (bytes_done, bytes_total, bytes_per_second);
                 }
                 render()
             }
@@ -830,10 +1129,24 @@ impl DirFleet {
         }
     }
 
+    /// An extraction that stopped because its archive wants a password:
+    /// the password is asked for, and the extraction runs again once it is
+    /// given. Says whether it asked.
+    fn ask_if_locked(model: &mut Model, running: Option<&mut Running>, outcome: &Outcome) -> bool {
+        let (Some(wrong), Some(running)) = (outcome.needs_password, running) else {
+            return false;
+        };
+        let Some(op) = running.retry.take() else {
+            return false;
+        };
+        let tab = running.tab;
+        Self::ask_archive_password(model, wrong, Retry::Extract { op, tab })
+    }
+
     /// Records the inverse, says what failed, selects what was made and
     /// reads the changed folders again.
     fn finished(model: &mut Model, id: u64, outcome: &Outcome) -> Command<Effect, Event> {
-        let running = model.files.running.remove(&id);
+        let mut running = model.files.running.remove(&id);
         let (state, text) = if !outcome.errors.is_empty() {
             (ActivityState::Failed, outcome.description.clone())
         } else if outcome.cancelled {
@@ -842,27 +1155,32 @@ impl DirFleet {
                 format!("Stopped: {}", outcome.description),
             )
         } else {
+            let done = running
+                .as_ref()
+                .map_or_else(|| outcome.description.clone(), |r| r.done.clone());
             (
                 ActivityState::Done,
-                running
-                    .as_ref()
-                    .map_or_else(|| outcome.description.clone(), |r| r.done.clone()),
+                if outcome.verified {
+                    format!("{done} (verified)")
+                } else {
+                    done
+                },
             )
         };
-        model.files.activity.push_back(Finished {
+        model.files.record(Finished {
             id,
             text,
             state,
             errors: outcome.errors.clone(),
             at: model.now,
         });
-        if model.files.activity.len() > ACTIVITY_KEPT {
-            model.files.activity.pop_front();
-        }
         if let Some(undo) = outcome.undo.clone() {
             model.files.undo.record(outcome.origin, Step::File(undo));
         }
-        let toast = if !outcome.errors.is_empty() {
+        let asked = Self::ask_if_locked(model, running.as_mut(), outcome);
+        let toast = if asked {
+            Command::done()
+        } else if !outcome.errors.is_empty() {
             let more = outcome.errors.len() - 1;
             let mut text = outcome.errors[0].clone();
             if more > 0 {
@@ -881,7 +1199,11 @@ impl DirFleet {
                 .as_ref()
                 .filter(|running| !running.rename_new)
                 .map_or_else(Command::done, |running| {
-                    let text = running.done.clone();
+                    let text = if outcome.verified {
+                        format!("{} (verified)", running.done)
+                    } else {
+                        running.done.clone()
+                    };
                     Self::toast(model, ToastKind::Success, text)
                 })
         };
@@ -916,11 +1238,14 @@ impl DirFleet {
             .map(|tab| Self::refresh(model, tab))
             .collect();
         let told = Self::tell_plugins_file_op(model, outcome);
+        // Its drives are free for whatever waited behind it.
+        let next = Self::pump(model);
         render()
             .and(toast)
             .and(told)
             .and(Self::follow_renames(outcome))
             .and(Command::all(refreshes))
+            .and(next)
     }
 
     /// Plugins subscribed to `file_op_finished` hear how it went, as egui's.

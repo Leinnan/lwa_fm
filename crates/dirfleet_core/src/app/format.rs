@@ -9,14 +9,19 @@ pub fn size(meta: &DirEntryMetaData) -> String {
     if !meta.entry_type.is_leaf() {
         return String::new();
     }
-    let mut value = meta.size as f64;
+    bytes(meta.size)
+}
+
+/// A number of bytes in decimal units ("1.2 GB").
+pub fn bytes(count: u64) -> String {
+    let mut value = count as f64;
     let mut unit = 0;
     while value >= 1000.0 && unit + 1 < SIZE_UNITS.len() {
         value /= 1000.0;
         unit += 1;
     }
     if unit == 0 {
-        format!("{} {}", meta.size, SIZE_UNITS[0])
+        format!("{count} {}", SIZE_UNITS[0])
     } else {
         format!("{value:.1} {}", SIZE_UNITS[unit])
     }

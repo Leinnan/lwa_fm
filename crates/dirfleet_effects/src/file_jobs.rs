@@ -1,9 +1,13 @@
-//! Runs file operations one after another on a thread of their own, as the
-//! egui app's worker does, reporting progress back to the core; checks names
-//! for clashes; and reads and writes the file clipboard.
+//! Runs file operations and reports their progress back to the core; checks
+//! names for clashes; and reads and writes the file clipboard.
+//!
+//! Small operations (a rename, a new folder, an undo) run one after another
+//! on a thread of their own, as the egui app's worker runs everything, so
+//! two of them never touch the same item at once. Copies, moves and
+//! deletions each get a thread: the core decides when each starts, and can
+//! hold one where it is.
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
@@ -12,64 +16,115 @@ use crux_core::effects::ResolveSink;
 use dirfleet_core::app::{
     ClipboardDone, ClipboardOp, Conflicts, FileOpUpdate, FindConflicts, RunFileOp,
 };
-use dirfleet_core::fileops::FileOpEvent;
+use dirfleet_core::fileops::{FileOp, FileOpEvent};
 
 use crate::clipboard::{self, Mode};
+use crate::fileops::OpControl;
+use crate::vfs::Vfs;
 
-type Cancels = Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>;
+type Controls = Arc<Mutex<HashMap<u64, Arc<OpControl>>>>;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Runs `request` to its end on the calling thread, reporting to `sink`.
+fn run_to_end<R>(request: Request<RunFileOp>, control: &OpControl, sink: &Weak<R>, vfs: &Vfs)
+where
+    R: ResolveSink<RunFileOp> + Send + Sync + 'static,
+{
+    let RunFileOp { id, op, origin, .. } = request.operation.clone();
+    let request = Mutex::new(request);
+    let report = |event: FileOpEvent| {
+        if let Some(sink) = sink.upgrade() {
+            let _ = sink.resolve_request(&mut lock(&request), FileOpUpdate(event));
+        }
+    };
+    let outcome = match &op {
+        FileOp::Extract { .. } => crate::extracting::run(vfs, id, &op, origin, control, &report),
+        FileOp::Compress { .. } => crate::compressing::run(id, &op, origin, control, &report),
+        _ => crate::fileops::execute(id, op, origin, control, &report),
+    };
+    report(FileOpEvent::Finished(outcome));
+}
+
+type Job = (Request<RunFileOp>, Arc<OpControl>);
+
 pub struct FileJobs {
-    jobs: Sender<(Request<RunFileOp>, Arc<AtomicBool>)>,
-    cancels: Cancels,
+    /// The line of small operations.
+    jobs: Sender<Job>,
+    /// Starts a thread for a copy, move or deletion.
+    start: Box<dyn Fn(Job) + Send + Sync>,
+    controls: Controls,
 }
 
 impl FileJobs {
-    pub fn new<R>(sink: Weak<R>) -> Self
+    pub fn new<R>(sink: Weak<R>, vfs: Arc<Vfs>) -> Self
     where
         R: ResolveSink<RunFileOp> + Send + Sync + 'static,
     {
-        let (jobs, queue) = channel::<(Request<RunFileOp>, Arc<AtomicBool>)>();
-        let cancels: Cancels = Arc::default();
-        let finished = Arc::clone(&cancels);
+        let (jobs, queue) = channel::<Job>();
+        let serial_vfs = Arc::clone(&vfs);
+        let controls: Controls = Arc::default();
+        let finished = Arc::clone(&controls);
+        let serial_sink = sink.clone();
         let spawned = std::thread::Builder::new()
             .name("dirfleet_file_ops".into())
             .spawn(move || {
-                while let Ok((request, cancel)) = queue.recv() {
+                while let Ok((request, control)) = queue.recv() {
                     let id = request.operation.id;
-                    let RunFileOp { op, origin, .. } = request.operation.clone();
-                    let request = Mutex::new(request);
-                    let report = |event: FileOpEvent| {
-                        if let Some(sink) = sink.upgrade() {
-                            let _ = sink.resolve_request(&mut lock(&request), FileOpUpdate(event));
-                        }
-                    };
-                    let outcome = crate::fileops::execute(id, op, origin, &cancel, &report);
-                    report(FileOpEvent::Finished(outcome));
+                    run_to_end(request, &control, &serial_sink, &serial_vfs);
                     lock(&finished).remove(&id);
                 }
             });
         if let Err(error) = spawned {
             log::error!("could not start the file operation thread: {error}");
         }
-        Self { jobs, cancels }
+        let finished = Arc::clone(&controls);
+        let start = move |(request, control): Job| {
+            let id = request.operation.id;
+            let sink = sink.clone();
+            let finished = Arc::clone(&finished);
+            let vfs = Arc::clone(&vfs);
+            let spawned = std::thread::Builder::new()
+                .name("dirfleet_file_op".into())
+                .spawn(move || {
+                    run_to_end(request, &control, &sink, &vfs);
+                    lock(&finished).remove(&id);
+                });
+            if let Err(error) = spawned {
+                log::error!("could not start a file operation's thread: {error}");
+            }
+        };
+        Self {
+            jobs,
+            start: Box::new(start),
+            controls,
+        }
     }
 
     pub fn run(&self, request: Request<RunFileOp>) {
-        let cancel = Arc::new(AtomicBool::new(false));
-        lock(&self.cancels).insert(request.operation.id, Arc::clone(&cancel));
-        if self.jobs.send((request, cancel)).is_err() {
+        let control = Arc::new(OpControl::with_verify(request.operation.verify));
+        lock(&self.controls).insert(request.operation.id, Arc::clone(&control));
+        if request.operation.op.is_bulk() {
+            (self.start)((request, control));
+        } else if self.jobs.send((request, control)).is_err() {
             log::error!("the file operation thread is not running");
         }
     }
 
     pub fn cancel(&self, id: u64) {
-        let cancel = lock(&self.cancels).get(&id).cloned();
-        if let Some(cancel) = cancel {
-            cancel.store(true, Ordering::Relaxed);
+        let control = lock(&self.controls).get(&id).cloned();
+        if let Some(control) = control {
+            control.cancel();
+        }
+    }
+
+    /// Holds the operation `id` where it is, or lets it go on.
+    pub fn pause(&self, id: u64, paused: bool) {
+        let control = lock(&self.controls).get(&id).cloned();
+        if let Some(control) = control {
+            control.set_paused(paused);
         }
     }
 }

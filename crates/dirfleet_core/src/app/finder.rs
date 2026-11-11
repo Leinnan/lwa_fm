@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::{DirFleet, Effect, Event, ListDirOutput, ListView, Model, Tab, tab_id};
 use crate::CurrentPath;
 use crate::history::HistoryEntry;
+use crate::location::Location;
 use crate::search::filter::{Highlights, pattern_error};
 use crate::search::{Age, Chip, Cmp, FileKind, MatchMode, Search, query};
 
@@ -254,6 +255,15 @@ impl Tab {
     /// What the tab reads now; `None` for the Trash and an empty tab.
     pub(super) fn read_key(&self) -> Option<ReadKey> {
         let path = self.path.clone()?;
+        // Inside an archive only the folder shown is searched.
+        if !self.is_local() {
+            return Some(ReadKey {
+                roots: vec![path],
+                scoped: false,
+                depth: 1,
+                show_hidden: false,
+            });
+        }
         // Subfolders and `in:` folders are read only while there is a query,
         // so an empty search shows the folder itself.
         let search = self.filter.as_deref();
@@ -281,14 +291,31 @@ impl Tab {
         self.read.as_ref().is_some_and(|key| !key.is_flat())
     }
 
-    /// The path of the row at `row`: below the tab's folder, or in its own
+    /// Where the tab is; `None` for the Trash and an empty tab.
+    pub(super) fn location(&self) -> Option<Location> {
+        self.path.as_deref().map(Location::parse)
+    }
+
+    /// Where the row at `row` is: below the tab's folder, or in its own
     /// folder when results come from several.
-    pub(super) fn row_path(&self, row: usize) -> Option<std::path::PathBuf> {
+    pub(super) fn row_location(&self, row: usize) -> Option<Location> {
         let entry = *self.order.get(row)? as usize;
         if self.shows_folders() {
-            return Some(self.listing.entry(entry).get_path());
+            let found = self.listing.entry(entry);
+            let (dir, name) = found.get_splitted_path();
+            return Some(Location::parse(dir).join(name));
         }
-        Some(std::path::Path::new(self.path.as_deref()?).join(self.listing.name(entry)))
+        Some(self.location()?.join(self.listing.name(entry)))
+    }
+
+    /// The path of the row at `row`, when it is a file or folder on this
+    /// machine. A row inside an archive or on a server has none, so whatever
+    /// works on paths leaves such rows alone.
+    pub(super) fn row_path(&self, row: usize) -> Option<std::path::PathBuf> {
+        match self.row_location(row)? {
+            Location::Local(path) => Some(std::path::PathBuf::from(path)),
+            _ => None,
+        }
     }
 
     /// Stops the running walk, telling the handler too (crux #622).

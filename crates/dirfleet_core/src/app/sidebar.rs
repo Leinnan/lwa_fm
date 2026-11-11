@@ -220,11 +220,13 @@ impl Sidebar {
     }
 
     /// The sidebar of a window whose focused tab is `shown`.
+    #[allow(clippy::too_many_lines, reason = "one block for each section")]
     pub(super) fn view(
         &self,
         shown: Option<&Tab>,
         settings: &Settings,
         saved: &[SavedSearch],
+        remote: &super::remote::Remote,
     ) -> Vec<SidebarSectionView> {
         let running = shown.and_then(|tab| tab.search.as_ref()?.saved_from);
         let active_path = shown.and_then(|tab| tab.path.as_deref());
@@ -266,6 +268,21 @@ impl Sidebar {
                 ..item(crate::current_path::TRASH_LABEL, "", SidebarIcon::Trash)
             });
         }
+        // Saved servers stand among the drives; a connected one can be left.
+        let servers = remote.connections.iter().map(|server| {
+            let top = server.top();
+            SidebarItem {
+                detail: format!("{} \u{b7} {}", server.scheme.label(), server.host),
+                eject: remote
+                    .is_connected(&server.id)
+                    .then(|| "Disconnect".to_owned()),
+                ..item(
+                    &server.shown_name(),
+                    &top,
+                    SidebarIcon::Drive(crate::drives::DriveKind::Network),
+                )
+            }
+        });
         let drives = self
             .drives
             .iter()
@@ -285,6 +302,7 @@ impl Sidebar {
                     )
                 }
             })
+            .chain(servers)
             .collect();
         let saved_searches = saved
             .iter()
@@ -357,6 +375,13 @@ impl DirFleet {
 
     /// The events that change the sidebar.
     pub(super) fn sidebar_event(model: &mut Model, event: Event) -> Command<Effect, Event> {
+        // A server's "eject" closes its connection.
+        if let Event::EjectDrive { mount } = &event
+            && let crate::location::Location::Remote { connection, .. } =
+                crate::location::Location::parse(mount)
+        {
+            return Self::remote_event(model, Event::DisconnectServer { id: connection });
+        }
         match event {
             // As egui's: a drive with operations running asks first.
             Event::EjectDrive { mount }
@@ -373,7 +398,7 @@ impl DirFleet {
                     .files
                     .running_on(Path::new(&mount))
                     .into_iter()
-                    .map(|id| Command::notify_shell(super::CancelFileOp { id }).into())
+                    .map(|id| Self::cancel_operation(model, id))
                     .collect();
                 return Command::all(cancels).and(Self::eject(mount)).and(render());
             }

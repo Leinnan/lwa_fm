@@ -69,10 +69,17 @@ pub struct RowRange {
     pub end: u32,
 }
 
+/// An entry to find again: its name, and its folder where the rows come from
+/// several folders (two of them may hold a file of the same name).
+struct KeptEntry {
+    dir: Option<Arc<str>>,
+    name: String,
+}
+
 /// The selection by name, to find again after the rows moved.
 pub struct Kept {
-    names: Vec<String>,
-    cursor: Option<String>,
+    entries: Vec<KeptEntry>,
+    cursor: Option<KeptEntry>,
 }
 
 /// Rows on each side of the cursor Quick Look can step to.
@@ -120,39 +127,68 @@ impl Tab {
         Some(self.listing.name(entry))
     }
 
+    /// The listing's rows come from several folders, so a name alone does
+    /// not say which entry is meant.
+    fn rows_have_folders(&self) -> bool {
+        self.listing.dirs().len() > 1
+    }
+
+    fn kept_at(&self, position: usize, folders: bool) -> Option<KeptEntry> {
+        let entry = *self.order.get(position)? as usize;
+        Some(KeptEntry {
+            dir: folders.then(|| Arc::clone(self.listing.dir(entry))),
+            name: self.listing.name(entry).to_owned(),
+        })
+    }
+
     /// The selection by name, before the rows change.
     pub(super) fn keep_selection(&self) -> Kept {
+        let folders = self.rows_have_folders();
         Kept {
-            names: self
+            entries: self
                 .selection
                 .rows()
-                .filter_map(|row| self.name_at(row).map(str::to_owned))
+                .filter_map(|row| self.kept_at(row, folders))
                 .collect(),
             cursor: self
                 .selection
                 .cursor()
-                .and_then(|row| self.name_at(row).map(str::to_owned)),
+                .and_then(|row| self.kept_at(row, folders)),
         }
     }
 
     /// Selects the kept entries again at their new rows; gone ones drop out.
+    /// An entry kept with its folder is found by both where the rows still
+    /// come from several folders, and by name otherwise.
     pub(super) fn restore_selection(&mut self, kept: &Kept) {
-        if kept.names.is_empty() && kept.cursor.is_none() {
+        if kept.entries.is_empty() && kept.cursor.is_none() {
             self.selection.clear();
             return;
         }
-        let rows: HashMap<&str, usize> = (0..self.order.len())
+        let by_name: HashMap<&str, usize> = (0..self.order.len())
             .filter_map(|row| Some((self.name_at(row)?, row)))
             .collect();
-        let selected: Vec<usize> = kept
-            .names
-            .iter()
-            .filter_map(|name| rows.get(name.as_str()).copied())
-            .collect();
-        let cursor = kept
-            .cursor
-            .as_deref()
-            .and_then(|name| rows.get(name).copied());
+        let by_folder: HashMap<(&str, &str), usize> = if self.rows_have_folders() {
+            self.order
+                .iter()
+                .enumerate()
+                .map(|(row, &entry)| {
+                    let entry = entry as usize;
+                    let dir: &str = self.listing.dir(entry);
+                    ((dir, self.listing.name(entry)), row)
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let row_of = |entry: &KeptEntry| match &entry.dir {
+            Some(dir) if !by_folder.is_empty() => {
+                by_folder.get(&(dir.as_ref(), entry.name.as_str())).copied()
+            }
+            _ => by_name.get(entry.name.as_str()).copied(),
+        };
+        let selected: Vec<usize> = kept.entries.iter().filter_map(row_of).collect();
+        let cursor = kept.cursor.as_ref().and_then(row_of);
         let mut selection = Selection::default();
         if let Some(cursor) = cursor {
             selection.set_cursor(cursor);

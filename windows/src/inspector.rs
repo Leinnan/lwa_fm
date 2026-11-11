@@ -1,16 +1,18 @@
 //! The inspector: what is known about the selection, beside the folder.
+use std::rc::Rc;
+
 use dirfleet_core::app::{
-    CommandId, Event, InspectorView, ItemInfo, PreviewState, SelectionSummary, SizeInfo,
-    TabViewModel,
+    ChecksumRow, ChecksumVerdict, ChecksumsView, CommandId, Event, InspectorView, ItemInfo,
+    PreviewState, SelectionSummary, SizeInfo, TabViewModel,
 };
 use windows_reactor::{
-    Border, Button, Callback, Grid, GridLength, HorizontalAlignment, Image, Orientation,
-    ProgressRing, ScrollBarVisibility, ScrollViewer, StackPanel, Stretch, TextBlock, TextTrimming,
-    TextWrapping, Thickness, VerticalAlignment, View,
+    Border, Button, ButtonStyle, Callback, Grid, GridLength, HorizontalAlignment, Image,
+    Orientation, ProgressBar, ProgressRing, ScrollBarVisibility, ScrollViewer, StackPanel, Stretch,
+    TextBlock, TextBox, TextTrimming, TextWrapping, Thickness, VerticalAlignment, View,
 };
 
 use crate::core_link::CoreLink;
-use crate::files::entry_icon;
+use crate::files::{entry_icon, glyph};
 
 /// The inspector's width.
 pub const WIDTH: f64 = 280.0;
@@ -130,6 +132,9 @@ fn one(core: &CoreLink, tab: u32, item: &ItemInfo, on_command: &Callback<Command
     if item.opens > 0 {
         lines.push(fact("Opens", small(&item.opens.to_string())));
     }
+    if let Some(sums) = &item.checksums {
+        lines.extend(checksums(core, &item.path, sums));
+    }
     lines.extend([
         open.into(),
         action("Copy as Path", CommandId::CopyAsPath, on_command),
@@ -140,6 +145,135 @@ fn one(core: &CoreLink, tab: u32, item: &ItemInfo, on_command: &Callback<Command
         .spacing(8.0)
         .children(lines)
         .into()
+}
+
+/// What the comparison with a checksum came to, marked so a match and a
+/// mismatch are told apart at a glance; nothing when there is nothing to say.
+fn verdict_line(sums: &ChecksumsView) -> Option<String> {
+    if sums.message.is_empty() {
+        return None;
+    }
+    Some(match sums.verdict {
+        ChecksumVerdict::Match => format!("\u{2713} {}", sums.message),
+        ChecksumVerdict::Mismatch => format!("\u{2717} {}", sums.message),
+        ChecksumVerdict::None | ChecksumVerdict::Checking | ChecksumVerdict::Unknown => {
+            sums.message.clone()
+        }
+    })
+}
+
+/// One checksum's value: the checksum with a button that copies it, a
+/// spinner while the file is read, or a button that works it out.
+fn checksum_value(core: &CoreLink, path: &str, row: &ChecksumRow) -> View {
+    let algorithm = row.algorithm;
+    let (core, path) = (core.clone(), path.to_owned());
+    if !row.value.is_empty() {
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .column_spacing(4.0)
+            .children((
+                small(&row.value).is_text_selection_enabled(true),
+                Border::new().grid_column(1).content(
+                    Button::new()
+                        .style(ButtonStyle::Subtle)
+                        .automation_name(format!("Copy {}", row.label))
+                        .content(glyph("\u{E8C8}", 12.0))
+                        .on_click(move || {
+                            core.send(Event::CopyChecksum {
+                                path: path.clone(),
+                                algorithm,
+                            });
+                        }),
+                ),
+            ))
+            .into()
+    } else if row.computing {
+        ProgressRing::new()
+            .is_indeterminate(true)
+            .is_active(true)
+            .width(14.0)
+            .height(14.0)
+            .horizontal_alignment(HorizontalAlignment::Left)
+            .into()
+    } else {
+        Button::new()
+            .automation_name(format!("Compute {}", row.label))
+            .content("Compute")
+            .on_click(move || {
+                core.send(Event::ComputeChecksum {
+                    path: path.clone(),
+                    algorithm,
+                });
+            })
+            .into()
+    }
+}
+
+/// A file's checksums: each worked out on request and copied, and the file
+/// compared with a checksum pasted here or held by a checksum file beside it.
+fn checksums(core: &CoreLink, path: &str, sums: &ChecksumsView) -> Vec<View> {
+    let mut lines: Vec<View> = vec![small("Checksums").opacity(0.6).into()];
+    for row in &sums.rows {
+        lines.push(fact(&row.label, checksum_value(core, path, row)));
+    }
+    if let Some(progress) = sums.progress {
+        let (core, path) = (core.clone(), path.to_owned());
+        lines.push(
+            Grid::new()
+                .columns([GridLength::STAR, GridLength::Auto])
+                .column_spacing(8.0)
+                .children((
+                    ProgressBar::new()
+                        .minimum(0.0)
+                        .maximum(1000.0)
+                        .value(f64::from(progress))
+                        .vertical_alignment(VerticalAlignment::Center),
+                    Border::new().grid_column(1).content(
+                        Button::new()
+                            .automation_name("Stop reading the file")
+                            .content("Stop")
+                            .on_click(move || {
+                                core.send(Event::CancelChecksum { path: path.clone() });
+                            }),
+                    ),
+                ))
+                .into(),
+        );
+    }
+    {
+        let (core, path) = (core.clone(), path.to_owned());
+        lines.push(
+            TextBox::new()
+                .automation_name("Checksum to compare with")
+                .placeholder_text("Paste a checksum to compare")
+                .on_text_changed(move |text: Rc<str>| {
+                    core.send(Event::VerifyChecksum {
+                        path: path.clone(),
+                        expected: text.to_string(),
+                    });
+                })
+                .into(),
+        );
+    }
+    if let Some(line) = verdict_line(sums) {
+        lines.push(small(&line).into());
+    }
+    for sidecar in &sums.sidecars {
+        let (core, path, sidecar) = (core.clone(), path.to_owned(), sidecar.clone());
+        lines.push(
+            Button::new()
+                .content(format!("Compare with {sidecar}"))
+                .horizontal_alignment(HorizontalAlignment::Stretch)
+                .on_click(move || {
+                    core.send(Event::VerifySidecar {
+                        path: path.clone(),
+                        sidecar: sidecar.clone(),
+                    });
+                })
+                .into(),
+        );
+    }
+    lines
 }
 
 /// The item's picture: its thumbnail when the core has one, its icon otherwise.
@@ -216,4 +350,40 @@ fn several(summary: &SelectionSummary, on_command: &Callback<CommandId>) -> View
         .spacing(8.0)
         .children(lines)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_checksum_s_verdict_is_marked_as_a_match_or_not() {
+        let mut sums = ChecksumsView {
+            rows: Vec::new(),
+            progress: None,
+            expected: String::new(),
+            verdict: ChecksumVerdict::None,
+            message: String::new(),
+            sidecars: Vec::new(),
+        };
+        assert_eq!(verdict_line(&sums), None);
+        sums.message = "Matches the file's SHA-256".into();
+        sums.verdict = ChecksumVerdict::Match;
+        assert_eq!(
+            verdict_line(&sums).as_deref(),
+            Some("\u{2713} Matches the file's SHA-256")
+        );
+        sums.message = "Does not match the file's MD5".into();
+        sums.verdict = ChecksumVerdict::Mismatch;
+        assert_eq!(
+            verdict_line(&sums).as_deref(),
+            Some("\u{2717} Does not match the file's MD5")
+        );
+        sums.message = "Reading the file\u{2026}".into();
+        sums.verdict = ChecksumVerdict::Checking;
+        assert_eq!(
+            verdict_line(&sums).as_deref(),
+            Some("Reading the file\u{2026}")
+        );
+    }
 }

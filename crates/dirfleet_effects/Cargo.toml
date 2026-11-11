@@ -14,6 +14,18 @@ glob = { version = "0.3", optional = true }
 # Byte formatting for the plugin API; egui-free despite the name.
 egui_mev_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994", optional = true }
 dirfleet_core = { path = "../dirfleet_core" }
+# Servers as folders (`src/vfs.rs`), and their passwords in the system's keychain.
+dirfleet_remote = { path = "../dirfleet_remote" }
+keyring = "4"
+# Archives as folders (`src/vfs.rs`).
+dirfleet_archive = { path = "../dirfleet_archive" }
+# Making archives (`src/compressing.rs`); the versions the archive crate reads with.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder", "optimization"] }
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["compress"] }
+tar = { version = "0.4", default-features = false }
+zip = { version = "9.4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zstd = "0.14"
 anyhow = "1"
 ffmpeg-sidecar = { version = "2.4.0", default-features = false }
 foldhash = "0.2"
@@ -22,6 +34,11 @@ jpeg-decoder = { version = "0.3", default-features = false }
 lru = "0.16.3"
 puffin = { optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+# Checksums in the inspector, and telling whether a copy matches its source.
+blake3 = "1"
+crc32fast = "1"
+md-5 = "0.10"
+sha1 = "0.10"
 sha2 = "0.10"
 bevy_device_lang = "0.6"
 directories = "6"

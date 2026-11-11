@@ -35,6 +35,8 @@ pub enum Action {
     Send(Box<Event>),
     /// Pick a folder, then move or copy the selection there.
     SendTo { copy: bool },
+    /// Pick a folder, then extract into it.
+    ExtractTo,
     /// Explorer's own menu for the selection.
     Shell,
     /// A plugin's action; `confirm` is asked first when it is not empty.
@@ -129,11 +131,21 @@ impl Context<'_> {
     /// The menu of the selected entries.
     pub fn selection(&self) -> Vec<Entry> {
         let tab = self.tab.id;
+        // Inside an archive an entry is no file yet: it can only be opened,
+        // which brings a copy of it out.
+        if !self.tab.location.caps.real_paths {
+            let mut entries = vec![Self::send("Open", Event::OpenSelection { tab })];
+            entries.extend(self.extracting());
+            return entries;
+        }
         let several = self.tab.selected_count > 1;
         let mut entries = vec![
             Self::send("Open", Event::OpenSelection { tab }),
             Self::send("Open With…", Event::OpenWith { tab }),
             self.command(CommandId::QuickLook),
+        ];
+        entries.extend(self.extracting());
+        entries.extend([
             Entry::Separator,
             if several {
                 Self::send(
@@ -144,7 +156,8 @@ impl Context<'_> {
                 self.command(CommandId::Rename)
             },
             self.command(CommandId::Duplicate),
-        ];
+            Self::send("Compress…", Event::StartCompress { tab }),
+        ]);
         // A video's thumbnail can be chosen, and a chosen one given up.
         if let Some((row, choice)) = self
             .only
@@ -195,6 +208,20 @@ impl Context<'_> {
         entries.push(Entry::Separator);
         entries.push(Entry::item("More options", Action::Shell));
         entries
+    }
+
+    /// Taking things out of archives, where there is something to take:
+    /// selected archives, or what is shown inside one.
+    fn extracting(&self) -> Vec<Entry> {
+        if !self.tab.can_extract {
+            return Vec::new();
+        }
+        let tab = self.tab.id;
+        vec![
+            Entry::Separator,
+            Self::send("Extract Here", Event::ExtractHere { tab }),
+            Entry::item("Extract To…", Action::ExtractTo),
+        ]
     }
 
     /// The places the selection can be moved or copied to, and "choose one".
@@ -285,17 +312,29 @@ impl Context<'_> {
                 view.display == DisplayType::List,
             ),
         ]);
-        let mut entries = vec![
-            self.command(CommandId::NewFolder),
-            self.command(CommandId::NewTextFile),
-            self.command(CommandId::Paste),
-            Entry::Separator,
+        // Nothing is made or pasted where nothing can be changed.
+        let mut entries = if self.tab.location.caps.writable {
+            vec![
+                self.command(CommandId::NewFolder),
+                self.command(CommandId::NewTextFile),
+                self.command(CommandId::Paste),
+                Entry::Separator,
+            ]
+        } else {
+            // Inside an archive: what is shown can be taken out.
+            let mut taking = self.extracting();
+            if !taking.is_empty() {
+                taking.rotate_left(1);
+            }
+            taking
+        };
+        entries.extend([
             Entry::Submenu {
                 label: "View".to_owned(),
                 entries: sorting,
             },
             self.command(CommandId::Refresh),
-        ];
+        ]);
         if let Some(undo) = &self.shared.undo {
             entries.push(Entry::item(
                 with_shortcut(undo, CommandId::Undo.shortcut()),
@@ -484,6 +523,37 @@ mod tests {
         tab.selected_count = 3;
         let several = context(&shared, &tab).selection();
         assert!(labels(&several).contains(&"Rename 3 Items…"));
+    }
+
+    #[test]
+    fn inside_an_archive_entries_only_open_and_nothing_is_made() {
+        let shared = ViewModel::default();
+        let mut tab = TabViewModel {
+            selected_count: 1,
+            ..TabViewModel::default()
+        };
+        let folder = context(&shared, &tab).folder();
+        assert!(labels(&folder).contains(&CommandId::NewFolder.label()));
+
+        let archive = dirfleet_core::Location::parse("archive:C:\\a.zip!/docs");
+        tab.location.kind = archive.kind();
+        tab.location.caps = archive.default_caps();
+        assert_eq!(labels(&context(&shared, &tab).selection()), ["Open"]);
+        // With something to take out, both menus offer it.
+        tab.can_extract = true;
+        assert_eq!(
+            labels(&context(&shared, &tab).selection()),
+            ["Open", "-", "Extract Here", "Extract To…"]
+        );
+        assert_eq!(
+            labels(&context(&shared, &tab).folder())[..3],
+            ["Extract Here", "Extract To…", "-"]
+        );
+        tab.can_extract = false;
+        let folder = context(&shared, &tab).folder();
+        assert!(!labels(&folder).contains(&CommandId::NewFolder.label()));
+        assert!(!labels(&folder).contains(&CommandId::Paste.label()));
+        assert!(labels(&folder).contains(&"View"));
     }
 
     #[test]

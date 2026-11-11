@@ -50,6 +50,31 @@ impl IconSize {
     }
 }
 
+/// How many copies, moves and deletions run at a time; the rest wait.
+#[derive(Facet, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(C)]
+pub enum QueueMode {
+    /// One on each drive: two that share a drive take turns, two on
+    /// different drives run together.
+    #[default]
+    PerVolume,
+    OneAtATime,
+    /// Each starts at once.
+    Unlimited,
+}
+
+impl QueueMode {
+    pub const ALL: [Self; 3] = [Self::PerVolume, Self::OneAtATime, Self::Unlimited];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PerVolume => "One per drive",
+            Self::OneAtATime => "One at a time",
+            Self::Unlimited => "All at once",
+        }
+    }
+}
+
 #[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 #[allow(clippy::struct_excessive_bools)]
@@ -75,6 +100,13 @@ pub struct Settings {
     pub animate_selected_previews: bool,
     /// Suggest Full Disk Access at launch while it is off (macOS).
     pub ask_full_disk_access: bool,
+    /// How copies, moves and deletions take turns.
+    pub queue_mode: QueueMode,
+    /// Read each copied file back and compare it with its original.
+    pub verify_copies: bool,
+    /// Open archives (zip, 7z, rar, tar…) as folders rather than in their
+    /// app.
+    pub browse_archives: bool,
 }
 
 impl Default for Settings {
@@ -98,6 +130,9 @@ impl Default for Settings {
             track_open_history: true,
             animate_selected_previews: false,
             ask_full_disk_access: true,
+            queue_mode: QueueMode::PerVolume,
+            verify_copies: false,
+            browse_archives: true,
         }
     }
 }
@@ -126,13 +161,17 @@ impl DirFleet {
             Event::ChangeSettings { settings } => {
                 let terminal_changed = settings.terminal != model.settings.terminal;
                 model.settings = settings;
+                // A looser queue lets waiting operations start.
+                let started = Self::pump(model);
                 if terminal_changed {
-                    return render().and(Self::check_terminal(model));
+                    return render().and(started).and(Self::check_terminal(model));
                 }
+                return render().and(started);
             }
             Event::RestoreDefaultSettings => {
                 model.settings = Settings::default();
                 model.default_view = FolderView::default();
+                return render().and(Self::pump(model));
             }
             Event::SetFolderDefaults { view } => model.default_view = view,
             _ => return Command::done(),
