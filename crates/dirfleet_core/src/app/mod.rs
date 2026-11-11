@@ -1107,6 +1107,15 @@ pub enum Event {
         folder: String,
         done: ClipboardDone,
     },
+    /// The clipboard's change count, asked for before pasting what was
+    /// copied on a server: `folder` is where to paste, the tab's when `None`.
+    #[serde(skip)]
+    #[facet(skip)]
+    ClipChecked {
+        tab: u32,
+        folder: Option<String>,
+        count: u64,
+    },
     #[serde(skip)]
     #[facet(skip)]
     AppPicked {
@@ -1438,6 +1447,7 @@ impl Event {
                 | Self::ConflictsFound { .. }
                 | Self::ClipboardDone { .. }
                 | Self::ClipboardCounted { .. }
+                | Self::ClipChecked { .. }
         )
     }
 
@@ -2710,6 +2720,10 @@ impl DirFleet {
         let meta = tab.listing.meta(entry);
         let name = tab.listing.name(entry);
         let path = tab.row_path(position as usize);
+        let cut = !files.cut_is_empty()
+            && tab
+                .row_op_path(position as usize)
+                .is_some_and(|path| files.is_cut(&path));
         RowView {
             index: position,
             name: name.to_owned(),
@@ -2743,7 +2757,7 @@ impl DirFleet {
                 String::new()
             },
             highlights: finder::ranges(highlights, name),
-            cut: !files.cut_is_empty() && path.as_ref().is_some_and(|path| files.is_cut(path)),
+            cut,
             thumbnail_choice: path.as_ref().map_or(ThumbnailChoice::None, |path| {
                 model.thumbnails.choice(&path.to_string_lossy(), meta)
             }),

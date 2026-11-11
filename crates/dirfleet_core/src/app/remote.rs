@@ -42,6 +42,9 @@ pub struct Connection {
     pub region: String,
     /// SFTP: the fingerprint of the host key the user accepted.
     pub host_key: Option<String>,
+    /// SFTP: the private key file to log in with, in place of a password;
+    /// the password is then what unlocks the key. Empty for none.
+    pub key_file: String,
 }
 
 impl Connection {
@@ -129,6 +132,9 @@ pub struct ConnectFields {
     pub secure: bool,
     pub bucket: String,
     pub region: String,
+    /// SFTP: a private key file to log in with; empty for a password.
+    #[serde(default)]
+    pub key_file: String,
 }
 
 #[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -214,6 +220,7 @@ fn fields_of(connection: &Connection) -> ConnectFields {
         secure: connection.secure,
         bucket: connection.bucket.clone(),
         region: connection.region.clone(),
+        key_file: connection.key_file.clone(),
     }
 }
 
@@ -570,6 +577,11 @@ impl DirFleet {
             secure: fields.secure,
             bucket: fields.bucket.trim().to_owned(),
             region: fields.region.trim().to_owned(),
+            key_file: if fields.scheme == Scheme::Sftp {
+                fields.key_file.trim().to_owned()
+            } else {
+                String::new()
+            },
             // The key accepted for the same server holds; another server's doesn't.
             host_key: earlier
                 .as_ref()

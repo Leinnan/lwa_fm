@@ -318,6 +318,17 @@ impl Tab {
         }
     }
 
+    /// The row at `row` as file operations name it: its path on this
+    /// machine, or its location on a server. `None` inside an archive,
+    /// where nothing can be changed.
+    pub(super) fn row_op_path(&self, row: usize) -> Option<std::path::PathBuf> {
+        match self.row_location(row)? {
+            Location::Local(path) => Some(std::path::PathBuf::from(path)),
+            Location::Archive { .. } => None,
+            server @ Location::Remote { .. } => Some(std::path::PathBuf::from(server.to_string())),
+        }
+    }
+
     /// Stops the running walk, telling the handler too (crux #622).
     pub(super) fn stop_walk(&mut self) -> Command<Effect, Event> {
         match self.walk.take() {

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// Splits "report.txt" into ("report", ".txt"). Folders and dot-files keep
 /// the whole name as the stem.
-fn split_name(name: &str, is_dir: bool) -> (&str, &str) {
+pub fn split_name(name: &str, is_dir: bool) -> (&str, &str) {
     if is_dir {
         return (name, "");
     }

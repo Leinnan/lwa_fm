@@ -34,6 +34,7 @@ mod storage;
 pub mod system;
 pub mod thumbnail_choices;
 mod thumbnails;
+pub mod transfer;
 pub mod trash_bin;
 pub mod usage;
 #[cfg(target_os = "macos")]
@@ -205,13 +206,14 @@ impl Handlers {
             },
             places: {
                 let sink = sink.clone();
+                let vfs = Arc::clone(&vfs);
                 Arc::new(move |effect| match effect {
                     Effect::UserFolders(request) => places::answer_user_folders(request, &sink),
                     Effect::WatchDrives(request) => places::watch_drives(request, sink.clone()),
                     Effect::Eject(request) => places::eject(request, sink.clone()),
                     Effect::System(request) => system::handle(request, sink.clone()),
                     Effect::FindConflicts(request) => {
-                        file_jobs::find_conflicts(request, sink.clone());
+                        file_jobs::find_conflicts(request, sink.clone(), Arc::clone(&vfs));
                     }
                     Effect::Clipboard(request) => file_jobs::clipboard(request, sink.clone()),
                     Effect::FolderSize(mut request) => {
@@ -378,6 +380,7 @@ fn endpoint_of(connection: &Connection, secret: String) -> dirfleet_remote::Endp
         bucket: connection.bucket.clone(),
         region: connection.region.clone(),
         host_key: connection.host_key.clone(),
+        key_file: connection.key_file.clone(),
     }
 }
 

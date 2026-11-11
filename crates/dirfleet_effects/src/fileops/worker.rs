@@ -39,6 +39,11 @@ impl OpControl {
         }
     }
 
+    /// Whether copies are read back and compared with their originals.
+    pub const fn verifies(&self) -> bool {
+        self.verify
+    }
+
     /// Asks the operation to stop; a paused one wakes to do so.
     pub fn cancel(&self) {
         // Taken so a paused operation can't miss the wake-up between its

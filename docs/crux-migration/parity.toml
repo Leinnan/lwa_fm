@@ -2900,7 +2900,7 @@ status = "open"
 windows = "done"
 events = ["OpenConnect", "SetConnect", "SubmitConnect", "CancelConnect"]
 core_test = ["a_server_is_connected_to_from_a_dialog_saved_and_shown_in_the_tab"]
-notes = "Not in the egui app. SFTP logs in with a password only: no key files or agent yet. Windows: Connect to Server… in the More menu. Mac: nothing drawn yet"
+notes = "Not in the egui app. SFTP logs in with a password or a key file (the password then unlocks the key); no agent yet. Windows: Connect to Server… in the More menu. Mac: nothing drawn yet"
 
 [[feature]]
 id = "remote.host_key"
@@ -2938,4 +2938,33 @@ summary = "A server's folders list like any folder's, and a file there opens fro
 status = "open"
 windows = "done"
 core_test = ["a_tab_whose_server_is_not_connected_connects_with_the_kept_password"]
-notes = "Not in the egui app. Read only for now: nothing is uploaded, renamed or removed. A server's tab does not refresh by itself"
+notes = "Not in the egui app. A server's tab does not refresh by itself, only after something the app did there"
+
+[[feature]]
+id = "remote.transfer"
+area = 25
+summary = "Files and folders are copied and moved to, from and between servers, queued, paused, stopped and checked like any copy"
+status = "open"
+windows = "done"
+core_test = ["what_is_copied_on_a_server_is_kept_and_pasted_unless_the_clipboard_took_something_newer"]
+windows_test = ["on_a_server_entries_are_renamed_removed_copied_and_moved_but_handed_to_no_program"]
+notes = "Not in the egui app. Not undoable. A move within one server is a rename where the server has one, and a copy with the original removed where it has not (FTP, S3). WebDAV takes a file in one piece: over 1 GB is refused. Windows: Copy To, Move To, paste and a drop of this machine's files; a server's entries can't be dragged out"
+
+[[feature]]
+id = "remote.changes"
+area = 25
+summary = "On a server items are renamed, duplicated, deleted for good and new folders and files made; there is no Recycle Bin"
+status = "open"
+windows = "done"
+core_test = ["a_server_s_items_are_made_renamed_copied_beside_and_removed_there"]
+windows_test = ["on_a_server_entries_are_renamed_removed_copied_and_moved_but_handed_to_no_program"]
+notes = "Not in the egui app. Not undoable. Windows: Delete asks first and then removes for good; several items are not renamed at once there"
+
+[[feature]]
+id = "remote.clipboard"
+area = 25
+summary = "Copy and cut on a server are kept in the app and pasted anywhere, until the system's clipboard takes something newer"
+status = "open"
+windows = "done"
+core_test = ["what_is_copied_on_a_server_is_kept_and_pasted_unless_the_clipboard_took_something_newer"]
+notes = "Not in the egui app. The system's clipboard takes only files of this machine, so other programs can't paste a server's items"

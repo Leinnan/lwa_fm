@@ -306,7 +306,7 @@ impl Vfs {
     }
 
     /// The open connection `id`; one that has ended counts as not there.
-    fn session(&self, id: &str) -> Result<Arc<dirfleet_remote::Session>, VfsError> {
+    pub(crate) fn session(&self, id: &str) -> Result<Arc<dirfleet_remote::Session>, VfsError> {
         let open = lock(&self.sessions)
             .get(id)
             .filter(|session| !session.is_closed())
@@ -633,6 +633,7 @@ pub(crate) mod tests {
             bucket: String::new(),
             region: String::new(),
             host_key: None,
+            key_file: String::new(),
         };
         vfs.connect("c1", &endpoint).expect("connects");
         assert_eq!(

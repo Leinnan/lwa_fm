@@ -69,6 +69,11 @@ pub enum ConflictPolicy {
     KeepBoth,
 }
 
+/// What the worker is asked to do.
+///
+/// Where a path is asked for, a copy, a move, a deletion, a rename and a new
+/// folder or file also take a server's location (`sftp://connection/path`),
+/// written as a path. Nothing done on a server can be undone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOp {
     Copy {
@@ -354,6 +359,13 @@ fn count(n: usize) -> String {
 }
 
 pub fn display_name(path: &Path) -> String {
+    // A server's top has no name of its own.
+    if let crate::location::Location::Remote { path: at, .. } =
+        crate::location::Location::parse(&path.to_string_lossy())
+        && at == "/"
+    {
+        return "the server".to_owned();
+    }
     path.file_name().map_or_else(
         || path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),

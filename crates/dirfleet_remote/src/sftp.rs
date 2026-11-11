@@ -1,13 +1,14 @@
-//! SFTP through `russh`: a password login, the server's key checked
-//! against the one the user accepted, listing and downloading.
+//! SFTP through `russh`: a login by password or by a key file, the
+//! server's key checked against the one the user accepted, and the files.
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use russh::client;
-use russh::keys::{HashAlg, PublicKeyOrCertificate};
+use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh_sftp::client::SftpSession;
+pub use russh_sftp::client::fs::File;
 use tokio::io::AsyncReadExt as _;
 
 use crate::{ConnectError, Endpoint, Entry, in_time, parts};
@@ -89,9 +90,31 @@ impl Client {
                 });
             }
         };
-        let login = handle.authenticate_password(endpoint.user.clone(), endpoint.secret.clone());
-        if !in_time(login).await.map_err(failed)?.success() {
-            return Err(ConnectError::NeedsSecret);
+        if endpoint.key_file.is_empty() {
+            let login =
+                handle.authenticate_password(endpoint.user.clone(), endpoint.secret.clone());
+            if !in_time(login).await.map_err(failed)?.success() {
+                return Err(ConnectError::NeedsSecret);
+            }
+        } else {
+            // The secret, when there is one, unlocks the key.
+            let phrase = (!endpoint.secret.is_empty()).then_some(endpoint.secret.as_str());
+            let key = match russh::keys::load_secret_key(&endpoint.key_file, phrase) {
+                Ok(key) => key,
+                Err(russh::keys::Error::KeyIsEncrypted) => return Err(ConnectError::NeedsSecret),
+                // With a passphrase given, the likeliest reason is a wrong one.
+                Err(_) if phrase.is_some() => return Err(ConnectError::NeedsSecret),
+                Err(error) => return Err(failed(format!("{}: {error}", endpoint.key_file))),
+            };
+            let hash = in_time(handle.best_supported_rsa_hash())
+                .await
+                .map_err(failed)?
+                .flatten();
+            let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
+            let login = handle.authenticate_publickey(endpoint.user.clone(), key);
+            if !in_time(login).await.map_err(failed)?.success() {
+                return Err(failed("The server did not accept the key".to_owned()));
+            }
         }
         let channel = in_time(handle.channel_open_session())
             .await
@@ -159,5 +182,46 @@ impl Client {
 
     pub fn is_closed(&self) -> bool {
         self.handle.is_closed()
+    }
+
+    /// The file or folder at `path`; `None` when nothing is there.
+    pub async fn stat(&self, path: &str) -> Result<Option<Entry>, String> {
+        let whole = self.below_base(path);
+        if !in_time(self.sftp.try_exists(whole.clone())).await? {
+            return Ok(None);
+        }
+        let meta = in_time(self.sftp.metadata(whole)).await?;
+        Ok(Some(Entry {
+            name: parts(path).last().unwrap_or_default().to_owned(),
+            is_dir: meta.is_dir(),
+            size: meta.size.unwrap_or(0),
+            modified: meta.mtime.map(i64::from),
+        }))
+    }
+
+    pub async fn make_dir(&self, path: &str) -> Result<(), String> {
+        in_time(self.sftp.create_dir(self.below_base(path))).await
+    }
+
+    pub async fn remove_file(&self, path: &str) -> Result<(), String> {
+        in_time(self.sftp.remove_file(self.below_base(path))).await
+    }
+
+    /// Removes the folder at `path`, which holds nothing any more.
+    pub async fn remove_dir(&self, path: &str) -> Result<(), String> {
+        in_time(self.sftp.remove_dir(self.below_base(path))).await
+    }
+
+    pub async fn rename(&self, from: &str, to: &str) -> Result<(), String> {
+        in_time(self.sftp.rename(self.below_base(from), self.below_base(to))).await
+    }
+
+    pub async fn read(&self, path: &str) -> Result<File, String> {
+        in_time(self.sftp.open(self.below_base(path))).await
+    }
+
+    /// Opens the file at `path` for writing, emptied when it is there.
+    pub async fn write(&self, path: &str) -> Result<File, String> {
+        in_time(self.sftp.create(self.below_base(path))).await
     }
 }

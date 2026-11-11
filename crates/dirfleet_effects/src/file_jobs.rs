@@ -41,6 +41,9 @@ where
         }
     };
     let outcome = match &op {
+        _ if crate::transfer::reaches_server(&op) => {
+            crate::transfer::run(vfs, id, &op, origin, control, &report)
+        }
         FileOp::Extract { .. } => crate::extracting::run(vfs, id, &op, origin, control, &report),
         FileOp::Compress { .. } => crate::compressing::run(id, &op, origin, control, &report),
         _ => crate::fileops::execute(id, op, origin, control, &report),
@@ -106,7 +109,10 @@ impl FileJobs {
     pub fn run(&self, request: Request<RunFileOp>) {
         let control = Arc::new(OpControl::with_verify(request.operation.verify));
         lock(&self.controls).insert(request.operation.id, Arc::clone(&control));
-        if request.operation.op.is_bulk() {
+        // What a server is asked may take its time: never in the line of
+        // small operations, which it would hold up.
+        let op = &request.operation.op;
+        if op.is_bulk() || crate::transfer::reaches_server(op) {
             (self.start)((request, control));
         } else if self.jobs.send((request, control)).is_err() {
             log::error!("the file operation thread is not running");
@@ -129,23 +135,12 @@ impl FileJobs {
     }
 }
 
-/// The names among the sources that already exist in the destination.
-pub fn conflicts(check: &FindConflicts) -> Vec<String> {
-    check
-        .srcs
-        .iter()
-        .filter_map(|src| src.file_name())
-        .filter(|name| check.dst.join(name).symlink_metadata().is_ok())
-        .map(|name| name.to_string_lossy().into_owned())
-        .collect()
-}
-
-pub fn find_conflicts<R>(mut request: Request<FindConflicts>, sink: Weak<R>)
+pub fn find_conflicts<R>(mut request: Request<FindConflicts>, sink: Weak<R>, vfs: Arc<Vfs>)
 where
     R: ResolveSink<FindConflicts> + Send + Sync + 'static,
 {
     std::thread::spawn(move || {
-        let found = Conflicts(conflicts(&request.operation));
+        let found = Conflicts(crate::transfer::conflicts(&vfs, &request.operation));
         if let Some(sink) = sink.upgrade() {
             let _ = sink.resolve_request(&mut request, found);
         }
@@ -191,10 +186,11 @@ mod tests {
             std::fs::write(from.join(name), b"x").expect("write");
         }
         std::fs::write(to.join("b.txt"), b"y").expect("write");
-        let found = conflicts(&FindConflicts {
+        let check = FindConflicts {
             srcs: vec![from.join("a.txt"), from.join("b.txt")],
             dst: to,
-        });
+        };
+        let found = crate::transfer::conflicts(&Vfs::default(), &check);
         assert_eq!(found, ["b.txt"]);
     }
 }

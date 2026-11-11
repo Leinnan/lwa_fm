@@ -220,9 +220,24 @@ fn connect_form(core: &CoreLink, connect: &ConnectView) -> View {
         &fields.user,
         |fields, text| fields.user = text,
     ));
+    let sftp = fields.scheme == Scheme::Sftp;
+    if sftp {
+        lines.push(text(
+            "Key file (empty to log in with a password)",
+            &fields.key_file,
+            |fields, text| fields.key_file = text,
+        ));
+    }
+    let keyed = sftp && !fields.key_file.trim().is_empty();
     lines.push(
         PasswordBox::new()
-            .header(if s3 { "Secret access key" } else { "Password" })
+            .header(if s3 {
+                "Secret access key"
+            } else if keyed {
+                "The key's passphrase, when it has one"
+            } else {
+                "Password"
+            })
             .placeholder_text("Empty for the one kept in the keychain")
             .is_enabled(!connect.busy)
             .on_password_changed(|text: Rc<str>| {

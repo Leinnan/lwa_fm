@@ -9495,3 +9495,208 @@ fn thumbnails_that_failed_are_asked_again_once_ffmpeg_is_ready() {
         [("/x/clip.mp4".to_owned(), thumbnails::LIST_EDGE)]
     );
 }
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one story, told in order")]
+fn a_server_s_items_are_made_renamed_copied_beside_and_removed_there() {
+    use crate::fileops::{ConflictPolicy, FileOp, Origin, Outcome};
+    let app = DirFleet;
+    let mut model = Model::default();
+    // Each is looked at alone here: none waits behind the one before.
+    model.settings.queue_mode = QueueMode::Unlimited;
+    let tab = window(&app, &mut model);
+    let docs = "sftp://c1/docs";
+    open(
+        &app,
+        &mut model,
+        tab,
+        docs,
+        &[entry("a.md", false), entry("b.md", false)],
+    );
+    let on = |name: &str| PathBuf::from(format!("{docs}/{name}"));
+    let ran =
+        |cmd: &mut Command<Effect, Event>| file_ops(cmd).pop().map(|request| request.operation.op);
+
+    let mut cmd = app.update(Event::NewFolder { tab }, &mut model);
+    assert_eq!(
+        ran(&mut cmd),
+        Some(FileOp::NewFolder {
+            parent: PathBuf::from(docs)
+        })
+    );
+
+    // A new name stays on the server, joined as the server joins.
+    click(&app, &mut model, tab, 0, false, false);
+    let _ = app.update(Event::StartRename { tab }, &mut model);
+    assert_eq!(
+        shown(&app, &model).renaming.map(|renaming| renaming.name),
+        Some("a.md".into())
+    );
+    let mut cmd = app.update(
+        Event::Rename {
+            tab,
+            name: "z.md".into(),
+        },
+        &mut model,
+    );
+    assert_eq!(
+        ran(&mut cmd),
+        Some(FileOp::Rename {
+            from: on("a.md"),
+            to: on("z.md")
+        })
+    );
+
+    // A duplicate is a copy beside the original, under a free name.
+    let mut cmd = app.update(Event::Duplicate { tab }, &mut model);
+    assert_eq!(
+        ran(&mut cmd),
+        Some(FileOp::Copy {
+            srcs: vec![on("a.md")],
+            dst: PathBuf::from(docs),
+            policy: ConflictPolicy::KeepBoth
+        })
+    );
+
+    // There is no bin to move things to: asking for it removes nothing.
+    let mut cmd = app.update(Event::TrashSelection { tab }, &mut model);
+    assert!(file_ops(&mut cmd).is_empty());
+    assert!(
+        app.view(&model)
+            .toasts
+            .iter()
+            .any(|toast| toast.text.contains("no Recycle Bin"))
+    );
+
+    // Deleting does, and the folder is read again once it is done.
+    let mut cmd = app.update(Event::DeleteSelection { tab }, &mut model);
+    let asked = file_ops(&mut cmd);
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].operation.op, FileOp::Delete(vec![on("a.md")]));
+    let mut cmd = app.update(Event::DeleteSelection { tab }, &mut model);
+    let mut after = finish(
+        &app,
+        &mut model,
+        &mut cmd,
+        Outcome {
+            affected_dirs: vec![PathBuf::from(docs)],
+            ..outcome(0, Origin::User)
+        },
+    );
+    assert_eq!(listed_paths(&mut after), [docs]);
+    assert_eq!(app.view(&model).undo, None, "nothing to take back");
+
+    // What is inside an archive stays as it is.
+    let inside = "archive:/x/a.zip!/";
+    open(&app, &mut model, tab, inside, &[entry("m.txt", false)]);
+    click(&app, &mut model, tab, 0, false, false);
+    let mut cmd = app.update(Event::DeleteSelection { tab }, &mut model);
+    assert!(file_ops(&mut cmd).is_empty());
+}
+
+/// Answers the clipboard count `cmd` asks for and returns what follows.
+fn counted(
+    app: &DirFleet,
+    model: &mut Model,
+    cmd: &mut Command<Effect, Event>,
+    count: u64,
+) -> Command<Effect, Event> {
+    let effects: Vec<Effect> = cmd.effects().collect();
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Clipboard(_))),
+        "the system's clipboard is left alone"
+    );
+    let mut request = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::ClipboardChanges(request) => Some(request),
+            _ => None,
+        })
+        .expect("the clipboard's changes are counted");
+    request.resolve(count).expect("resolves");
+    let event = cmd.events().next().expect("the count comes back");
+    app.update(event, model)
+}
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one story, told in order")]
+fn what_is_copied_on_a_server_is_kept_and_pasted_unless_the_clipboard_took_something_newer() {
+    use crate::fileops::{ConflictPolicy, FileOp};
+    let app = DirFleet;
+    let mut model = Model::default();
+    model.settings.queue_mode = QueueMode::Unlimited;
+    let tab = window(&app, &mut model);
+    let docs = "sftp://c1/docs";
+    open(&app, &mut model, tab, docs, &[entry("a.md", false)]);
+    let other = window(&app, &mut model);
+    open(&app, &mut model, other, "/y", &[]);
+    let file = PathBuf::from(format!("{docs}/a.md"));
+    // Pastes into `/y` with the clipboard's count at `count`, and returns
+    // what is asked of the shell next.
+    let paste = |model: &mut Model, count: u64| {
+        let mut cmd = app.update(Event::Paste { tab: other }, model);
+        counted(&app, model, &mut cmd, count)
+    };
+    // The names checked and found free, the operation that runs.
+    let runs = |model: &mut Model, mut cmd: Command<Effect, Event>| {
+        let mut check = cmd
+            .effects()
+            .find_map(|effect| match effect {
+                Effect::FindConflicts(request) => Some(request),
+                _ => None,
+            })
+            .expect("names are checked");
+        assert_eq!(check.operation.srcs, std::slice::from_ref(&file));
+        check.resolve(Conflicts(Vec::new())).expect("resolves");
+        let event = cmd.events().next().expect("the answer comes back");
+        let mut cmd = app.update(event, model);
+        file_ops(&mut cmd).pop().map(|request| request.operation.op)
+    };
+
+    // Copied: kept here, since the system's clipboard takes no server's files.
+    click(&app, &mut model, tab, 0, false, false);
+    let mut cmd = app.update(Event::CopySelection { tab }, &mut model);
+    let _ = counted(&app, &mut model, &mut cmd, 5);
+    let pasted = paste(&mut model, 5);
+    assert_eq!(
+        runs(&mut model, pasted),
+        Some(FileOp::Copy {
+            srcs: vec![file.clone()],
+            dst: PathBuf::from("/y"),
+            policy: ConflictPolicy::KeepBoth
+        })
+    );
+    // A cut is dimmed, and moves when it is pasted.
+    let mut cmd = app.update(Event::CutSelection { tab }, &mut model);
+    let _ = counted(&app, &mut model, &mut cmd, 5);
+    assert!(shown(&app, &model).rows[0].cut);
+    let pasted = paste(&mut model, 5);
+    assert_eq!(
+        runs(&mut model, pasted),
+        Some(FileOp::Move {
+            srcs: vec![file.clone()],
+            dst: PathBuf::from("/y"),
+            policy: ConflictPolicy::KeepBoth
+        })
+    );
+    assert!(!shown(&app, &model).rows[0].cut);
+
+    // Another program put something on the clipboard since: that is pasted.
+    let mut cmd = app.update(Event::CopySelection { tab }, &mut model);
+    let _ = counted(&app, &mut model, &mut cmd, 5);
+    let mut newer = paste(&mut model, 6);
+    assert!(
+        newer
+            .effects()
+            .any(|effect| matches!(effect, Effect::Clipboard(_))),
+        "the system's clipboard is read"
+    );
+    // And what was kept is forgotten: the next paste asks the system at once.
+    let mut cmd = app.update(Event::Paste { tab: other }, &mut model);
+    assert!(
+        cmd.effects()
+            .any(|effect| matches!(effect, Effect::Clipboard(_)))
+    );
+}

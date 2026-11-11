@@ -10,7 +10,7 @@ mod naming;
 mod worker;
 
 pub use crate::trash_bin;
-pub use naming::{copy_name, is_respelling, unique_name, validate_name};
+pub use naming::{copy_name, is_respelling, split_name, unique_name, validate_name};
 pub use worker::{OpControl, Worker, execute};
 
 pub use dirfleet_core::fileops::*;

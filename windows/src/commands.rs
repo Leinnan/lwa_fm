@@ -20,6 +20,9 @@ pub struct Target {
     pub show_hidden: bool,
     /// The tab shows the Recycle Bin.
     pub in_trash: bool,
+    /// The tab shows a place where things can be removed but that has no
+    /// Recycle Bin: a server.
+    pub no_bin: bool,
     /// How many of the tab's entries are selected.
     pub selected: u32,
     pub inspector_shown: bool,

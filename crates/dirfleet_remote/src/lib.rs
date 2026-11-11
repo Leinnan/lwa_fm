@@ -7,6 +7,7 @@
 //! `ssh` and Unix.
 use std::fmt;
 use std::future::Future;
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -17,6 +18,13 @@ mod store;
 
 /// How long a server may take to answer before the call gives up.
 const ANSWER_WITHIN: Duration = Duration::from_secs(30);
+
+/// The slowest a server may take data, in bytes a second, before the wait
+/// for a piece of a file gives up.
+const SLOWEST: u64 = 16 * 1024;
+
+/// Pieces of a file go to an SFTP server in this size.
+const SFTP_PIECE: usize = 256 * 1024;
 
 /// How a server is talked to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +60,9 @@ pub struct Endpoint {
     pub region: String,
     /// SFTP only: the fingerprint of the host key the user has accepted.
     pub host_key: Option<String>,
+    /// SFTP only: the private key file to log in with, in place of a
+    /// password; the secret is then what unlocks the key. Empty for none.
+    pub key_file: String,
 }
 
 impl fmt::Debug for Endpoint {
@@ -121,10 +132,161 @@ enum Backend {
 async fn in_time<T, E: fmt::Display>(
     work: impl Future<Output = Result<T, E>>,
 ) -> Result<T, String> {
-    match tokio::time::timeout(ANSWER_WITHIN, work).await {
+    within(ANSWER_WITHIN, work).await
+}
+
+/// Waits for `work` no longer than `limit`.
+async fn within<T, E: fmt::Display>(
+    limit: Duration,
+    work: impl Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    match tokio::time::timeout(limit, work).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(error.to_string()),
         Err(_) => Err("The server did not answer in time".to_owned()),
+    }
+}
+
+/// How long sending `bytes` may take.
+fn time_for(bytes: u64) -> Duration {
+    ANSWER_WITHIN.max(Duration::from_secs(bytes / SLOWEST))
+}
+
+/// A file on a server being read: what it holds comes through `Read`.
+pub struct Reading {
+    runtime: Arc<tokio::runtime::Runtime>,
+    source: Source,
+    /// The piece last brought over, and how much of it is handed out.
+    held: Vec<u8>,
+    at: usize,
+}
+
+enum Source {
+    Store(store::Reading),
+    Sftp(Box<sftp::File>),
+}
+
+impl io::Read for Reading {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.at == self.held.len() {
+            let source = &mut self.source;
+            let next = self.runtime.block_on(async {
+                match source {
+                    Source::Store(reading) => reading.next().await,
+                    Source::Sftp(file) => {
+                        use tokio::io::AsyncReadExt as _;
+                        let mut piece = vec![0; SFTP_PIECE];
+                        let read = in_time(file.read(&mut piece)).await?;
+                        piece.truncate(read);
+                        Ok(piece)
+                    }
+                }
+            });
+            self.held = next.map_err(io::Error::other)?;
+            self.at = 0;
+        }
+        let count = buffer.len().min(self.held.len() - self.at);
+        buffer[..count].copy_from_slice(&self.held[self.at..self.at + count]);
+        self.at += count;
+        Ok(count)
+    }
+}
+
+/// A file on a server being written: what goes into `Write` is sent in
+/// pieces, and the file is whole only once [`Writing::finish`] says so.
+pub struct Writing {
+    runtime: Arc<tokio::runtime::Runtime>,
+    sink: Sink,
+    /// What is not sent yet.
+    held: Vec<u8>,
+    /// How much is gathered before it is sent.
+    piece: usize,
+    sent: u64,
+}
+
+enum Sink {
+    Store(opendal::Writer),
+    Sftp(Box<sftp::File>),
+}
+
+impl Writing {
+    fn send(&mut self) -> Result<(), String> {
+        if self.held.is_empty() {
+            return Ok(());
+        }
+        let piece = std::mem::take(&mut self.held);
+        let limit = time_for(piece.len() as u64);
+        self.sent += piece.len() as u64;
+        let sink = &mut self.sink;
+        self.runtime.block_on(async {
+            match sink {
+                Sink::Store(writer) => within(limit, writer.write(piece)).await,
+                Sink::Sftp(file) => {
+                    use tokio::io::AsyncWriteExt as _;
+                    within(limit, file.write_all(&piece)).await
+                }
+            }
+        })
+    }
+
+    /// Sends what is left and closes the file.
+    ///
+    /// # Errors
+    /// Why the file is not whole on the server, in words for the user.
+    pub fn finish(mut self) -> Result<(), String> {
+        let empty = self.sent == 0 && self.held.is_empty();
+        self.send()?;
+        // A server that takes the file in one piece takes it now.
+        let limit = time_for(self.sent);
+        let sink = &mut self.sink;
+        self.runtime.block_on(async {
+            match sink {
+                Sink::Store(writer) => {
+                    if empty {
+                        // Some stores make no file that nothing was written to.
+                        within(limit, writer.write(Vec::<u8>::new())).await?;
+                    }
+                    within(limit, writer.close()).await.map(|_| ())
+                }
+                Sink::Sftp(file) => {
+                    use tokio::io::AsyncWriteExt as _;
+                    within(limit, file.shutdown()).await
+                }
+            }
+        })
+    }
+
+    /// Gives the file up. What reached the server may still be there: the
+    /// caller removes it.
+    pub fn abandon(mut self) {
+        let sink = &mut self.sink;
+        self.runtime.block_on(async {
+            match sink {
+                Sink::Store(writer) => {
+                    let _ = within(ANSWER_WITHIN, writer.abort()).await;
+                }
+                Sink::Sftp(file) => {
+                    use tokio::io::AsyncWriteExt as _;
+                    let _ = within(ANSWER_WITHIN, file.shutdown()).await;
+                }
+            }
+        });
+    }
+}
+
+impl io::Write for Writing {
+    fn write(&mut self, piece: &[u8]) -> io::Result<usize> {
+        self.held.extend_from_slice(piece);
+        if self.held.len() >= self.piece {
+            self.send().map_err(io::Error::other)?;
+        }
+        Ok(piece.len())
+    }
+
+    /// Does nothing: pieces go when they are full, since some servers take
+    /// no small ones. [`Writing::finish`] sends the rest.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -206,6 +368,136 @@ impl Session {
             Backend::Sftp(client) => client.is_closed(),
         }
     }
+
+    /// The file or folder at `path`; `None` when nothing is there.
+    ///
+    /// # Errors
+    /// Why the server did not say, in words for the user.
+    pub fn stat(&self, path: &str) -> Result<Option<Entry>, String> {
+        self.runtime.block_on(async {
+            match &self.backend {
+                Backend::Store(store) => store.stat(path).await,
+                Backend::Sftp(client) => client.stat(path).await,
+            }
+        })
+    }
+
+    /// Makes the folder `path`, in a folder that is there.
+    ///
+    /// # Errors
+    /// Why the folder was not made, in words for the user.
+    pub fn make_dir(&self, path: &str) -> Result<(), String> {
+        self.runtime.block_on(async {
+            match &self.backend {
+                Backend::Store(store) => store.make_dir(path).await,
+                Backend::Sftp(client) => client.make_dir(path).await,
+            }
+        })
+    }
+
+    /// Removes the file at `path`.
+    ///
+    /// # Errors
+    /// Why the file is still there, in words for the user.
+    pub fn remove_file(&self, path: &str) -> Result<(), String> {
+        self.runtime.block_on(async {
+            match &self.backend {
+                Backend::Store(store) => store.remove_file(path).await,
+                Backend::Sftp(client) => client.remove_file(path).await,
+            }
+        })
+    }
+
+    /// Removes the folder at `path`, which must hold nothing.
+    ///
+    /// # Errors
+    /// Why the folder is still there, in words for the user.
+    pub fn remove_dir(&self, path: &str) -> Result<(), String> {
+        self.runtime.block_on(async {
+            match &self.backend {
+                Backend::Store(store) => store.remove_dir(path).await,
+                Backend::Sftp(client) => client.remove_dir(path).await,
+            }
+        })
+    }
+
+    /// Gives the item at `from` the path `to`, where nothing is. `Ok(false)`
+    /// when this kind of server can't rename: the item is then to be copied
+    /// and its original removed.
+    ///
+    /// # Errors
+    /// Why the item was not renamed, in words for the user.
+    pub fn rename(&self, from: &str, to: &str, is_dir: bool) -> Result<bool, String> {
+        self.runtime.block_on(async {
+            match &self.backend {
+                Backend::Store(store) => store.rename(from, to, is_dir).await,
+                Backend::Sftp(client) => client.rename(from, to).await.map(|()| true),
+            }
+        })
+    }
+
+    /// Has the server copy the file `from` to `to` itself, without the
+    /// data coming here. `Ok(false)` when this kind of server can't.
+    ///
+    /// # Errors
+    /// Why the file was not copied, in words for the user.
+    pub fn copy_file(&self, from: &str, to: &str) -> Result<bool, String> {
+        self.runtime.block_on(async {
+            match &self.backend {
+                Backend::Store(store) => store.copy_file(from, to).await,
+                Backend::Sftp(_) => Ok(false),
+            }
+        })
+    }
+
+    /// Opens the file at `path` for reading.
+    ///
+    /// # Errors
+    /// Why the file can't be read, in words for the user.
+    pub fn read(&self, path: &str) -> Result<Reading, String> {
+        let source = self.runtime.block_on(async {
+            match &self.backend {
+                Backend::Store(store) => store.read(path).await.map(Source::Store),
+                Backend::Sftp(client) => client
+                    .read(path)
+                    .await
+                    .map(|file| Source::Sftp(Box::new(file))),
+            }
+        })?;
+        Ok(Reading {
+            runtime: Arc::clone(&self.runtime),
+            source,
+            held: Vec::new(),
+            at: 0,
+        })
+    }
+
+    /// Opens the file at `path` for writing `size` bytes, in place of what
+    /// is there.
+    ///
+    /// # Errors
+    /// Why the file can't be written, in words for the user.
+    pub fn write(&self, path: &str, size: u64) -> Result<Writing, String> {
+        let (sink, piece) = self.runtime.block_on(async {
+            match &self.backend {
+                Backend::Store(store) => store
+                    .write(path, size)
+                    .await
+                    .map(|(writer, piece)| (Sink::Store(writer), piece)),
+                Backend::Sftp(client) => client
+                    .write(path)
+                    .await
+                    .map(|file| (Sink::Sftp(Box::new(file)), SFTP_PIECE as u64)),
+            }
+        })?;
+        Ok(Writing {
+            runtime: Arc::clone(&self.runtime),
+            sink,
+            held: Vec::new(),
+            piece: usize::try_from(piece).unwrap_or(usize::MAX),
+            sent: 0,
+        })
+    }
 }
 
 /// `path` as the parts between its `/`s, without empty ones.
@@ -229,6 +521,7 @@ mod tests {
             bucket: String::new(),
             region: String::new(),
             host_key: None,
+            key_file: String::new(),
         }
     }
 
@@ -278,6 +571,88 @@ mod tests {
                 .is_err()
         );
         assert!(!stopped.exists());
+    }
+
+    #[test]
+    fn a_store_takes_files_and_folders_and_renames_and_removes_them() {
+        use std::io::{Read as _, Write as _};
+        let dir = tempfile::tempdir().expect("temp dir");
+        let remote = Remote::new().expect("runtime");
+        let session = remote.connect(&folder(dir.path())).expect("connects");
+
+        session.make_dir("docs").expect("makes a folder");
+        assert!(dir.path().join("docs").is_dir());
+        let data: Vec<u8> = (0..3_000_001_u32).map(|n| (n % 251) as u8).collect();
+        let mut writing = session
+            .write("docs/data.bin", data.len() as u64)
+            .expect("opens");
+        // In pieces, as a copy hands them over.
+        for piece in data.chunks(1024 * 1024) {
+            writing.write_all(piece).expect("writes");
+        }
+        writing.finish().expect("finishes");
+        assert_eq!(
+            std::fs::read(dir.path().join("docs/data.bin")).expect("read"),
+            data
+        );
+        session
+            .write("docs/empty.txt", 0)
+            .expect("opens")
+            .finish()
+            .expect("finishes");
+        assert_eq!(
+            std::fs::read(dir.path().join("docs/empty.txt")).expect("read"),
+            b""
+        );
+
+        let found = session
+            .stat("docs/data.bin")
+            .expect("answers")
+            .expect("there");
+        assert_eq!(
+            (found.name.as_str(), found.is_dir, found.size),
+            ("data.bin", false, data.len() as u64)
+        );
+        assert!(
+            session
+                .stat("docs")
+                .expect("answers")
+                .expect("there")
+                .is_dir
+        );
+        assert!(session.stat("/").expect("answers").expect("there").is_dir);
+        assert_eq!(session.stat("docs/nothing").expect("answers"), None);
+
+        let mut back = Vec::new();
+        session
+            .read("docs/data.bin")
+            .expect("opens")
+            .read_to_end(&mut back)
+            .expect("reads");
+        assert_eq!(back, data);
+
+        assert_eq!(
+            session.rename("docs/data.bin", "docs/renamed.bin", false),
+            Ok(true)
+        );
+        assert_eq!(session.rename("docs", "papers", true), Ok(true));
+        assert!(dir.path().join("papers/renamed.bin").is_file());
+        assert_eq!(
+            session.copy_file("papers/renamed.bin", "papers/copy.bin"),
+            Ok(true)
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("papers/copy.bin")).expect("read"),
+            data
+        );
+
+        for name in ["renamed.bin", "copy.bin", "empty.txt"] {
+            session
+                .remove_file(&format!("papers/{name}"))
+                .expect("removes a file");
+        }
+        session.remove_dir("papers").expect("removes a folder");
+        assert!(!dir.path().join("papers").exists());
     }
 
     #[test]

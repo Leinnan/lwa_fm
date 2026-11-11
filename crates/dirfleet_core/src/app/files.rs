@@ -248,6 +248,36 @@ struct PendingTransfer {
     conflicts: Vec<String>,
 }
 
+/// Items on a server that were copied or cut. The system's clipboard takes
+/// only files of this machine, so these are kept here until they are pasted
+/// or the system's clipboard takes something newer.
+#[derive(Clone)]
+struct Clip {
+    paths: Vec<PathBuf>,
+    cut: bool,
+    /// The system clipboard's change count when they were taken.
+    changes: Option<u64>,
+}
+
+fn on_server(path: &Path) -> bool {
+    matches!(
+        Location::parse(&path.to_string_lossy()),
+        Location::Remote { .. }
+    )
+}
+
+/// `name` in the folder `path` is in. A server's location stays one: its
+/// parts are joined with `/` whatever this machine's paths use.
+fn sibling(path: &Path, name: &str) -> PathBuf {
+    match Location::parse(&path.to_string_lossy()) {
+        server @ Location::Remote { .. } => server.parent().map_or_else(
+            || path.to_path_buf(),
+            |dir| PathBuf::from(dir.join(name).to_string()),
+        ),
+        _ => path.with_file_name(name),
+    }
+}
+
 /// File operations in the model.
 #[derive(Default)]
 pub(super) struct Files {
@@ -258,6 +288,8 @@ pub(super) struct Files {
     cut: std::collections::HashSet<PathBuf>,
     /// The clipboard's change count once they were cut.
     cut_changes: Option<u64>,
+    /// What was copied or cut on a server.
+    clip: Option<Clip>,
     pending: Option<PendingTransfer>,
     /// Finished operations, oldest first, at most [`ACTIVITY_KEPT`].
     activity: std::collections::VecDeque<Finished>,
@@ -405,11 +437,24 @@ impl Tab {
             .collect()
     }
 
+    /// As [`Tab::targets`], with rows on a server as their locations: what
+    /// can be renamed, removed, copied and moved wherever it is.
+    pub(super) fn op_targets(&self) -> Vec<PathBuf> {
+        let rows: Vec<usize> = if self.selection.is_empty() {
+            self.selection.cursor().into_iter().collect()
+        } else {
+            self.selection.rows().collect()
+        };
+        rows.into_iter()
+            .filter_map(|row| self.row_op_path(row))
+            .collect()
+    }
+
     /// The rename shown in the tab, with the row it is on now.
     pub(super) fn rename_view(&self) -> Option<RenameView> {
         let renaming = self.renaming.as_ref()?;
         let row = (0..self.order.len())
-            .find(|&row| self.row_path(row).as_deref() == Some(&renaming.path))?;
+            .find(|&row| self.row_op_path(row).as_deref() == Some(&renaming.path))?;
         Some(RenameView {
             row: u32::try_from(row).ok()?,
             name: renaming
@@ -430,7 +475,7 @@ impl Tab {
         let wanted: std::collections::HashSet<&PathBuf> = self.select_after.iter().collect();
         let rows: Vec<usize> = (0..self.order.len())
             .filter(|&row| {
-                self.row_path(row)
+                self.row_op_path(row)
                     .is_some_and(|path| wanted.contains(&path))
             })
             .collect();
@@ -442,7 +487,7 @@ impl Tab {
         self.scroll_count = self.scroll_count.wrapping_add(1);
         if self.rename_after {
             self.renaming = self
-                .row_path(first)
+                .row_op_path(first)
                 .map(|path| Renaming { path, error: None });
         }
         self.select_after.clear();
@@ -538,11 +583,21 @@ impl DirFleet {
                 model
                     .tabs
                     .get(&id)
-                    .filter(|tab| tab.is_local())?
+                    // Not a place inside an archive: nothing goes in there.
+                    .filter(|tab| {
+                        tab.location()
+                            .is_some_and(|location| location.default_caps().writable)
+                    })?
                     .path
                     .clone()
             })
-            .map(|path| (super::title_of(&path), path, "Tab"));
+            .map(|path| {
+                let title = model
+                    .remote
+                    .top_title(&path)
+                    .unwrap_or_else(|| super::title_of(&path));
+                (title, path, "Tab")
+            });
         let favorites = model
             .sidebar
             .favorites
@@ -798,13 +853,17 @@ impl DirFleet {
         }
         if srcs.iter().all(|src| src.parent() == Some(dst.as_path())) {
             if copy {
-                return Self::run(
-                    model,
-                    FileOp::Duplicate(srcs),
-                    Origin::User,
-                    Some(tab),
-                    false,
-                );
+                // On a server a copy beside the original gets a free name.
+                let op = if on_server(&dst) {
+                    FileOp::Copy {
+                        srcs,
+                        dst,
+                        policy: ConflictPolicy::KeepBoth,
+                    }
+                } else {
+                    FileOp::Duplicate(srcs)
+                };
+                return Self::run(model, op, Origin::User, Some(tab), false);
             }
             return Command::done();
         }
@@ -887,7 +946,7 @@ impl DirFleet {
                     .selection
                     .cursor()
                     .or_else(|| state.selection.rows().next())
-                    .and_then(|row| state.row_path(row));
+                    .and_then(|row| state.row_op_path(row));
                 state.renaming = target.map(|path| Renaming { path, error: None });
                 render()
             }
@@ -916,7 +975,7 @@ impl DirFleet {
                 if from.file_name().is_some_and(|old| old == name.as_str()) {
                     return render();
                 }
-                let to = from.with_file_name(&name);
+                let to = sibling(&from, &name);
                 state.select_after = vec![to.clone()];
                 Self::run(
                     model,
@@ -932,12 +991,32 @@ impl DirFleet {
                 let Some(id) = tab_of(tab) else {
                     return Command::done();
                 };
-                let paths = model.tabs[&id].targets();
+                let paths = model.tabs[&id].op_targets();
                 if paths.is_empty() || model.tabs[&id].trash {
                     return Command::done();
                 }
+                let server = paths.iter().any(|path| on_server(path));
                 let op = match event {
+                    // On a server a copy beside the original gets a free name.
+                    Event::Duplicate { .. } if server => {
+                        let Some(dst) = model.tabs[&id].path.clone().map(PathBuf::from) else {
+                            return Command::done();
+                        };
+                        FileOp::Copy {
+                            srcs: paths,
+                            dst,
+                            policy: ConflictPolicy::KeepBoth,
+                        }
+                    }
                     Event::Duplicate { .. } => FileOp::Duplicate(paths),
+                    // Never removed for good by what asks for the bin.
+                    Event::TrashSelection { .. } if server => {
+                        return Self::notify(
+                            model,
+                            "A server has no Recycle Bin. Delete removes the items for good."
+                                .to_owned(),
+                        );
+                    }
                     Event::TrashSelection { .. } => FileOp::Trash(paths),
                     _ => FileOp::Delete(paths),
                 };
@@ -945,6 +1024,29 @@ impl DirFleet {
             }
             Event::CopyTo { tab, folder } => Self::send_selection(model, tab, folder, true),
             Event::MoveTo { tab, folder } => Self::send_selection(model, tab, folder, false),
+            // What was copied on a server is pasted, unless the system's
+            // clipboard has taken something newer since.
+            Event::Paste { tab } if model.files.clip.is_some() => {
+                Command::request_from_shell(ClipboardChanges).then_send(move |count| {
+                    Event::ClipChecked {
+                        tab,
+                        folder: None,
+                        count,
+                    }
+                })
+            }
+            Event::PasteInto { tab, folder } if model.files.clip.is_some() => {
+                Command::request_from_shell(ClipboardChanges).then_send(move |count| {
+                    Event::ClipChecked {
+                        tab,
+                        folder: Some(folder),
+                        count,
+                    }
+                })
+            }
+            Event::ClipChecked { tab, folder, count } => {
+                Self::paste_kept(model, tab, folder, count)
+            }
             Event::PasteInto { tab, folder } => Command::request_from_shell(ClipboardOp::Read)
                 .then_send(move |done| Event::PastedInto { tab, folder, done }),
             Event::PastedInto { tab, folder, done } => match done.0 {
@@ -1007,7 +1109,7 @@ impl DirFleet {
                 let Some(id) = tab_of(tab) else {
                     return Command::done();
                 };
-                let paths = model.tabs[&id].targets();
+                let paths = model.tabs[&id].op_targets();
                 // Items leave the Trash only by being put back.
                 if paths.is_empty() || model.tabs[&id].trash {
                     return Command::done();
@@ -1019,6 +1121,19 @@ impl DirFleet {
                     std::collections::HashSet::new()
                 };
                 model.files.cut_changes = None;
+                if paths.iter().any(|path| on_server(path)) {
+                    // Kept here: the system's clipboard takes only files of
+                    // this machine. Its count tells when it took others.
+                    model.files.clip = Some(Clip {
+                        paths,
+                        cut,
+                        changes: None,
+                    });
+                    return Command::request_from_shell(ClipboardChanges)
+                        .then_send(|count| Event::ClipboardCounted { count, cut: true })
+                        .and(render());
+                }
+                model.files.clip = None;
                 Command::request_from_shell(ClipboardOp::Write { paths, cut })
                     .then_send(move |done| Event::ClipboardDone { tab, done })
                     .and(render())
@@ -1048,6 +1163,9 @@ impl DirFleet {
                 let files = &mut model.files;
                 if cut {
                     files.cut_changes = Some(count);
+                    if let Some(clip) = &mut files.clip {
+                        clip.changes.get_or_insert(count);
+                    }
                     return Command::done();
                 }
                 if files.cut_changes.is_none_or(|then| then == count) {
@@ -1055,6 +1173,7 @@ impl DirFleet {
                 }
                 files.cut.clear();
                 files.cut_changes = None;
+                files.clip = None;
                 render()
             }
             Event::FileOpUpdated { id, update } => Self::file_op_updated(model, id, update.0),
@@ -1084,8 +1203,50 @@ impl DirFleet {
         if model.tabs[&id].trash {
             return Command::done();
         }
-        let srcs = model.tabs[&id].targets();
+        let srcs = model.tabs[&id].op_targets();
         Self::transfer(model, id, srcs, PathBuf::from(folder), copy)
+    }
+
+    /// Pastes what was copied or cut on a server into `folder` (the tab's
+    /// when `None`). When the system's clipboard has changed since, what it
+    /// holds now is pasted instead, and what was kept is forgotten.
+    fn paste_kept(
+        model: &mut Model,
+        tab: u32,
+        folder: Option<String>,
+        count: u64,
+    ) -> Command<Effect, Event> {
+        let fresh = model
+            .files
+            .clip
+            .as_ref()
+            .is_some_and(|clip| clip.changes.is_none_or(|then| then == count));
+        if !fresh {
+            model.files.clip = None;
+            return match folder {
+                Some(folder) => Command::request_from_shell(ClipboardOp::Read)
+                    .then_send(move |done| Event::PastedInto { tab, folder, done }),
+                None => Command::request_from_shell(ClipboardOp::Read)
+                    .then_send(move |done| Event::ClipboardDone { tab, done }),
+            };
+        }
+        let Some(id) = tab_id(tab).filter(|id| model.tabs.contains_key(id)) else {
+            return Command::done();
+        };
+        let Some(dst) = folder
+            .or_else(|| model.tabs[&id].path.clone())
+            .map(PathBuf::from)
+        else {
+            return Command::done();
+        };
+        let Some(clip) = model.files.clip.clone() else {
+            return Command::done();
+        };
+        if clip.cut {
+            model.files.clip = None;
+            model.files.cut.clear();
+        }
+        Self::transfer(model, id, clip.paths, dst, !clip.cut)
     }
 
     /// Un-dims cut items once another app replaced them on the clipboard,
@@ -1289,6 +1450,13 @@ impl DirFleet {
 /// The mount point `path` is on: the longest of `mounts` it is under, or its
 /// first component when no drive is known.
 fn drive_of(path: &Path, mounts: &[PathBuf]) -> PathBuf {
+    // A server is a drive of its own: what it is asked waits its turn there.
+    if let Location::Remote {
+        scheme, connection, ..
+    } = Location::parse(&path.to_string_lossy())
+    {
+        return PathBuf::from(format!("{}://{connection}", scheme.as_str()));
+    }
     mounts
         .iter()
         .filter(|mount| path.starts_with(mount))

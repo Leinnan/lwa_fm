@@ -209,6 +209,7 @@ impl WindowRoot {
             path: tab.path.clone(),
             show_hidden: tab.view.show_hidden,
             in_trash: tab.in_trash,
+            no_bin: tab.location.caps.writable && !tab.location.caps.trash,
             selected: tab.selected_count,
             inspector_shown: input.shared.inspector_shown,
             confirm_trash: input.shared.settings.confirm_trash,
@@ -405,6 +406,9 @@ impl Component for WindowRoot {
                         let target = &self.target;
                         if target.selected == 0 || target.in_trash {
                             // Nothing to move, or it is in the Recycle Bin already.
+                        } else if target.no_bin {
+                            // No bin to move it to: removed for good, so asked first.
+                            self.asking = Some(Asking::Delete);
                         } else if target.confirm_trash {
                             self.asking = Some(Asking::Trash);
                         } else {

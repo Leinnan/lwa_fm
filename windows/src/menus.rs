@@ -136,6 +136,9 @@ impl Context<'_> {
         if !self.tab.location.caps.real_paths {
             let mut entries = vec![Self::send("Open", Event::OpenSelection { tab })];
             entries.extend(self.extracting());
+            if self.tab.location.caps.writable {
+                entries.extend(self.on_server());
+            }
             return entries;
         }
         let several = self.tab.selected_count > 1;
@@ -207,6 +210,33 @@ impl Context<'_> {
         }
         entries.push(Entry::Separator);
         entries.push(Entry::item("More options", Action::Shell));
+        entries
+    }
+
+    /// What can be done with entries on a server: no program of this
+    /// machine can be handed them, but they can be renamed, removed, copied
+    /// and moved. There is no Recycle Bin there, so the only removal is for
+    /// good.
+    fn on_server(&self) -> Vec<Entry> {
+        let mut entries = vec![Entry::Separator];
+        if self.tab.selected_count == 1 {
+            entries.push(self.command(CommandId::Rename));
+        }
+        entries.extend([
+            self.command(CommandId::Duplicate),
+            self.command(CommandId::DeleteImmediately),
+            Entry::Submenu {
+                label: "Move To".to_owned(),
+                entries: self.send_to(false),
+            },
+            Entry::Submenu {
+                label: "Copy To".to_owned(),
+                entries: self.send_to(true),
+            },
+            Entry::Separator,
+            self.command(CommandId::Copy),
+            self.command(CommandId::Cut),
+        ]);
         entries
     }
 
@@ -554,6 +584,43 @@ mod tests {
         assert!(!labels(&folder).contains(&CommandId::NewFolder.label()));
         assert!(!labels(&folder).contains(&CommandId::Paste.label()));
         assert!(labels(&folder).contains(&"View"));
+    }
+
+    #[test]
+    fn on_a_server_entries_are_renamed_removed_copied_and_moved_but_handed_to_no_program() {
+        let shared = ViewModel::default();
+        let server = dirfleet_core::Location::parse("sftp://c1/docs");
+        let mut tab = TabViewModel {
+            selected_count: 1,
+            ..TabViewModel::default()
+        };
+        tab.location.kind = server.kind();
+        tab.location.caps = server.default_caps();
+        let one = context(&shared, &tab).selection();
+        assert_eq!(
+            labels(&one),
+            [
+                "Open",
+                "-",
+                CommandId::Rename.label(),
+                CommandId::Duplicate.label(),
+                CommandId::DeleteImmediately.label(),
+                "Move To",
+                "Copy To",
+                "-",
+                CommandId::Copy.label(),
+                CommandId::Cut.label(),
+            ]
+        );
+        // Several are not renamed at once there.
+        tab.selected_count = 2;
+        let several = context(&shared, &tab).selection();
+        assert!(!labels(&several).contains(&CommandId::Rename.label()));
+        assert!(labels(&several).contains(&CommandId::DeleteImmediately.label()));
+        // And the folder takes new items and what is pasted.
+        let folder = context(&shared, &tab).folder();
+        assert!(labels(&folder).contains(&CommandId::NewFolder.label()));
+        assert!(labels(&folder).contains(&CommandId::Paste.label()));
     }
 
     #[test]
