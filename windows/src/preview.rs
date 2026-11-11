@@ -1,0 +1,290 @@
+//! Quick Look: a window that shows the selected files one at a time. Images
+//! are drawn and text is read; other kinds show their icon for now.
+use std::path::Path;
+use std::rc::Rc;
+use std::time::Duration;
+
+use dirfleet_core::app::Event;
+use windows_reactor::{
+    Border, Callback, Color, Component, ComponentContext, ComponentTimer, ElementRef, Grid,
+    GridLength, HorizontalAlignment, Image, KeyEventInfo, Orientation, RoutedCallback,
+    ScrollBarVisibility, ScrollViewer, StackPanel, Stretch, TextBlock, TextTrimming, TextWrapping,
+    Thickness, VerticalAlignment, View, ViewContext, VirtualKey, WindowBackdrop, WindowVisuals,
+};
+
+use crate::core_link::CoreLink;
+use crate::files::entry_icon;
+
+/// The key the application declares the preview window under.
+pub const WINDOW_KEY: &str = "preview";
+/// How much of a text file is read to show it.
+const TEXT_LIMIT: u64 = 256 * 1024;
+/// A new window refuses the focus until it is laid out; asked again this often.
+const FOCUS_RETRY: Duration = Duration::from_millis(40);
+const FOCUS_TRIES: u8 = 10;
+
+#[derive(Clone, PartialEq)]
+pub struct PreviewInput {
+    pub core: CoreLink,
+    /// The tab the files are selected in.
+    pub tab: u32,
+    pub paths: Rc<Vec<String>>,
+    /// The file to start at.
+    pub index: u32,
+    /// Told when the window goes away.
+    pub on_closed: Callback<()>,
+}
+
+pub struct PreviewWindow {
+    core: CoreLink,
+    tab: u32,
+    paths: Rc<Vec<String>>,
+    index: usize,
+    on_closed: Callback<()>,
+    on_key: RoutedCallback<KeyEventInfo>,
+    focus: ElementRef<Border>,
+    focus_timer: Option<ComponentTimer>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PreviewMessage {
+    Step(isize),
+    Open,
+    Close,
+    TakeFocus(u8),
+    Focused(bool, u8),
+}
+
+/// What a file is shown as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Image,
+    Text,
+    Other,
+}
+
+impl Kind {
+    pub fn of(path: &str) -> Self {
+        let extension = Path::new(path)
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_lowercase());
+        match extension.as_deref() {
+            Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "tif" | "tiff") => {
+                Self::Image
+            }
+            Some(
+                "txt" | "md" | "log" | "rs" | "toml" | "json" | "yml" | "yaml" | "xml" | "html"
+                | "css" | "js" | "ts" | "py" | "c" | "h" | "cpp" | "hpp" | "cs" | "java" | "go"
+                | "ini" | "cfg" | "conf" | "csv" | "sh" | "ps1" | "bat" | "cmd" | "lua" | "sql"
+                | "swift" | "kt",
+            ) => Self::Text,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// The beginning of a text file, with a note when there is more.
+fn read_text(path: &str) -> String {
+    use std::io::Read as _;
+    let Ok(file) = std::fs::File::open(path) else {
+        return "This file can't be read.".to_owned();
+    };
+    let longer = file.metadata().is_ok_and(|data| data.len() > TEXT_LIMIT);
+    let mut bytes = Vec::new();
+    if file.take(TEXT_LIMIT).read_to_end(&mut bytes).is_err() {
+        return "This file can't be read.".to_owned();
+    }
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if longer {
+        text.push_str("\n…");
+    }
+    text
+}
+
+fn file_name(path: &str) -> String {
+    Path::new(path).file_name().map_or_else(
+        || path.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+impl PreviewWindow {
+    fn take_focus(&mut self, attempt: u8, context: &ComponentContext<Self>) {
+        self.focus_timer = Some(
+            context.set_local_timeout(FOCUS_RETRY, move || PreviewMessage::TakeFocus(attempt)),
+        );
+    }
+}
+
+impl Drop for PreviewWindow {
+    fn drop(&mut self) {
+        self.on_closed.call(());
+    }
+}
+
+impl Component for PreviewWindow {
+    type Input = PreviewInput;
+    type Message = PreviewMessage;
+
+    fn create(input: &PreviewInput, context: &ComponentContext<Self>) -> Self {
+        let sender = context.sender();
+        let mut preview = Self {
+            core: input.core.clone(),
+            tab: input.tab,
+            paths: Rc::clone(&input.paths),
+            index: input.index as usize,
+            on_closed: input.on_closed.clone(),
+            on_key: RoutedCallback::new(move |info: KeyEventInfo| {
+                let message = match info.key {
+                    VirtualKey::LEFT | VirtualKey::UP => PreviewMessage::Step(-1),
+                    VirtualKey::RIGHT | VirtualKey::DOWN => PreviewMessage::Step(1),
+                    VirtualKey::ENTER => PreviewMessage::Open,
+                    VirtualKey::ESCAPE | VirtualKey::SPACE => PreviewMessage::Close,
+                    _ => return false,
+                };
+                sender.send(message)
+            }),
+            focus: ElementRef::new(),
+            focus_timer: None,
+        };
+        preview.take_focus(0, context);
+        preview
+    }
+
+    fn input_changed(&mut self, input: &PreviewInput, _: &ComponentContext<Self>) {
+        // Another selection was sent to the open window.
+        self.tab = input.tab;
+        self.paths = Rc::clone(&input.paths);
+        self.index = input.index as usize;
+    }
+
+    fn update(&mut self, message: PreviewMessage, context: &ComponentContext<Self>) {
+        match message {
+            PreviewMessage::Step(by) => {
+                let count = self.paths.len();
+                if count > 0 {
+                    self.index = self.index.saturating_add_signed(by).min(count - 1);
+                }
+            }
+            PreviewMessage::Open => {
+                if let Some(path) = self.paths.get(self.index) {
+                    self.core.send(Event::OpenPreviewed {
+                        tab: self.tab,
+                        path: path.clone(),
+                    });
+                }
+                _ = context.close_window();
+            }
+            PreviewMessage::Close => _ = context.close_window(),
+            PreviewMessage::TakeFocus(attempt) => {
+                let sender = context.sender();
+                _ = self.focus.request_focus_result(move |result| {
+                    _ = sender.send(PreviewMessage::Focused(result == Ok(true), attempt));
+                });
+            }
+            PreviewMessage::Focused(taken, attempt) => {
+                self.focus_timer = None;
+                if !taken && attempt < FOCUS_TRIES {
+                    self.take_focus(attempt + 1, context);
+                }
+            }
+        }
+    }
+
+    fn view(&self, _: &PreviewInput, context: &mut ViewContext<Self>) -> View {
+        let path = self.paths.get(self.index).map_or("", String::as_str);
+        let name = file_name(path);
+        context.window_title(name.clone());
+        context.window_visuals(
+            WindowVisuals::new()
+                .backdrop(WindowBackdrop::Mica)
+                .client_size(900.0, 640.0),
+        );
+        let shown: View = match Kind::of(path) {
+            Kind::Image => Image::new().source_file(path).map_or_else(
+                |_| entry_icon(&name, false, 128.0),
+                |image| image.stretch(Stretch::Uniform).into(),
+            ),
+            Kind::Text => ScrollViewer::new()
+                .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                .horizontal_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                .content(
+                    TextBlock::new()
+                        .text(read_text(path))
+                        .font_family("Cascadia Mono,Consolas")
+                        .font_size(13.0)
+                        .text_wrapping(TextWrapping::NoWrap)
+                        .is_text_selection_enabled(true),
+                )
+                .into(),
+            Kind::Other => StackPanel::new()
+                .orientation(Orientation::Vertical)
+                .spacing(12.0)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .vertical_alignment(VerticalAlignment::Center)
+                .children((
+                    entry_icon(&name, Path::new(path).is_dir(), 128.0),
+                    TextBlock::new()
+                        .text(name.clone())
+                        .font_size(16.0)
+                        .horizontal_alignment(HorizontalAlignment::Center),
+                ))
+                .into(),
+        };
+        let place = if self.paths.len() > 1 {
+            format!("{} of {}", self.index + 1, self.paths.len())
+        } else {
+            String::new()
+        };
+        Border::new()
+            .element_ref(&self.focus)
+            .is_tab_stop(true)
+            .background(Color::transparent())
+            .on_preview_key_down(self.on_key.clone())
+            .content(
+                Grid::new()
+                    .rows([GridLength::STAR, GridLength::Auto])
+                    .children((
+                        Border::new()
+                            .padding(Thickness::uniform(16.0))
+                            .content(shown),
+                        Grid::new()
+                            .grid_row(1)
+                            .columns([GridLength::STAR, GridLength::Auto])
+                            .margin(Thickness::new(16.0, 0.0, 16.0, 10.0))
+                            .children((
+                                TextBlock::new()
+                                    .text(path)
+                                    .font_size(12.0)
+                                    .opacity(0.6)
+                                    .text_trimming(TextTrimming::CharacterEllipsis),
+                                TextBlock::new()
+                                    .text(place)
+                                    .font_size(12.0)
+                                    .opacity(0.6)
+                                    .grid_column(1),
+                            )),
+                    )),
+            )
+            .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn files_are_shown_by_their_extension() {
+        assert_eq!(Kind::of("C:\\a\\photo.JPG"), Kind::Image);
+        assert_eq!(Kind::of("notes.md"), Kind::Text);
+        assert_eq!(Kind::of("movie.mkv"), Kind::Other);
+        assert_eq!(Kind::of("LICENSE"), Kind::Other);
+    }
+
+    #[test]
+    fn a_path_is_named_by_its_last_part() {
+        assert_eq!(file_name("C:\\a\\b.txt"), "b.txt");
+        assert_eq!(file_name(""), "");
+    }
+}

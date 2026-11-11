@@ -26,25 +26,15 @@ pub fn start(paths: &[PathBuf]) -> anyhow::Result<()> {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod platform {
-    use std::{iter::once, os::windows::ffi::OsStrExt, path::PathBuf};
-    use windows::{
-        Win32::{
-            Foundation::{HWND, LPARAM, POINT, RECT, WPARAM},
-            Graphics::Gdi::ScreenToClient,
-            System::{
-                Com::{IBindCtx, IDataObject},
-                Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, IDropSource},
-            },
-            UI::{
-                Input::KeyboardAndMouse::GetActiveWindow,
-                Shell::{
-                    BHID_DataObject, Common::ITEMIDLIST, ILCreateFromPathW, ILFree,
-                    SHCreateShellItemArrayFromIDLists, SHDoDragDrop,
-                },
-                WindowsAndMessaging::{GetClientRect, GetCursorPos, PostMessageW, WM_LBUTTONUP},
-            },
+    use dirfleet_winshell::DragOutcome;
+    use std::path::PathBuf;
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM, POINT, RECT, WPARAM},
+        Graphics::Gdi::ScreenToClient,
+        UI::{
+            Input::KeyboardAndMouse::GetActiveWindow,
+            WindowsAndMessaging::{GetClientRect, GetCursorPos, PostMessageW, WM_LBUTTONUP},
         },
-        core::PCWSTR,
     };
 
     /// `WM_MOUSELEAVE`, which `windows` only exports under `Win32_UI_Controls`.
@@ -54,40 +44,13 @@ mod platform {
         // SAFETY: no preconditions; null when this thread has no active window.
         let hwnd = unsafe { GetActiveWindow() };
         anyhow::ensure!(!hwnd.is_invalid(), "No window to drag from");
-        let wide: Vec<Vec<u16>> = paths
-            .iter()
-            .map(|path| path.as_os_str().encode_wide().chain(once(0)).collect())
-            .collect();
-        let pidls: Vec<*mut ITEMIDLIST> = wide
-            .iter()
-            // SAFETY: each buffer is NUL terminated and outlives the call.
-            .map(|path| unsafe { ILCreateFromPathW(PCWSTR(path.as_ptr())) })
-            .filter(|pidl| !pidl.is_null())
-            .collect();
-        anyhow::ensure!(!pidls.is_empty(), "The files no longer exist");
-        let items: Vec<*const ITEMIDLIST> = pidls.iter().map(|pidl| pidl.cast_const()).collect();
-        // SAFETY: the item ID lists are valid until freed below. With no drop
-        // source the shell supplies its own, which also draws the drag image.
-        let result = unsafe {
-            SHCreateShellItemArrayFromIDLists(&items)
-                .and_then(|array| {
-                    array.BindToHandler::<_, IDataObject>(None::<&IBindCtx>, &BHID_DataObject)
-                })
-                .and_then(|data| {
-                    SHDoDragDrop(
-                        Some(hwnd),
-                        &data,
-                        None::<&IDropSource>,
-                        DROPEFFECT_COPY | DROPEFFECT_LINK,
-                    )
-                })
-        };
-        for pidl in items {
-            // SAFETY: each list came from `ILCreateFromPathW` and is freed once.
-            unsafe { ILFree(Some(pidl)) };
-        }
+        // The shell's own data object and drag loop, the same Explorer uses.
+        let data = dirfleet_winshell::data_object(paths)?;
+        let outcome = data.drag(hwnd.0 as isize);
         release_pointer(hwnd);
-        result?;
+        if let DragOutcome::Failed(error) = outcome {
+            anyhow::bail!(error);
+        }
         Ok(())
     }
 

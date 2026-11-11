@@ -54,6 +54,8 @@ objc2-image-io = "0.3"
 arboard = "3.4.1"
 
 [target.'cfg(windows)'.dependencies]
+# Explorer's Properties dialog (`src/system.rs`).
+dirfleet_winshell = { path = "../dirfleet_winshell" }
 windows = { version = "0.59", features = [
     "Wdk_Storage_FileSystem",
     "Win32_Devices_DeviceAndDriverInstallation",

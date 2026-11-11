@@ -33,6 +33,7 @@ use crate::data::files::EntryRef;
 use dirfleet_effects::media::cache::{self, thumbnail_cache_path};
 #[cfg(test)]
 use dirfleet_effects::media::decode;
+#[cfg(not(all(test, windows)))]
 use dirfleet_effects::media::decode::decoded_from_dynamic;
 #[cfg(test)]
 use dirfleet_effects::media::failures;
@@ -2869,7 +2870,7 @@ mod tests {
             time(
                 "Windows shell cache",
                 Box::new(move || {
-                    crate::windows_tools::shell_thumbnail(&shell, 160, false).is_some()
+                    dirfleet_effects::windows_media::shell_thumbnail(&shell, 160, false).is_some()
                 }),
             );
             let missing = std::env::temp_dir()
@@ -2878,7 +2879,7 @@ mod tests {
             time(
                 "shell cache miss probe",
                 Box::new(move || {
-                    crate::windows_tools::shell_thumbnail(&missing, 160, true).is_none()
+                    dirfleet_effects::windows_media::shell_thumbnail(&missing, 160, true).is_none()
                 }),
             );
         }

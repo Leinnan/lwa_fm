@@ -39,7 +39,9 @@ impl App {
         let Some(pending) = self.pending_system_menu.take() else {
             return;
         };
-        match context_menu::show(&pending.paths) {
+        // Whichever viewport has focus: the click that asked for the menu
+        // activated it.
+        match context_menu::show(crate::shell::active_window(), &pending.paths) {
             Ok(Outcome::Done) => {}
             Ok(Outcome::Rename) => in_window(pending.window, || {
                 ActionToPerform::RunCommand(Command::Rename).schedule();

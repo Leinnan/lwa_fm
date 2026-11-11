@@ -253,7 +253,7 @@ impl PluginHost {
     }
 
     /// A host with the bundled plugins and no folder, for tests.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn bundled_only() -> Self {
         Self::with_plugins(discovery::bundled())
     }

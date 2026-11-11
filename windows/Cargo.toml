@@ -1,0 +1,49 @@
+[package]
+name = "dirfleet_windows"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+description = "DirFleet's native Windows shell: WinUI 3 through windows-reactor, on the shared core"
+
+[[bin]]
+name = "DirFleet"
+path = "src/main.rs"
+
+# Windows only; other hosts build an empty binary so workspace-wide commands still pass.
+[target.'cfg(windows)'.dependencies]
+dirfleet_core = { path = "../crates/dirfleet_core" }
+dirfleet_effects = { path = "../crates/dirfleet_effects" }
+# Win32 shell pieces shared with the egui app: pickers, Properties, Explorer's menu, drag.
+dirfleet_winshell = { path = "../crates/dirfleet_winshell" }
+crux_core = "=0.20.0"
+directories = "6"
+# Shell icons are handed to the UI as PNG.
+png = "0.18"
+# WinUI 3 from Rust: the `dirfleet` branch of our windows-rs fork (see AGENTS.md for what it
+# adds to upstream). Every windows-rs crate must use the same rev.
+windows-reactor = { git = "https://github.com/Leinnan/windows-rs", rev = "31f34dae58c03844fc3ff0dd49dd0bff8867ff83" }
+# Win32 beside the UI stays on the version the rest of the workspace uses.
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# The folder the perf measurement lists.
+tempfile = "3"
+
+[target.'cfg(windows)'.build-dependencies]
+# Stages the Windows App SDK runtime beside the exe and embeds its manifest.
+windows-reactor-setup = { git = "https://github.com/Leinnan/windows-rs", rev = "31f34dae58c03844fc3ff0dd49dd0bff8867ff83" }
+winresource = "0.1.19"
+
+[lints]
+workspace = true

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The native Windows shell's installer: DirFleet.exe with its private copy
+     of the Windows App Runtime beside it, so nothing else has to be installed.
+     Built by package.ps1, which passes the version and the two staging
+     folders. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="DirFleet" Manufacturer="Piotr Siuszko"
+           Version="$(var.Version)"
+           UpgradeCode="{8C1E5B0A-6B7D-4E0C-9C55-2F3F0B6C7D14}"
+           Scope="perMachine" InstallerVersion="500" Compressed="yes">
+    <SummaryInformation Description="DirFleet $(var.Version), a file manager for Windows." />
+    <!-- Builds between releases keep the version and each gets a new product
+         code; without this a rebuild would install beside the last one. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <!-- Also replace files whose version equals the packaged one. -->
+    <Property Id="REINSTALLMODE" Value="emus" />
+
+    <!-- The Windows App SDK needs Windows 10 1809 (build 17763). The installer
+         engine reports an old version on Windows 10 and 11, so the build
+         number is read from the registry. -->
+    <Property Id="DIRFLEET_OS_BUILD" Secure="yes">
+      <RegistrySearch Id="DirFleetOsBuild" Root="HKLM"
+                      Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" />
+    </Property>
+    <Launch Condition="Installed OR DIRFLEET_OS_BUILD &gt;= 17763"
+            Message="DirFleet requires Windows 10 version 1809 or later." />
+
+    <!-- The id ends in .exe because the shortcut's icon must have the
+         extension of the file it starts. -->
+    <Icon Id="DirFleetIcon.exe" SourceFile="$(var.ExeStageDir)\DirFleet.exe" />
+    <Property Id="ARPPRODUCTICON" Value="DirFleetIcon.exe" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Leinnan/lwa_fm" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="DirFleet" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <!-- The runtime's files change with the pinned windows-reactor-setup, so
+         they are taken from the staging folder as they are. The program is
+         named by itself, from a folder of its own, so the shortcut has a file
+         to point at. -->
+    <Component Id="DirFleetExeComponent" Directory="INSTALLFOLDER">
+      <File Id="DirFleetExe" Source="$(var.ExeStageDir)\DirFleet.exe" KeyPath="yes">
+        <Shortcut Id="DirFleetShortcut" Directory="ProgramMenuFolder" Name="DirFleet"
+                  Description="File manager" WorkingDirectory="INSTALLFOLDER"
+                  Icon="DirFleetIcon.exe" Advertise="yes" />
+      </File>
+    </Component>
+    <ComponentGroup Id="RuntimeComponents" Directory="INSTALLFOLDER">
+      <Files Include="$(var.StageDir)\**" />
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="DirFleet" Level="1">
+      <ComponentRef Id="DirFleetExeComponent" />
+      <ComponentGroupRef Id="RuntimeComponents" />
+    </Feature>
+  </Package>
+</Wix>

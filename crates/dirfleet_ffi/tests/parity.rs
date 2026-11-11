@@ -1,9 +1,11 @@
 //! The parity ledger (`docs/crux-migration/parity.toml`) checked against the
 //! code, so it can't drift into wishful thinking: every test it names must
 //! exist, every feature marked done must name a core test and a Swift test,
-//! and every core event must belong to some feature.
+//! and every core event must belong to some feature. The native Windows shell
+//! has a status of its own per feature (`windows`), and the unit tests it
+//! names must exist too.
 //!
-//! `just parity` runs it and prints how far the Mac app has come.
+//! `just parity` runs it and prints how far the Mac and Windows apps have come.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -38,6 +40,11 @@ struct Feature {
     egui_test: Vec<String>,
     #[serde(default)]
     swift_test: Vec<String>,
+    #[serde(default = "open")]
+    windows: Status,
+    na_windows: Option<String>,
+    #[serde(default)]
+    windows_test: Vec<String>,
     #[allow(dead_code, reason = "for people reading the ledger")]
     notes: Option<String>,
 }
@@ -48,6 +55,11 @@ enum Status {
     Open,
     Done,
     Na,
+}
+
+/// The Windows shell's status where the ledger does not say.
+const fn open() -> Status {
+    Status::Open
 }
 
 /// The enums whose every variant must belong to a feature, with the ledger
@@ -104,7 +116,7 @@ fn files(dir: &Path, ext: &str, found: &mut Vec<PathBuf>) {
 /// Names of Rust functions marked `#[test]` (other attributes may sit between).
 fn rust_tests() -> BTreeSet<String> {
     let mut sources = Vec::new();
-    for dir in ["src", "crates", "tests", "examples"] {
+    for dir in ["src", "crates", "tests", "examples", "windows"] {
         files(&repo().join(dir), "rs", &mut sources);
     }
     let mut names = BTreeSet::new();
@@ -182,7 +194,21 @@ fn problems(ledger: &Ledger, rust: &BTreeSet<String>, swift: &BTreeSet<String>) 
         if f.egui_on_core && f.core_test.is_empty() {
             problems.push(format!("{id}: egui_on_core needs a core_test"));
         }
-        for test in f.core_test.iter().chain(&f.egui_test) {
+        match (f.windows, &f.na_windows) {
+            (Status::Na, None) => {
+                problems.push(format!("{id}: windows \"na\" needs na_windows saying why"));
+            }
+            (Status::Open | Status::Done, Some(_)) => {
+                problems.push(format!("{id}: na_windows is only for windows \"na\""));
+            }
+            _ => {}
+        }
+        for test in f
+            .core_test
+            .iter()
+            .chain(&f.egui_test)
+            .chain(&f.windows_test)
+        {
             if !rust.contains(test) {
                 problems.push(format!("{id}: no Rust test named {test}"));
             }
@@ -240,6 +266,20 @@ fn the_parity_ledger_matches_the_code() {
         count(Status::Open),
         count(Status::Na),
     );
+    let windows = |status| {
+        ledger
+            .feature
+            .iter()
+            .filter(|f| f.windows == status)
+            .count()
+    };
+    eprintln!(
+        "parity: the Windows app has {} of {} features ({} open, {} not wanted on Windows)",
+        windows(Status::Done),
+        ledger.feature.len() - windows(Status::Na),
+        windows(Status::Open),
+        windows(Status::Na),
+    );
 }
 
 #[test]
@@ -254,6 +294,10 @@ fn the_check_catches_a_missing_test_and_an_uncovered_event() {
         .expect("some feature introduced Navigate");
     navigate.events.retain(|e| e != "Navigate");
     navigate.swift_test.push("testThatDoesNotExist".into());
+    navigate
+        .windows_test
+        .push("a_windows_test_that_does_not_exist".into());
+    navigate.na_windows = Some("a reason without the status".into());
     let problems = problems(&ledger, &rust, &swift);
     assert!(
         problems
@@ -265,6 +309,18 @@ fn the_check_catches_a_missing_test_and_an_uncovered_event() {
         problems
             .iter()
             .any(|p| p.contains("no Swift test named testThatDoesNotExist")),
+        "{problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("no Rust test named a_windows_test_that_does_not_exist")),
+        "{problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("na_windows is only for windows")),
         "{problems:?}"
     );
 }

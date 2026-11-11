@@ -225,7 +225,7 @@ apple-perf out="": apple-generate
 apple-uitest: apple-generate
     cd {{apple_dir}} && {{apple_xcodebuild}} test -only-testing:DirFleetUITests
 
-# Check the parity ledger against the code and show how far the Mac app has come
+# Check the parity ledger against the code and show how far the Mac and Windows apps have come
 [group('native')]
 parity:
     cargo test -q -p dirfleet_ffi --test parity -- --nocapture
@@ -241,3 +241,34 @@ apple-open: apple-generate
 [macos]
 apple-clean:
     rm -rf {{apple_dir}}/generated {{apple_dir}}/build {{apple_dir}}/DirFleetNative.xcodeproj
+
+# Lint the native Windows shell (WinUI 3, `windows/`)
+[group('native')]
+[windows]
+windows-check:
+    cargo fmt -p dirfleet_windows -- --check
+    cargo clippy -p dirfleet_windows --all-targets -- -D warnings
+
+# Test the native Windows shell
+[group('native')]
+[windows]
+windows-test:
+    cargo test -p dirfleet_windows
+
+# Measure what the native Windows shell waits on the core for in folders of 10,000 and 100,000 entries
+[group('native')]
+[windows]
+windows-perf:
+    cargo test -p dirfleet_windows --release -- --ignored --nocapture perf_of
+
+# Build and launch the native Windows shell; arguments go to the app (`--folder C:\`, `--state-file f.json`)
+[group('native')]
+[windows]
+windows-run *args:
+    cargo run -p dirfleet_windows -- {{args}}
+
+# Build the native Windows shell's MSI into target/windows-package/installer (needs WiX 5); `-NoSmoke` skips starting the unpacked app
+[group('native')]
+[windows]
+windows-package *args:
+    powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File windows/packaging/package.ps1 {{args}}

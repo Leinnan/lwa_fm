@@ -103,7 +103,13 @@ impl CommandId {
         Self::ShortcutHelp,
     ];
 
+    /// The command's name, in the words of the system it runs on.
     pub const fn label(self) -> &'static str {
+        if cfg!(windows)
+            && let Some(label) = self.windows_label()
+        {
+            return label;
+        }
         match self {
             Self::Back => "Back",
             Self::Forward => "Forward",
@@ -146,6 +152,21 @@ impl CommandId {
             Self::AddToFavorites => "Add to Favorites",
             Self::ShortcutHelp => "Keyboard Shortcuts",
         }
+    }
+
+    /// The names Windows has its own words for.
+    const fn windows_label(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Up => "Up",
+            Self::MoveToTrash => "Move to Recycle Bin",
+            Self::CopyAsPath => "Copy as Path",
+            Self::QuickLook => "Preview",
+            Self::ShowInFinder => "Show in Explorer",
+            Self::GetInfo => "Properties",
+            Self::OpenTrash => "Go to Recycle Bin",
+            Self::EmptyTrash => "Empty Recycle Bin…",
+            _ => return None,
+        })
     }
 
     /// The shortcut on macOS, as its menus show it.

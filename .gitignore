@@ -21,3 +21,6 @@ static/resources
 apple/build/
 apple/generated/
 apple/*.xcodeproj
+
+# Per-machine Cargo overrides (the local reactor fork, see docs/windows-native.md)
+/.cargo/config.toml

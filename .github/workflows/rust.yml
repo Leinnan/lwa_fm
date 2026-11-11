@@ -82,3 +82,30 @@ jobs:
           boltffi --version 2>/dev/null | grep -q " $version$" || cargo install boltffi_cli --version "=$version" --locked
       - name: Test the native shell
         run: just apple-test
+
+  # The native Windows shell: WinUI 3 from Rust on the same core. Its build
+  # script downloads the Windows App SDK runtime, so the job needs the network.
+  windows-native:
+    name: native Windows shell
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: native-${{ runner.os }}-
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: extractions/setup-just@v2
+      - name: Lint the native shell
+        run: just windows-check
+      - name: Test the native shell
+        run: just windows-test

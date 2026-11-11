@@ -341,6 +341,7 @@ fn folder_list(ui: &mut Ui, folders: &[Crumb]) {
 mod tests {
     use super::*;
 
+    #[cfg(not(windows))]
     fn parts(path: &str) -> Vec<TopDisplayPathPart> {
         let mut display = super::super::top_bottom::TopDisplayPath::default();
         display.build(Path::new(path));

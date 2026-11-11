@@ -96,6 +96,18 @@ fn terminal(folder: &str, app: &str) -> Result<(), String> {
     result.map_err(|error| failed("Could not open a terminal", error))
 }
 
+/// Explorer's Properties for each path. The shell shows them on threads of
+/// its own, so this is back as soon as it has taken the requests.
+#[cfg(windows)]
+fn get_info(paths: &[String]) -> Result<(), String> {
+    for path in paths {
+        dirfleet_winshell::open_properties(0, Path::new(path))
+            .map_err(|error| failed(&format!("Could not open Properties for {path}"), error))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn get_info(paths: &[String]) -> Result<(), String> {
     // The paths are passed as arguments, so they need no quoting.
     const SCRIPT: &str = "on run argv
