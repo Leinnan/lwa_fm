@@ -13,7 +13,7 @@ use windows::{
     Win32::{
         System::{
             Com::{IBindCtx, IDataObject},
-            Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, IDropSource},
+            Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource},
         },
         UI::Shell::{BHID_DataObject, SHCreateShellItemArrayFromIDLists, SHDoDragDrop},
     },
@@ -60,17 +60,29 @@ impl DataObject {
     /// tracks the button itself has to be told it is up.
     #[must_use]
     pub fn drag(&self, owner: isize) -> DragOutcome {
+        self.drag_with(owner, None)
+    }
+
+    /// As [`Self::drag`], from a window that gets no mouse messages (a `WinUI`
+    /// one): the loop is kept going from a helper thread, and the button is
+    /// read as it is. Move is offered too, so a drop inside the same
+    /// application can move the files.
+    #[must_use]
+    pub fn drag_polled(&self, owner: isize) -> DragOutcome {
+        let _pulse = crate::polled_drag::Pulse::start();
+        self.drag_with(owner, Some(&crate::polled_drag::source()))
+    }
+
+    fn drag_with(&self, owner: isize, source: Option<&IDropSource>) -> DragOutcome {
         let _ole = Ole::enter();
-        // SAFETY: the data object is live. With no drop source the shell
-        // supplies its own, which also draws the drag image.
-        let effect = unsafe {
-            SHDoDragDrop(
-                optional_hwnd(owner),
-                &self.object,
-                None::<&IDropSource>,
-                DROPEFFECT_COPY | DROPEFFECT_LINK,
-            )
+        let effects = if source.is_some() {
+            DROPEFFECT_COPY | DROPEFFECT_LINK | DROPEFFECT_MOVE
+        } else {
+            DROPEFFECT_COPY | DROPEFFECT_LINK
         };
+        // SAFETY: the data object is live. With no drop source the shell
+        // supplies its own; either way it draws the drag image.
+        let effect = unsafe { SHDoDragDrop(optional_hwnd(owner), &self.object, source, effects) };
         match effect {
             Ok(effect) if effect.contains(DROPEFFECT_COPY) => DragOutcome::Copied,
             Ok(effect) if effect.contains(DROPEFFECT_LINK) => DragOutcome::Linked,
@@ -119,6 +131,16 @@ pub fn data_object(paths: &[PathBuf]) -> Result<DataObject, Error> {
 pub fn start_drag(owner: isize, paths: &[PathBuf]) -> DragOutcome {
     match data_object(paths) {
         Ok(data) => data.drag(owner),
+        Err(error) => DragOutcome::Failed(error.into()),
+    }
+}
+
+/// As [`start_drag`], from a window that gets no mouse messages; see
+/// [`DataObject::drag_polled`].
+#[must_use]
+pub fn start_polled_drag(owner: isize, paths: &[PathBuf]) -> DragOutcome {
+    match data_object(paths) {
+        Ok(data) => data.drag_polled(owner),
         Err(error) => DragOutcome::Failed(error.into()),
     }
 }

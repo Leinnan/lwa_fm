@@ -5,6 +5,7 @@
 //! of it, so they are taken out of the window ("chrome") into [`TabRows`].
 //! Every part sits behind an `Rc`; a part equal to the one before keeps the
 //! old `Rc`, and components compare their inputs by those.
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use dirfleet_core::app::{
@@ -41,6 +42,30 @@ impl TabRows {
         index
             .checked_sub(self.first_row)
             .and_then(|offset| self.rows.get(offset as usize))
+    }
+
+    /// Where the entry `row` is on disk. `None` for what has no path of its
+    /// own to act on: an item in the Recycle Bin, a tab without a folder.
+    pub fn path_of(&self, row: &RowView) -> Option<PathBuf> {
+        (!self.in_trash && !self.path.is_empty())
+            .then(|| Path::new(&self.path).join(&row.folder).join(&row.name))
+    }
+
+    /// What dragging the entry at `index` takes along: every selected entry
+    /// the core has sent when it is one of them, and otherwise it alone.
+    pub fn dragged_from(&self, index: u32) -> Vec<PathBuf> {
+        let Some(pressed) = self.row(index) else {
+            return Vec::new();
+        };
+        if pressed.selected {
+            self.rows
+                .iter()
+                .filter(|row| row.selected)
+                .filter_map(|row| self.path_of(row))
+                .collect()
+        } else {
+            self.path_of(pressed).into_iter().collect()
+        }
     }
 
     /// Takes the fast-changing parts out of `tab`, keeping rows equal to `old`'s.

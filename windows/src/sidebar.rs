@@ -3,13 +3,33 @@
 use dirfleet_core::app::{Event, SidebarIcon, SidebarItem, SidebarSection, SidebarSectionView};
 use dirfleet_core::drives::DriveKind;
 use windows_reactor::{
-    Border, Brush, Button, ButtonStyle, Color, Grid, GridLength, HorizontalAlignment, Orientation,
-    ProgressBar, ScrollBarVisibility, ScrollViewer, StackPanel, TextBlock, TextTrimming,
-    ThemeBrush, Thickness, TooltipExt as _, VerticalAlignment, View, keyed,
+    Border, Brush, Button, ButtonStyle, Callback, Color, DragDropAction, DragDropOperation,
+    DragDropPolicy, DroppedData, Grid, GridLength, HorizontalAlignment, Orientation,
+    PointerEventInfo, ProgressBar, ScrollBarVisibility, ScrollViewer, StackPanel, TextBlock,
+    TextTrimming, ThemeBrush, Thickness, TooltipExt as _, VerticalAlignment, View, keyed,
 };
 
 use crate::core_link::CoreLink;
-use crate::files::glyph;
+use crate::files::{Dropped, glyph};
+use crate::menus::SidebarMenu;
+
+/// What the sidebar tells the window.
+#[derive(Clone, Copy)]
+pub struct Hooks<'a> {
+    /// A place was right-clicked.
+    pub on_menu: &'a Callback<SidebarMenu>,
+    /// Files were dropped on a place.
+    pub on_drop: &'a Callback<Dropped>,
+}
+
+/// The menu a right click on `item` asks for.
+fn menu_of(item: &SidebarItem) -> SidebarMenu {
+    match item.saved_search {
+        Some(id) => SidebarMenu::Saved(id),
+        None if item.trash => SidebarMenu::Bin,
+        None => SidebarMenu::Place(item.path.clone()),
+    }
+}
 
 /// The sidebar's width.
 pub const WIDTH: f64 = 220.0;
@@ -51,11 +71,16 @@ fn chosen(item: &SidebarItem, tab: u32) -> Event {
 }
 
 /// The window's sidebar; rows act on tab `tab`, the one with the focus.
-pub fn sidebar(core: &CoreLink, tab: u32, sections: &[SidebarSectionView]) -> View {
+pub fn sidebar(
+    core: &CoreLink,
+    tab: u32,
+    sections: &[SidebarSectionView],
+    hooks: Hooks<'_>,
+) -> View {
     let parts = sections.iter().zip(0u32..).map(|(section, position)| {
         let mut lines: Vec<View> = vec![heading(core, section)];
         if !section.collapsed {
-            lines.extend(section.items.iter().map(|item| row(core, tab, item)));
+            lines.extend(section.items.iter().map(|item| row(core, tab, item, hooks)));
         }
         keyed(
             position,
@@ -113,8 +138,46 @@ fn heading(core: &CoreLink, section: &SidebarSectionView) -> View {
         .into()
 }
 
+/// The area a place fills: it takes the right click that asks for the
+/// place's menu, and the files dropped on it.
+fn frame(tab: u32, item: &SidebarItem, fill: Brush, hooks: Hooks<'_>) -> Border {
+    let asked = {
+        let (on_menu, menu) = (hooks.on_menu.clone(), menu_of(item));
+        move |info: PointerEventInfo| {
+            if info.is_right_button_pressed {
+                on_menu.call(menu.clone());
+            }
+        }
+    };
+    let frame = Border::new()
+        .corner_radius(4.0)
+        .background(fill)
+        .on_pointer_pressed(asked);
+    // Files can be dropped on a folder, a drive or the Recycle Bin.
+    if item.saved_search.is_some() {
+        frame
+    } else {
+        let on_drop = hooks.on_drop.clone();
+        let (target, on_trash) = (item.path.clone(), item.trash);
+        frame
+            .drop_policy(
+                DragDropPolicy::new().storage_items(DragDropAction::new(DragDropOperation::Move)),
+            )
+            .on_drop(move |data: DroppedData| {
+                if let DroppedData::StorageItems(items) = data {
+                    on_drop.call(Dropped {
+                        tab,
+                        paths: items.into_iter().map(|item| item.path).collect(),
+                        target: (!on_trash).then(|| target.clone()),
+                        on_trash,
+                    });
+                }
+            })
+    }
+}
+
 /// One place: its icon and name; a drive also shows how full it is and can be ejected.
-fn row(core: &CoreLink, tab: u32, item: &SidebarItem) -> View {
+fn row(core: &CoreLink, tab: u32, item: &SidebarItem, hooks: Hooks<'_>) -> View {
     let mut label: Vec<View> = vec![
         TextBlock::new()
             .text(item.title.clone())
@@ -188,9 +251,7 @@ fn row(core: &CoreLink, tab: u32, item: &SidebarItem) -> View {
     } else {
         (Color::transparent().into(), Color::transparent().into())
     };
-    Border::new()
-        .corner_radius(4.0)
-        .background(fill)
+    frame(tab, item, fill, hooks)
         .content(
             Grid::new()
                 .columns([GridLength::Pixel(3.0), GridLength::STAR, GridLength::Auto])

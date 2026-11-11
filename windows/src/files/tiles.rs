@@ -10,7 +10,7 @@ use windows_reactor::{
 
 use super::entry_icon;
 use super::layout::Tile;
-use super::press::{PressClaim, Presses};
+use super::press::{DragWatch, EntryHooks, PressClaim, Presses};
 use super::row::entry_fill;
 use crate::core_link::CoreLink;
 
@@ -24,6 +24,7 @@ pub struct TileLineInput {
     pub entries: Vec<Option<Rc<RowView>>>,
     pub tile: Tile,
     pub claim: PressClaim,
+    pub hooks: EntryHooks,
 }
 
 pub struct TileLine {
@@ -34,12 +35,30 @@ pub struct TileLine {
     hovered: Option<u32>,
     presses: Presses,
     claim: PressClaim,
+    /// Which of the line's slots hold a selected entry.
+    selected: Vec<bool>,
+    /// The click of a press on a selected tile, sent when the button goes up
+    /// unless the press became a drag.
+    held: Option<Event>,
+    watch: DragWatch,
+    on_drag: Callback<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum TileMessage {
     Pressed(u32, PointerEventInfo),
+    Released,
+    /// The press on this slot has moved far enough to drag its tile.
+    Dragged(u32),
     Hovered(u32, bool),
+}
+
+/// Which slots of a line hold a selected entry.
+fn selected(entries: &[Option<Rc<RowView>>]) -> Vec<bool> {
+    entries
+        .iter()
+        .map(|entry| entry.as_ref().is_some_and(|row| row.selected))
+        .collect()
 }
 
 impl Component for TileLine {
@@ -54,6 +73,10 @@ impl Component for TileLine {
             hovered: None,
             presses: Presses::default(),
             claim: input.claim.clone(),
+            selected: selected(&input.entries),
+            held: None,
+            watch: DragWatch::default(),
+            on_drag: input.hooks.on_drag.clone(),
         }
     }
 
@@ -61,16 +84,30 @@ impl Component for TileLine {
         if (self.tab, self.first) != (input.tab, input.first) {
             self.presses.forget();
             self.hovered = None;
+            self.held = None;
         }
         self.tab = input.tab;
         self.first = input.first;
+        self.selected = selected(&input.entries);
+        self.on_drag = input.hooks.on_drag.clone();
     }
 
     fn update(&mut self, message: TileMessage, _: &ComponentContext<Self>) {
         match message {
             TileMessage::Pressed(slot, info) => {
-                self.presses
-                    .press(&self.core, self.tab, self.first + slot, &info);
+                let selected = self.selected.get(slot as usize).copied().unwrap_or(false);
+                self.held =
+                    self.presses
+                        .press(&self.core, self.tab, self.first + slot, &info, selected);
+            }
+            TileMessage::Released => {
+                if let Some(click) = self.held.take() {
+                    self.core.send(click);
+                }
+            }
+            TileMessage::Dragged(slot) => {
+                self.held = None;
+                self.on_drag.call(self.first + slot);
             }
             TileMessage::Hovered(slot, inside) => {
                 if inside {
@@ -88,6 +125,7 @@ impl Component for TileLine {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "a tile, top to bottom")]
     fn view(&self, input: &TileLineInput, context: &mut ViewContext<Self>) -> View {
         let tile = input.tile;
         let tiles: Vec<View> = input
@@ -114,10 +152,27 @@ impl Component for TileLine {
                 };
                 let sender = context.sender();
                 let claim = self.claim.clone();
+                let watch = self.watch.clone();
                 let pressed = Callback::new(move |info: PointerEventInfo| {
                     claim.claim(&info);
+                    watch.pressed(slot, &info);
                     _ = sender.send(TileMessage::Pressed(slot, info));
                 });
+                let (watch, dragged) = (self.watch.clone(), context.sender());
+                let moved = move |info: PointerEventInfo| {
+                    if let Some(slot) = watch.moved(&info) {
+                        _ = dragged.send(TileMessage::Dragged(slot));
+                    }
+                };
+                let (watch, let_go) = (self.watch.clone(), context.sender());
+                let released = move |_: PointerEventInfo| {
+                    watch.released();
+                    _ = let_go.send(TileMessage::Released);
+                };
+                // Files can be dropped on a folder.
+                let frame = input
+                    .hooks
+                    .taking_drops(frame, row.is_dir, input.first + slot);
                 let mut lines = vec![
                     Border::new()
                         .width(tile.icon)
@@ -157,6 +212,8 @@ impl Component for TileLine {
                     .opacity(if row.cut { 0.5 } else { 1.0 })
                     .automation_name(row.name.clone())
                     .on_pointer_pressed(pressed)
+                    .on_pointer_moved(moved)
+                    .on_pointer_released(released)
                     .on_pointer_entered(
                         context
                             .callback(move |_: PointerEventInfo| TileMessage::Hovered(slot, true)),

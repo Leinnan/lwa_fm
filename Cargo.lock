@@ -1603,6 +1603,7 @@ version = "0.0.1"
 dependencies = [
  "log",
  "windows 0.59.0",
+ "windows-core 0.59.0",
 ]
 
 [[package]]

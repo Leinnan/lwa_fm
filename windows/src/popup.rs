@@ -5,15 +5,80 @@
 //! call [`show`] from [`crate::ui_thread::defer`], never from a reactor callback.
 #![expect(unsafe_code, reason = "Win32 popup menus")]
 
+use std::sync::atomic::{AtomicI32, Ordering};
+
+use dirfleet_core::app::Appearance;
 use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, HMENU, MF_CHECKED, MF_GRAYED,
     MF_POPUP, MF_SEPARATOR, MF_STRING, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     TrackPopupMenuEx,
 };
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HSTRING, PCSTR, PCWSTR, w};
 
 use crate::menus::{Action, Entry};
+
+/// `uxtheme.dll` exports without a name: `SetPreferredAppMode` and
+/// `FlushMenuThemes`.
+const SET_PREFERRED_APP_MODE: usize = 135;
+const FLUSH_MENU_THEMES: usize = 136;
+
+/// The mode last set, so it is set again only when the appearance changes.
+static MODE: AtomicI32 = AtomicI32::new(-1);
+
+/// What `SetPreferredAppMode` is told for an appearance: follow the system's
+/// setting, or be dark or light whatever it says.
+const fn app_mode(appearance: Appearance) -> i32 {
+    match appearance {
+        Appearance::System => 1,
+        Appearance::Dark => 2,
+        Appearance::Light => 3,
+    }
+}
+
+/// Makes the process's popup menus, Explorer's among them, look as the app
+/// does. Cheap to call again with the same appearance.
+///
+/// Win32 menus follow a mode set through `uxtheme.dll` exports that have no
+/// documented name; they have kept their ordinals since Windows 10 1903.
+/// Where they are missing the menus stay light.
+pub fn follow(appearance: Appearance) {
+    type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
+    type FlushMenuThemes = unsafe extern "system" fn();
+
+    let mode = app_mode(appearance);
+    if MODE.swap(mode, Ordering::Relaxed) == mode {
+        return;
+    }
+    // SAFETY: loads a system library by name; it stays loaded.
+    let Ok(module) = (unsafe { LoadLibraryW(w!("uxtheme.dll")) }) else {
+        return;
+    };
+    // SAFETY: an ordinal is a valid name for `GetProcAddress`: a value below
+    // 0x10000 in the pointer.
+    let export = |ordinal: usize| unsafe { GetProcAddress(module, PCSTR(ordinal as *const u8)) };
+    let (Some(set_mode), Some(flush)) = (export(SET_PREFERRED_APP_MODE), export(FLUSH_MENU_THEMES))
+    else {
+        return;
+    };
+    // SAFETY: these are the exports' signatures on every Windows that has them.
+    unsafe {
+        let set_mode = std::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            SetPreferredAppMode,
+        >(set_mode);
+        let flush =
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, FlushMenuThemes>(flush);
+        set_mode(mode);
+        flush();
+    }
+}
+
+/// A label as a menu takes it: a lone `&` would underline the next letter.
+fn menu_label(label: &str) -> HSTRING {
+    HSTRING::from(label.replace('&', "&&"))
+}
 
 /// Shows `entries` at the pointer, owned by `owner`, and returns what was
 /// chosen; `None` when the menu was dismissed.
@@ -69,19 +134,13 @@ unsafe fn build(entries: &[Entry], actions: &mut Vec<Action>) -> Option<HMENU> {
                     if *checked {
                         flags |= MF_CHECKED;
                     }
-                    AppendMenuW(menu, flags, actions.len(), &HSTRING::from(label.as_str()))
+                    AppendMenuW(menu, flags, actions.len(), &menu_label(label))
                 }
                 // The parent owns a submenu once appended, and destroys it.
-                Entry::Submenu { label, entries } => {
-                    build(entries, actions).map_or(Ok(()), |submenu| {
-                        AppendMenuW(
-                            menu,
-                            MF_POPUP,
-                            submenu.0 as usize,
-                            &HSTRING::from(label.as_str()),
-                        )
-                    })
-                }
+                Entry::Submenu { label, entries } => build(entries, actions)
+                    .map_or(Ok(()), |submenu| {
+                        AppendMenuW(menu, MF_POPUP, submenu.0 as usize, &menu_label(label))
+                    }),
             };
             if appended.is_err() {
                 let _ = DestroyMenu(menu);
@@ -89,5 +148,23 @@ unsafe fn build(entries: &[Entry], actions: &mut Vec<Action>) -> Option<HMENU> {
             }
         }
         Some(menu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ampersand_in_a_name_is_shown_and_not_taken_for_a_shortcut() {
+        assert_eq!(menu_label("Tom & Jerry").to_string(), "Tom && Jerry");
+        assert_eq!(menu_label("Copy	Ctrl+C").to_string(), "Copy	Ctrl+C");
+    }
+
+    #[test]
+    fn menus_follow_the_system_unless_the_app_is_set_dark_or_light() {
+        assert_eq!(app_mode(Appearance::System), 1);
+        assert_eq!(app_mode(Appearance::Dark), 2);
+        assert_eq!(app_mode(Appearance::Light), 3);
     }
 }

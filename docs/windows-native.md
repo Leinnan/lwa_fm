@@ -192,8 +192,8 @@ Stretch after parity: rubber-band selection, Fluent context menus, tab tear-out.
 
 ## Status
 
-**Milestones 0 to 3 and 6 are built, 4, 5 and 7 mostly.** `just parity` counts the shell
-at 184 of the ledger's 227 wanted features.
+**Milestones 0 to 6 are built, 7 mostly.** `just parity` counts the shell at 190 of the
+ledger's 227 wanted features.
 
 The reactor fork is published (<https://github.com/Leinnan/windows-rs>, branch `dirfleet`)
 and pinned by rev in `windows/Cargo.toml`.
@@ -203,15 +203,17 @@ and pinned by rev in `windows/Cargo.toml`.
 | 0 Spike | Done. 100,000-file folder, release build: first rows 0.49 s after launch, view model 0.26 ms per jump, 135 MB. |
 | 1 Shell foundation | Done: multiple windows, close and quit, frames saved and restored, activation, appearance, folder and app pickers, shortcuts from the core's table, the More menu. |
 | 2 Browsing | Done: split panes with splitters, tabs (in the title bar while the window has one pane, above each pane when it has several), header, path bar with folding and folder lists, list with sortable, resizable, optional columns, icon grid in four sizes whose tiles share the line's width, thumbnails, shell icons, keyboard, empty and error states, status line. |
-| 3 Sidebar and navigation | Done: sections that fold, places, drives with capacity and eject (with its confirmation), the Recycle Bin, Go to Folder, mouse Back/Forward. Reordering favorites and sections is not there yet. |
-| 4 File operations | Mostly: context menus for the selection, Recycle Bin items and the folder (native popups, Explorer's menu behind "More options"), inline rename, batch rename, trash/delete/empty with confirmations, conflicts, Move To/Copy To, operation progress with Stop, toasts, files dropped in with the move-or-copy question. Missing: dragging out, dropping on a folder row or a sidebar place, rename in the icon grid, the activity list, menus on sidebar rows and column headers, dark menus. |
-| 5 Search, inspector, Quick Look, settings | Mostly: search box with filters, options and Stop, the inspector, the command palette, the shortcuts list, Settings, Quick Look for images and text. Missing: highlighted matches, saving and editing searches, Explorer's preview handlers in Quick Look. |
+| 3 Sidebar and navigation | Done: sections that fold, places, drives with capacity and eject (with its confirmation), the Recycle Bin, saved searches, Go to Folder, mouse Back/Forward; a right click on a place opens its menu, and files can be dropped on a folder, a drive or the Recycle Bin. Reordering favorites and sections is not there yet. |
+| 4 File operations | Done: context menus for the selection, Recycle Bin items and the folder (native popups that follow the app's appearance, Explorer's menu behind "More options"), inline rename, batch rename, trash/delete/empty with confirmations, conflicts, Move To/Copy To, operation progress with Stop, toasts, files dropped in (on the folder shown or on a folder in it) with the move-or-copy question, and entries dragged out to other programs or other panes. Missing: rename in the icon grid, the activity list, menus on crumbs and column headers. |
+| 5 Search, inspector, Quick Look, settings | Done: search box with filters, options and Stop, matches in bold in the list, saving a search (Ctrl+S), its mark with Update and Revert, a saved search's menu (run, edit, duplicate, copy, move, delete) and editor, the inspector, the command palette, the shortcuts list, Settings, and Quick Look: images and text drawn here, other kinds by the preview handler the system has for them. Missing: matches marked in the icon grid, drag to reorder saved searches. |
 | 6 Plugins and media | Done: the plugins' bar under the folder, forms (all field kinds; a file's path is typed, a folder's can be picked), results, jobs with Stop, inspector sections, actions in menus with their confirmation, shortcuts, the Plugins part of Settings, and the video thumbnail picker. |
 | 7 Ship | Mostly: names for screen readers on the controls that had none, a perf measurement (`just windows-perf`), the ledger's `windows` column, a CI job (lint and tests), and an MSI (`just windows-package`). Missing: a perf run that drives the window itself, a pass with a screen reader, the MSI in the release workflow, signing, arm64. |
 
 Shared changes made along the way:
 - `crates/dirfleet_winshell`: the Win32 shell helpers (pickers, Properties, Open With,
-  Explorer's context menu, drag data object), moved out of the egui app, which now uses them.
+  Explorer's context menu, drag data object), moved out of the egui app, which now uses them;
+  and for this shell a drag loop that works without mouse messages (`start_polled_drag`) and
+  a host for the system's preview handlers (`PreviewHost`).
 - `dirfleet_effects`: Get Info opens the Properties dialog on Windows.
 - `dirfleet_core`: command names in Windows wording on Windows ("Recycle Bin", "Explorer",
   "Properties").
@@ -227,14 +229,20 @@ F2 rename committed to disk, the selection's menu and Duplicate from it, Select 
 palette, the batch rename dialog, Settings with its Plugins part, live search, the
 inspector, Quick Look on a text file, an animated GIF playing in a tile, and the Git plugin
 in a scratch repository: its bar, the Commit form filled and submitted, the commit made and
-its toast. The thumbnail picker was checked by hand.
+its toast. Also a search with its matches in bold, saving it under a name from the palette,
+the saved search in the sidebar and its mark over the results, and Quick Look on a PDF: the
+system's preview drawn in the window, following its size, and gone with it. The thumbnail
+picker was checked by hand.
 
 Not checked, because pointer input cannot be driven without a person: clicking and
 double-clicking rows, Ctrl/Shift clicks, right-click (the menu was opened with the Menu
 key), dragging splitters and column edges, tab reordering, hover previews, the extra mouse
-buttons, dropping files in. Chords with Ctrl, Shift or Alt were not sent either. The
+buttons, dropping files in (on the view, a folder in it, or a place in the sidebar),
+dragging entries out, and the menus a right click opens in the sidebar, with the saved
+search editor behind one of them. Chords with Ctrl, Shift or Alt were not sent either. The
 pickers, the conflict dialog, Move To/Copy To, Explorer's menu, a plugin's results, its
-jobs, its inspector sections and its shortcuts were not opened.
+jobs, its inspector sections and its shortcuts were not opened. The popup menus were not
+looked at since they follow the app's appearance.
 
 Measured by `just windows-perf` (the core and its handlers without a window, debug build):
 100,000 entries listed in 0.4 s with 150 rows sent, a jump anywhere in the folder answered
@@ -251,7 +259,13 @@ wrote if it does.
 Known gaps:
 - Icons are by kind of file; programs, shortcuts and folders with their own icon show the
   generic one.
-- Context menus draw light in a dark app.
+- A drop on a folder may reach the shell twice, from the folder's entry and from the view
+  around it; the view waits 60 ms for both and takes the folder's. Whether both arrive was
+  not seen, since drops cannot be driven.
+- Dragging takes the selected entries the core has sent, like Explorer's menu: a selection
+  reaching far out of sight is dragged in part.
+- The system's preview has the keyboard once it is clicked: Escape and the arrows then go
+  to it, not to Quick Look.
 - Explorer's menu and "More options" only cover selected rows the core has sent.
 - A plugin's file field has no picker; only folders have one.
 - 26 tests of `dirfleet_core` and one of `dirfleet_effects` fail on Windows for path

@@ -15,6 +15,17 @@ pub enum MenuOn {
     Folder,
 }
 
+/// What a right click in the sidebar was on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarMenu {
+    /// A folder or a drive.
+    Place(String),
+    /// The Recycle Bin.
+    Bin,
+    /// A saved search.
+    Saved(u64),
+}
+
 /// What choosing a menu item does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -28,6 +39,8 @@ pub enum Action {
     Shell,
     /// A plugin's action; `confirm` is asked first when it is not empty.
     Plugin { action: String, confirm: String },
+    /// Open the editor of a saved search.
+    EditSearch(u64),
 }
 
 /// One line of a menu.
@@ -359,6 +372,64 @@ impl Context<'_> {
         ]
     }
 
+    /// The menu of a place in the sidebar.
+    pub fn sidebar(&self, on: &SidebarMenu) -> Vec<Entry> {
+        match on {
+            SidebarMenu::Place(path) => self.place(path),
+            SidebarMenu::Bin => vec![
+                self.command(CommandId::OpenTrash),
+                self.command(CommandId::EmptyTrash),
+            ],
+            SidebarMenu::Saved(id) => self.saved(*id),
+        }
+    }
+
+    /// The menu of a saved search: run it, change it, move it among the
+    /// others, or delete it.
+    fn saved(&self, id: u64) -> Vec<Entry> {
+        let tab = self.tab.id;
+        let searches = &self.shared.saved_searches;
+        let Some(position) = searches.iter().position(|saved| saved.id == id) else {
+            return Vec::new();
+        };
+        let at = position as u32;
+        vec![
+            Self::send("Run", Event::RunSavedSearch { tab, id }),
+            Self::send(
+                "Run in New Window",
+                Event::RunSavedSearchInNewWindow { tab, id },
+            ),
+            Entry::item("Edit…", Action::EditSearch(id)),
+            Self::send("Duplicate", Event::DuplicateSavedSearch { id }),
+            // The core copies the text it is given as it is.
+            Self::send(
+                "Copy Query",
+                Event::CopyPath {
+                    path: searches[position].text.clone(),
+                },
+            ),
+            Entry::Separator,
+            Self::send(
+                "Move Up",
+                Event::MoveSavedSearch {
+                    from: at,
+                    to: at.saturating_sub(1),
+                },
+            )
+            .enabled(position > 0),
+            Self::send(
+                "Move Down",
+                Event::MoveSavedSearch {
+                    from: at,
+                    to: at + 1,
+                },
+            )
+            .enabled(position + 1 < searches.len()),
+            Entry::Separator,
+            Self::send("Delete", Event::DeleteSavedSearch { id }),
+        ]
+    }
+
     fn command_label(&self, command: CommandId) -> String {
         self.shared
             .commands
@@ -433,6 +504,44 @@ mod tests {
         assert!(!labels(&video).contains(&"Reset Thumbnail"));
         let chosen = menu(Some((2, ThumbnailChoice::Chosen)));
         assert!(labels(&chosen).contains(&"Reset Thumbnail"));
+    }
+
+    #[test]
+    fn a_saved_search_moves_only_where_there_is_room() {
+        use dirfleet_core::app::SavedSearchView;
+        let saved = |id| SavedSearchView {
+            id,
+            name: format!("Search {id}"),
+            summary: String::new(),
+            text: "report".to_owned(),
+            case_sensitive: false,
+            depth: 1,
+            any: false,
+            favorites: false,
+        };
+        let shared = ViewModel {
+            saved_searches: vec![saved(5), saved(6)],
+            ..ViewModel::default()
+        };
+        let tab = TabViewModel::default();
+        let can = |id: u64, label: &str| {
+            context(&shared, &tab)
+                .sidebar(&SidebarMenu::Saved(id))
+                .into_iter()
+                .find_map(|entry| match entry {
+                    Entry::Item {
+                        label: found,
+                        enabled,
+                        ..
+                    } if found == label => Some(enabled),
+                    _ => None,
+                })
+        };
+        assert_eq!(can(5, "Move Up"), Some(false));
+        assert_eq!(can(5, "Move Down"), Some(true));
+        assert_eq!(can(6, "Move Up"), Some(true));
+        assert_eq!(can(6, "Move Down"), Some(false));
+        assert_eq!(can(9, "Move Up"), None, "a search that is gone has no menu");
     }
 
     #[test]

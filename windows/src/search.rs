@@ -208,32 +208,35 @@ pub fn search_box(
 /// through subfolders is doing, with a way to stop it.
 pub fn chips(core: &CoreLink, tab: &TabViewModel) -> Option<View> {
     let search = tab.search.as_ref()?;
-    if search.chips.is_empty() && !search.searching {
+    // The saved search this one came from stands before its filters.
+    let mut parts = crate::saved::badge(core, tab);
+    if search.chips.is_empty() && !search.searching && parts.is_empty() {
         return None;
     }
     let id = tab.id;
-    let mut parts: Vec<View> = search
-        .chips
-        .iter()
-        .zip(0u32..)
-        .map(|(chip, index)| {
-            let core = core.clone();
-            let label = TextBlock::new()
-                .text(format!("{}  ✕", chip.token))
-                .font_size(12.0);
-            let button = Button::new()
-                .automation_name(format!("Remove filter {}", chip.token))
-                .content(match &chip.error {
-                    Some(_) => label.foreground(Color::rgb(0xE0, 0x50, 0x50)),
-                    None => label,
-                })
-                .on_click(move || core.send(Event::RemoveSearchChip { tab: id, index }));
-            match &chip.error {
-                Some(error) => button.tooltip(error),
-                None => button.into(),
-            }
-        })
-        .collect();
+    parts.extend(
+        search
+            .chips
+            .iter()
+            .zip(0u32..)
+            .map(|(chip, index)| -> View {
+                let core = core.clone();
+                let label = TextBlock::new()
+                    .text(format!("{}  ✕", chip.token))
+                    .font_size(12.0);
+                let button = Button::new()
+                    .automation_name(format!("Remove filter {}", chip.token))
+                    .content(match &chip.error {
+                        Some(_) => label.foreground(Color::rgb(0xE0, 0x50, 0x50)),
+                        None => label,
+                    })
+                    .on_click(move || core.send(Event::RemoveSearchChip { tab: id, index }));
+                match &chip.error {
+                    Some(error) => button.tooltip(error),
+                    None => button.into(),
+                }
+            }),
+    );
     if search.searching {
         let core = core.clone();
         parts.push(

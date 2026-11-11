@@ -28,12 +28,17 @@ mod explorer;
 #[cfg(windows)]
 mod picker;
 #[cfg(windows)]
+mod polled_drag;
+#[cfg(windows)]
+mod preview_handler;
+#[cfg(windows)]
 mod raw;
 
 #[cfg(windows)]
 pub use self::{
-    drag::{DataObject, DragOutcome, data_object, start_drag},
+    drag::{DataObject, DragOutcome, data_object, start_drag, start_polled_drag},
     error::Error,
     explorer::{display_in_explorer, open_properties, open_with},
     picker::{pick_folder, pick_program},
+    preview_handler::{Insets, PreviewHost, has_preview_handler},
 };

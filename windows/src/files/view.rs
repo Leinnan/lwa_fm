@@ -21,7 +21,7 @@ use windows_reactor::{
 use super::Dropped;
 use super::columns::{self, Cell, ColumnSet, HEADER_HEIGHT, HeaderCallbacks, Resize};
 use super::layout::{Metrics, Motion, Span};
-use super::press::PressClaim;
+use super::press::{EntryHooks, PressClaim};
 use super::row::{Row, RowInput};
 use super::tiles::{TileLine, TileLineInput};
 use crate::core_link::CoreLink;
@@ -38,6 +38,9 @@ const SCROLL_TRIES: u8 = 10;
 /// Likewise for the keyboard focus, refused until the view is laid out.
 const FOCUS_RETRY: Duration = Duration::from_millis(40);
 const FOCUS_TRIES: u8 = 10;
+/// A drop on a folder may be told twice, by the folder's entry and by the
+/// view around it, in either order: the view waits this long for both.
+const DROP_SETTLE: Duration = Duration::from_millis(60);
 
 #[derive(Clone, PartialEq)]
 pub struct FileViewInput {
@@ -91,6 +94,12 @@ pub struct FileView {
     /// Dropping it cancels the next try at taking the keyboard.
     keys_timer: Option<ComponentTimer>,
     claim: PressClaim,
+    hooks: EntryHooks,
+    /// Dropped files and the folder they were dropped on (the tab's own when
+    /// `None`), until both tellings of the drop are in.
+    dropping: Option<(Vec<String>, Option<String>)>,
+    /// Dropping it would lose the drop.
+    drop_timer: Option<ComponentTimer>,
     /// A name is being typed in a row, so keys are left to its text box.
     renaming: Rc<std::cell::Cell<bool>>,
     on_key: RoutedCallback<KeyEventInfo>,
@@ -124,6 +133,12 @@ pub enum ViewMessage {
     /// A right click, on an entry or beside them.
     Menu(MenuOn),
     Dropped(DroppedData),
+    /// Files were dropped on the entry at this position, a folder.
+    EntryDropped(u32, DroppedData),
+    /// Both tellings of a drop have had their time.
+    DropSettled,
+    /// The entry at this position is being dragged.
+    EntryDragged(u32),
     GripPressed(Column, f64, PointerEventInfo),
     GripMoved(PointerEventInfo),
     GripReleased,
@@ -140,11 +155,12 @@ impl FileView {
         metrics: Metrics,
         cells: &Rc<Vec<Cell>>,
         width: f64,
-        claim: &PressClaim,
+        (claim, hooks): (&PressClaim, &EntryHooks),
     ) -> VirtualSource {
         let input = input.clone();
         let cells = Rc::clone(cells);
         let claim = claim.clone();
+        let hooks = hooks.clone();
         let total = input.rows.total_rows;
         // Keys are line positions; they mean other entries when the tab or
         // the number of entries on a line changes.
@@ -164,6 +180,7 @@ impl FileView {
                         cells: Rc::clone(&cells),
                         width,
                         claim: claim.clone(),
+                        hooks: hooks.clone(),
                         rename: input
                             .rows
                             .renaming
@@ -180,6 +197,7 @@ impl FileView {
                             .collect(),
                         tile,
                         claim: claim.clone(),
+                        hooks: hooks.clone(),
                     }),
                 }
             },
@@ -191,7 +209,13 @@ impl FileView {
         let input = &self.input;
         self.metrics = Metrics::of(input.view.display, input.icon_size, self.width);
         self.cells = Rc::new(columns::cells(&input.columns, input.show_folder));
-        self.source = Self::source(input, self.metrics, &self.cells, self.width, &self.claim);
+        self.source = Self::source(
+            input,
+            self.metrics,
+            &self.cells,
+            self.width,
+            (&self.claim, &self.hooks),
+        );
     }
 
     /// Tells the core which entries are in sight, when that changed.
@@ -238,6 +262,14 @@ impl FileView {
             tries: tries + 1,
             _timer: context.set_local_timeout(SCROLL_RETRY, || ViewMessage::RetryScroll),
         });
+    }
+
+    /// Waits for the other telling of a drop, when it is not waited for yet.
+    fn settle_drop(&mut self, context: &ComponentContext<Self>) {
+        if self.drop_timer.is_none() {
+            self.drop_timer =
+                Some(context.set_local_timeout(DROP_SETTLE, || ViewMessage::DropSettled));
+        }
     }
 
     /// Asks for the keyboard a moment from now, when the view is laid out.
@@ -347,9 +379,18 @@ impl Component for FileView {
         let background = context.sender();
         let background_claim = claim.clone();
         let grip_pressed = context.sender();
+        let (entry_dropped, entry_dragged) = (context.sender(), context.sender());
+        let hooks = EntryHooks {
+            on_drop: Callback::new(move |(entry, data): (u32, DroppedData)| {
+                _ = entry_dropped.send(ViewMessage::EntryDropped(entry, data));
+            }),
+            on_drag: Callback::new(move |entry: u32| {
+                _ = entry_dragged.send(ViewMessage::EntryDragged(entry));
+            }),
+        };
         Self {
             input: input.clone(),
-            source: Self::source(input, metrics, &cells, width, &claim),
+            source: Self::source(input, metrics, &cells, width, (&claim, &hooks)),
             metrics,
             cells,
             viewer,
@@ -407,6 +448,9 @@ impl Component for FileView {
                 toggle: context.callback(ViewMessage::ToggleColumn),
             },
             claim,
+            hooks,
+            dropping: None,
+            drop_timer: None,
             renaming,
         }
     }
@@ -527,12 +571,47 @@ impl Component for FileView {
                 self.input.on_menu.call((tab, on));
             }
             ViewMessage::Dropped(data) => {
+                // Told by a folder's entry already: that says more.
+                if let DroppedData::StorageItems(items) = data
+                    && self.dropping.is_none()
+                {
+                    let paths = items.into_iter().map(|item| item.path).collect();
+                    self.dropping = Some((paths, None));
+                    self.settle_drop(context);
+                }
+            }
+            ViewMessage::EntryDropped(entry, data) => {
+                let rows = &self.input.rows;
+                let folder = rows
+                    .row(entry)
+                    .filter(|row| row.is_dir)
+                    .and_then(|row| rows.path_of(row));
                 if let DroppedData::StorageItems(items) = data {
+                    let paths = items.into_iter().map(|item| item.path).collect();
+                    let target = folder.map(|folder| folder.to_string_lossy().into_owned());
+                    self.dropping = Some((paths, target));
+                    self.settle_drop(context);
+                }
+            }
+            ViewMessage::DropSettled => {
+                self.drop_timer = None;
+                if let Some((paths, target)) = self.dropping.take() {
                     self.input.on_drop.call(Dropped {
                         tab,
-                        paths: items.into_iter().map(|item| item.path).collect(),
-                        target: None,
+                        paths,
+                        target,
                         on_trash: self.input.rows.in_trash,
+                    });
+                }
+            }
+            ViewMessage::EntryDragged(entry) => {
+                let paths = self.input.rows.dragged_from(entry);
+                if !paths.is_empty() {
+                    let owner = crate::hwnd::active();
+                    // The drag runs its own message loop until the drop.
+                    crate::ui_thread::defer(move || {
+                        let outcome = dirfleet_winshell::start_polled_drag(owner, &paths);
+                        crate::trace::note(|| format!("dragged out: {outcome:?}"));
                     });
                 }
             }

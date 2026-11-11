@@ -15,6 +15,7 @@ use windows_reactor::{
 use crate::core_link::CoreLink;
 use crate::picker;
 use crate::plugins;
+use crate::saved::{self, Draft};
 use crate::sheets;
 
 /// Something the window asks before it tells the core to do it.
@@ -35,6 +36,10 @@ pub enum Asking {
     /// Whether to run a plugin's action that asks first; the window, which
     /// holds the action, acts on the answer.
     Plugin,
+    /// The name to save the tab's search under; the window holds the draft.
+    SaveSearch,
+    /// The editor of a saved search; the window holds the draft.
+    EditSearch,
 }
 
 /// What decides which of the app's dialogs a window shows.
@@ -64,6 +69,8 @@ pub struct Hooks<'a> {
     pub owner: isize,
     /// The question of the plugin action waiting for an answer, or "".
     pub confirm: &'a str,
+    /// The saved search being named or edited.
+    pub draft: &'a Draft,
 }
 
 /// Which dialog a window shows.
@@ -155,7 +162,14 @@ impl Dialog {
         let event = match self {
             // The window acts on a drop's answer: it holds what was dropped.
             Self::None
-            | Self::Ask(Asking::Drop(_) | Asking::Shortcuts | Asking::Settings | Asking::Plugin) => {
+            | Self::Ask(
+                Asking::Drop(_)
+                | Asking::Shortcuts
+                | Asking::Settings
+                | Asking::Plugin
+                | Asking::SaveSearch
+                | Asking::EditSearch,
+            ) => {
                 return;
             }
             Self::Palette => Event::ClosePalette,
@@ -209,6 +223,7 @@ impl Dialog {
             on_palette,
             owner,
             confirm,
+            draft,
         } = *hooks;
         let on_closed = on_closed.clone();
         let dialog = ContentDialog::new()
@@ -300,6 +315,22 @@ impl Dialog {
             Self::Ask(Asking::Settings) => (
                 dialog.title("Settings").close_button_text("Done"),
                 sheets::settings(core, shared),
+            ),
+            Self::Ask(Asking::SaveSearch) => (
+                dialog
+                    .title("Save Search")
+                    .primary_button_text("Save")
+                    .close_button_text("Cancel")
+                    .default_button(ContentDialogButton::Primary),
+                saved::naming(draft),
+            ),
+            Self::Ask(Asking::EditSearch) => (
+                dialog
+                    .title("Edit Saved Search")
+                    .primary_button_text("Save")
+                    .close_button_text("Cancel")
+                    .default_button(ContentDialogButton::Primary),
+                saved::editor(draft),
             ),
             Self::Palette => (
                 dialog.title("Commands").close_button_text("Cancel"),

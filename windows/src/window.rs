@@ -23,11 +23,12 @@ use crate::dialogs::{Asking, Dialog, Here, Hooks};
 use crate::files::{ColumnSet, Dropped, glyph};
 use crate::hwnd::{self, ActivationWatch};
 use crate::inspector;
-use crate::menus::{self, Action, MenuOn};
+use crate::menus::{self, Action, MenuOn, SidebarMenu};
 use crate::notices;
 use crate::pane::{self, Pane, PaneInput};
 use crate::plugins;
 use crate::popup;
+use crate::saved::{self, Draft, SearchDraft};
 use crate::shortcuts::{Chord, Shortcuts};
 use crate::sidebar;
 use crate::store::PaneParts;
@@ -94,6 +95,9 @@ pub struct WindowRoot {
     on_menu_asked: Callback<(u32, MenuOn)>,
     on_dropped: Callback<Dropped>,
     on_palette: Callback<PaletteTarget>,
+    on_sidebar_menu: Callback<SidebarMenu>,
+    /// The saved search being named or edited in a dialog.
+    draft: Draft,
     /// Where the window opens: read once, when it is first declared.
     opens_at: Option<WindowPlacement>,
     /// The frame last told to the core.
@@ -183,6 +187,8 @@ pub enum WindowMessage {
     TabsReordered(Vec<Key>),
     /// A plugin's action, from its shortcut.
     RunPlugin(String),
+    /// A right click on a place in the sidebar.
+    SidebarMenu(SidebarMenu),
 }
 
 impl Drop for WindowRoot {
@@ -311,6 +317,8 @@ impl Component for WindowRoot {
             on_dialog_closed: context.callback(WindowMessage::DialogClosed),
             on_dropped: context.callback(WindowMessage::Dropped),
             on_palette: context.callback(WindowMessage::PaletteChose),
+            on_sidebar_menu: context.callback(WindowMessage::SidebarMenu),
+            draft: Draft::default(),
             on_menu_asked: context
                 .callback(|(tab, on): (u32, MenuOn)| WindowMessage::MenuAsked(tab, on)),
             opens_at: input.chrome.frame.and_then(|frame| {
@@ -408,8 +416,17 @@ impl Component for WindowRoot {
                         tab: self.target.tab,
                     }),
                     Some(Local::Settings) => self.asking = Some(Asking::Settings),
-                    // The window's other commands arrive with the parts they act on.
-                    Some(local) => crate::trace::note(|| format!("not available yet: {local:?}")),
+                    Some(Local::SaveSearch) => {
+                        // Nothing to save while nothing is searched for.
+                        let search = self.input.chrome.active.search.as_ref();
+                        if let Some(draft) = search
+                            .filter(|_| saved::can_save(&self.input.chrome.active))
+                            .and_then(SearchDraft::naming)
+                        {
+                            self.draft.replace(draft);
+                            self.asking = Some(Asking::SaveSearch);
+                        }
+                    }
                 }
             }
             WindowMessage::DialogClosed(result) => {
@@ -419,6 +436,12 @@ impl Component for WindowRoot {
                     && result == ContentDialogResult::Primary
                 {
                     self.core.send(Event::RunPluginAction { tab, action });
+                }
+                if matches!(self.asking, Some(Asking::SaveSearch | Asking::EditSearch))
+                    && result == ContentDialogResult::Primary
+                    && let Some(event) = self.draft.borrow().confirmed(self.target.tab)
+                {
+                    self.core.send(event);
                 }
                 if let Some(Asking::Drop(_)) = self.asking
                     && let Some(dropped) = self.dropped.take()
@@ -514,6 +537,7 @@ impl Component for WindowRoot {
                 self.chose(tab, Action::Plugin { action, confirm }, context);
             }
             WindowMessage::TabAdded => self.update(WindowMessage::Run(CommandId::NewTab), context),
+            WindowMessage::SidebarMenu(on) => self.open_sidebar_menu(&on, context),
             WindowMessage::TabsReordered(keys) => {
                 let before = self.lone_tabs();
                 let after: Vec<u32> = keys
@@ -561,6 +585,8 @@ impl Component for WindowRoot {
     fn view(&self, input: &WindowInput, context: &mut ViewContext<Self>) -> View {
         let tab = &input.chrome.active;
         context.window_title(format!("{} - DirFleet", tab.title));
+        // The menus at the pointer are the system's, and are told separately.
+        popup::follow(input.shared.settings.appearance);
         let visuals = WindowVisuals::new()
             .backdrop(WindowBackdrop::Mica)
             .theme(match input.shared.settings.appearance {
@@ -681,7 +707,15 @@ impl Component for WindowRoot {
             Border::new().into()
         };
         let places: View = if self.sidebar_shown {
-            sidebar::sidebar(&input.core, tab.id, &input.chrome.sidebar)
+            sidebar::sidebar(
+                &input.core,
+                tab.id,
+                &input.chrome.sidebar,
+                sidebar::Hooks {
+                    on_menu: &self.on_sidebar_menu,
+                    on_drop: &self.on_dropped,
+                },
+            )
         } else {
             Border::new().into()
         };
@@ -748,6 +782,7 @@ impl Component for WindowRoot {
                             .plugin_asked
                             .as_ref()
                             .map_or("", |(_, _, confirm)| confirm),
+                        draft: &self.draft,
                     },
                 ),
             )
@@ -878,6 +913,29 @@ impl WindowRoot {
         });
     }
 
+    /// Shows the menu of a place in the sidebar at the pointer; what is
+    /// chosen acts on the focused tab.
+    fn open_sidebar_menu(&self, on: &SidebarMenu, context: &ComponentContext<Self>) {
+        let tab = self.target.tab;
+        let entries = menus::Context {
+            shared: &self.input.shared,
+            window: self.id,
+            tab: &self.input.chrome.active,
+            sidebar: &self.input.chrome.sidebar,
+            only: None,
+        }
+        .sidebar(on);
+        if entries.is_empty() {
+            return;
+        }
+        let (owner, sender) = (self.handle, context.sender());
+        ui_thread::defer(move || {
+            if let Some(action) = popup::show(owner, &entries) {
+                _ = sender.send(WindowMessage::MenuChose(tab, action));
+            }
+        });
+    }
+
     /// Carries out what was chosen in `tab`'s menu.
     fn chose(&mut self, tab: u32, action: Action, context: &ComponentContext<Self>) {
         let owner = self.handle;
@@ -906,6 +964,13 @@ impl WindowRoot {
                 } else {
                     self.plugin_asked = Some((tab, action, confirm));
                     self.asking = Some(Asking::Plugin);
+                }
+            }
+            Action::EditSearch(id) => {
+                let saved = self.input.shared.saved_searches.iter();
+                if let Some(saved) = saved.into_iter().find(|saved| saved.id == id) {
+                    self.draft.replace(SearchDraft::editing(saved));
+                    self.asking = Some(Asking::EditSearch);
                 }
             }
             Action::Shell => {
@@ -973,7 +1038,7 @@ fn command_key(command: CommandId) -> Key {
 
 /// The commands a window has no button for, grouped as the Mac app's menus are.
 fn more_menu(shared: &ViewModel, on_click: Callback<Key>) -> Menu {
-    const GROUPS: [&[CommandId]; 5] = [
+    const GROUPS: [&[CommandId]; 6] = [
         &[
             CommandId::NewWindow,
             CommandId::NewTab,
@@ -992,6 +1057,12 @@ fn more_menu(shared: &ViewModel, on_click: Callback<Key>) -> Menu {
             CommandId::OpenTrash,
         ],
         &[CommandId::NewFolder, CommandId::NewTextFile],
+        &[
+            CommandId::Find,
+            CommandId::SaveSearch,
+            CommandId::ToggleSidebar,
+            CommandId::AddToFavorites,
+        ],
         &[
             CommandId::Palette,
             CommandId::ShortcutHelp,

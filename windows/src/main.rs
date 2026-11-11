@@ -41,6 +41,8 @@ mod popup;
 #[cfg(windows)]
 mod preview;
 #[cfg(windows)]
+mod saved;
+#[cfg(windows)]
 mod search;
 #[cfg(windows)]
 mod sheets;

@@ -48,16 +48,17 @@ needs network, `curl.exe` and `tar.exe`) and stages its DLLs beside the exe.
 | `files/layout.rs` | Pure geometry: lines, entries in sight, cursor moves |
 | `files/columns.rs` | The list's columns and header: sort, resize grips, optional columns |
 | `files/row.rs`, `files/tiles.rs` | A list row; a line of grid tiles. Components of their own |
-| `files/press.rs` | What a press on an entry means; telling it from a press on empty space |
+| `files/press.rs` | What a press on an entry means; telling it from a press on empty space; when a press becomes a drag; what entries tell the view |
 | `files/rename.rs` | `RenameBox`: the text box that stands in for a name |
 | `sidebar.rs` | Places, drives, sections that fold |
 | `dialogs.rs` | Which dialog a window shows, and each one: confirmations, conflict, eject, drop, batch rename, Go to Folder |
 | `sheets.rs` | The palette, the shortcuts list and Settings, shown as dialogs |
 | `notices.rs` | Operations in progress and toasts |
-| `menus.rs`, `popup.rs` | Context menus as data, and their Win32 popup |
+| `menus.rs`, `popup.rs` | Context menus as data (the selection's, the folder's, a sidebar place's), and their Win32 popup, which follows the app's appearance |
 | `search.rs` | The search box, its filters and its options menu |
+| `saved.rs` | Saved searches: the name asked for, the editor, the mark on a tab's search |
 | `inspector.rs` | What is known about the selection |
-| `preview.rs` | Quick Look: a window for images and text |
+| `preview.rs` | Quick Look: a window for images and text, and for what the system's preview handlers show |
 | `picker.rs` | Choosing a video's thumbnail from its frames |
 | `plugins.rs` | Everything plugins show: bar, forms, results, jobs, inspector sections, their part of Settings |
 | `perf.rs` | A measurement of the core's answers in large folders (`just windows-perf`) |
@@ -98,6 +99,18 @@ needs network, `curl.exe` and `tar.exe`) and stages its DLLs beside the exe.
 - **A switch says nothing beside itself.** `theme::switch` hides the control's
   own "On"/"Off", which come in the system's language; give it an
   `automation_name`, since its label is a separate text.
+- **A drag out needs help to move.** `WinUI` puts no mouse messages in the
+  thread's queue, and OLE's drag loop waits for them: use
+  `dirfleet_winshell::start_polled_drag`, which keeps the loop going and reads
+  the button as it is. A press on a selected entry is told to the core when the
+  button goes up, so that dragging it takes the whole selection along.
+- **A drop on a folder is told twice.** Drops bubble: the folder's entry and
+  the view around it may both report one, in either order. `FileView` collects
+  them for 60 ms and takes the folder's.
+- **Other programs are talked to from `ui_thread::defer` too.** A preview
+  handler lives in another process; calls to it let this thread's messages
+  run. `PreviewWindow` makes, fits and drops its `PreviewHost` in deferred
+  work, and borrows nothing shared while it does.
 - **Text-editing chords belong to whatever has the keyboard.** The window runs
   the other shortcuts in its preview handler; `Chord::edits_text` ones (Ctrl+C,
   Del, Space…) are run by `FileView` only while it has the focus.
@@ -154,6 +167,8 @@ model, against 0.6 ms with exact reports).
 
 - Menus attach to buttons only; there is no menu at the pointer.
 - Only `Border` takes pointer, key and drop events.
+- A button's padding is fixed: `ButtonPadding` in `resource_overrides` changes
+  nothing. Count 22 across for it where buttons share a width (`picker.rs`).
 - A scroll asked for before the list is laid out at its new length is cut
   short, and a change of extent alone raises no event; `FileList` asks again
   every 30 ms until the position holds.
