@@ -3290,7 +3290,7 @@ checksum = "d8bf43e74c58a6a8ce01ff3516feb4e509ad6623b00d39700f180babe62c9058"
 
 [[package]]
 name = "lwa_fm"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "arboard",

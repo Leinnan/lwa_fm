@@ -10,9 +10,9 @@
     <key>CFBundleIdentifier</key>
     <string>io.github.leinnan.dirfleet</string>
     <key>CFBundleVersion</key>
-    <string>0.0.1</string>
+    <string>0.0.2</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.0.1</string>
+    <string>0.0.2</string>
     <key>CFBundleExecutable</key>
     <string>lwa_fm</string>
     <key>CFBundlePackageType</key>
