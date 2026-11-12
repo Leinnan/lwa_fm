@@ -31,3 +31,7 @@ disallowed-types = [
 # facet's derived description of `app::Event` (a hundred-odd variants) is one
 # array; the core has no large arrays of its own.
 array-size-threshold = 65536
+
+# `app::Event::StateLoaded` carries the whole saved state once, at start;
+# boxing it would change nothing but every place that names it.
+enum-variant-size-threshold = 512

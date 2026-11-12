@@ -574,6 +574,9 @@ impl MyTabViewer<'_> {
                     }
                 }
             }
+            // Only the native apps search file contents and read what
+            // media files say of themselves.
+            Column::Match | Column::Dimensions | Column::Duration => {}
         }
     }
 
@@ -763,7 +766,11 @@ fn header_cell_background(
 /// The header's context menu: show or hide columns, reset their widths.
 fn header_menu(response: &egui::Response, columns: &ListColumns, events: &mut HeaderEvents) {
     response.context_menu(|ui| {
-        for column in Column::OPTIONAL {
+        // Only the native apps fill these two.
+        let offered = Column::OPTIONAL
+            .into_iter()
+            .filter(|column| !matches!(column, Column::Dimensions | Column::Duration));
+        for column in offered {
             let mut shown = columns.is_shown(column);
             if ui.checkbox(&mut shown, column.title(false)).clicked() {
                 events.toggle = Some(column);

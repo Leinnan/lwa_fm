@@ -171,6 +171,15 @@ pub enum Chip {
     Opened(Age),
     /// An extra folder to search in.
     In(PathBuf),
+    /// Text a file's contents must hold: plain text or a regular expression.
+    /// Contents are read only for committed chips, never for text still
+    /// being typed.
+    Content {
+        pattern: String,
+        kind: SearchTermType,
+    },
+    /// A tag the item must have, by the tag's name.
+    Tag(String),
 }
 
 impl Chip {
@@ -180,6 +189,11 @@ impl Chip {
             kind: SearchTermType::Plain,
             exclude: false,
         }
+    }
+
+    /// Whether this chip searches inside files.
+    pub const fn is_content(&self) -> bool {
+        matches!(self, Self::Content { .. })
     }
 
     /// Whether this chip filters by name (and so takes part in "match all /
@@ -192,7 +206,8 @@ impl Chip {
     /// filters nothing and is dropped when its editor closes.
     pub fn is_blank(&self) -> bool {
         match self {
-            Self::Name { pattern, .. } => pattern.trim().is_empty(),
+            Self::Name { pattern, .. } | Self::Content { pattern, .. } => pattern.trim().is_empty(),
+            Self::Tag(name) => name.trim().is_empty(),
             Self::Ext(exts) => exts.is_empty(),
             Self::Kind(kinds) => kinds.is_empty(),
             Self::In(path) => path.as_os_str().is_empty(),
@@ -241,6 +256,9 @@ pub struct Search {
     pub chips: Vec<Chip>,
     /// How name chips (and the typed text) combine.
     pub match_mode: MatchMode,
+    /// Leave out what `.gitignore` files ignore, and `.git` folders, when
+    /// more than the folder itself is read.
+    pub skip_ignored: bool,
     /// The saved search this one was loaded from, to offer "Update".
     #[serde(skip)]
     pub saved_from: Option<u64>,
@@ -250,6 +268,31 @@ impl Search {
     /// Whether anything restricts the results.
     pub const fn has_query(&self) -> bool {
         !self.value.is_empty() || !self.chips.is_empty()
+    }
+
+    /// Whether a committed chip searches inside files.
+    pub fn has_content(&self) -> bool {
+        self.chips
+            .iter()
+            .any(|chip| chip.is_content() && !chip.is_blank())
+    }
+
+    /// Whether the typed text holds a `content:` term. It searches nothing
+    /// until it is committed: typing never reads the disk.
+    pub fn content_pending(&self) -> bool {
+        !self.value.trim().is_empty()
+            && query::parse(&self.value).chips.iter().any(Chip::is_content)
+    }
+
+    /// The search without the text being typed: what reading file contents
+    /// goes by.
+    #[must_use]
+    pub fn committed(&self) -> Self {
+        Self {
+            value: String::new(),
+            saved_from: None,
+            ..self.clone()
+        }
     }
 
     /// Extra folders added with `in:` chips.
@@ -345,7 +388,13 @@ impl Search {
     pub fn effective_chips(&self) -> Vec<Chip> {
         let mut chips = self.chips.clone();
         if !self.value.trim().is_empty() {
-            chips.extend(query::parse(&self.value).chips);
+            // A content term still being typed filters nothing yet.
+            chips.extend(
+                query::parse(&self.value)
+                    .chips
+                    .into_iter()
+                    .filter(|chip| !chip.is_content()),
+            );
         }
         chips
     }
@@ -390,6 +439,7 @@ struct SearchCompat {
     depth: usize,
     chips: Vec<Chip>,
     match_mode: MatchMode,
+    skip_ignored: bool,
     /// Old: separate terms, now name chips.
     terms: Vec<LegacyTerm>,
     /// Old: extra folders, now `in:` chips.
@@ -405,6 +455,7 @@ impl Default for SearchCompat {
             depth: 1,
             chips: Vec::new(),
             match_mode: MatchMode::All,
+            skip_ignored: false,
             terms: Vec::new(),
             extra_dirs: Vec::new(),
         }
@@ -444,6 +495,7 @@ impl From<SearchCompat> for Search {
             depth: old.depth,
             chips,
             match_mode: old.match_mode,
+            skip_ignored: old.skip_ignored,
             saved_from: None,
         }
     }

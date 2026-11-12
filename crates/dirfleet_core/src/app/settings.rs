@@ -90,6 +90,8 @@ pub struct Settings {
     pub confirm_drop: bool,
     pub show_recent: bool,
     pub show_trash: bool,
+    /// List the tags in the sidebar.
+    pub show_tags: bool,
     /// Show how full each drive is under its sidebar row.
     pub show_drive_capacity: bool,
     /// Say when a drive is connected or disconnected.
@@ -107,6 +109,9 @@ pub struct Settings {
     /// Open archives (zip, 7z, rar, tar…) as folders rather than in their
     /// app.
     pub browse_archives: bool,
+    /// Add up the folders in view, for the Size column. Off by default:
+    /// every folder shown is read through to its last file.
+    pub folder_sizes: bool,
 }
 
 impl Default for Settings {
@@ -125,6 +130,7 @@ impl Default for Settings {
             confirm_drop: false,
             show_recent: true,
             show_trash: true,
+            show_tags: true,
             show_drive_capacity: true,
             notify_drive_changes: true,
             track_open_history: true,
@@ -133,6 +139,7 @@ impl Default for Settings {
             queue_mode: QueueMode::PerVolume,
             verify_copies: false,
             browse_archives: true,
+            folder_sizes: false,
         }
     }
 }

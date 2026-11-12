@@ -9,7 +9,9 @@ authors.workspace = true
 [dependencies]
 # Plugins: Lua, as the egui app had it (the `plugins` feature).
 mlua = { version = "0.11", features = ["lua54", "vendored", "serialize"], optional = true }
-chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
+# Dates for plugins, and the local time of the dates a batch rename
+# puts in names.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 glob = { version = "0.3", optional = true }
 # Byte formatting for the plugin API; egui-free despite the name.
 egui_mev_core = { git = "https://github.com/Leinnan/egui_mev_toolkit", rev = "039b0f9d062772e82dd990fb5a23b73fad5d9994", optional = true }
@@ -34,6 +36,12 @@ jpeg-decoder = { version = "0.3", default-features = false }
 lru = "0.16.3"
 puffin = { optional = true, git = "https://github.com/EmbarkStudios/puffin.git", rev = "7e08a533f9debfb7d051547263d2ab84c666314f" }
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+# Searching inside files: line by line, binary files left alone, UTF-16 read.
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+# What .gitignore files leave out of a search.
+ignore = "0.4"
 # Checksums in the inspector, and telling whether a copy matches its source.
 blake3 = "1"
 crc32fast = "1"
@@ -98,7 +106,7 @@ windows = { version = "0.59", features = [
 default = ["plugins"]
 # The Lua plugin runtime. Off, the crate builds without a C compiler for the
 # target, so other systems can be checked from this one.
-plugins = ["dep:mlua", "dep:chrono", "dep:glob", "dep:egui_mev_core"]
+plugins = ["dep:mlua", "dep:glob", "dep:egui_mev_core"]
 # Test behaviour for dependants' tests: a per-process cache folder, no
 # FFmpeg download, deterministic media backends.
 test-support = []

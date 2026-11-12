@@ -2,7 +2,8 @@
 //! and for the folder itself. They are described here as plain data, the same
 //! items in the same order as the Mac app's, and shown by [`crate::popup`].
 use dirfleet_core::app::{
-    CommandId, Event, SidebarSectionView, TabViewModel, ThumbnailChoice, ViewModel,
+    CommandId, ComparePair, CompareView, Event, Keep, OtherPane, SidebarSectionView, TabViewModel,
+    ThumbnailChoice, ViewModel,
 };
 use dirfleet_core::view_settings::DisplayType;
 
@@ -24,6 +25,8 @@ pub enum SidebarMenu {
     Bin,
     /// A saved search.
     Saved(u64),
+    /// A tag.
+    Tag(u32),
 }
 
 /// What choosing a menu item does.
@@ -107,6 +110,12 @@ pub struct Context<'a> {
     /// The one selected entry, when there is just one: its row, and whether
     /// its thumbnail can be chosen.
     pub only: Option<(u32, ThumbnailChoice)>,
+    /// Every selected entry in sight is a folder, and one is at least.
+    pub folders: bool,
+    /// The two folders the window would compare, when it shows two.
+    pub compare: Option<&'a ComparePair>,
+    /// The window's other pane, when the menu is the focused pane's.
+    pub other: Option<&'a OtherPane>,
 }
 
 impl Context<'_> {
@@ -126,6 +135,36 @@ impl Context<'_> {
 
     fn send(label: impl Into<String>, event: Event) -> Entry {
         Entry::item(label, Action::Send(Box::new(event)))
+    }
+
+    /// A command under a name of the menu's own, with its shortcut.
+    fn named(&self, label: &str, command: CommandId) -> Entry {
+        let shortcut = self
+            .shared
+            .commands
+            .iter()
+            .find(|view| view.id == command)
+            .map_or("", |view| view.shortcut.as_str());
+        Entry::item(with_shortcut(label, shortcut), Action::Run(command))
+    }
+
+    /// Copying and moving the selection into the folder the other pane
+    /// shows, named; not offered where that pane takes nothing.
+    fn to_other_pane(&self) -> Vec<Entry> {
+        let Some(other) = self.other else {
+            return Vec::new();
+        };
+        let named = |verb: &str, command| {
+            self.named(
+                &format!("{verb} to \u{201c}{}\u{201d}", other.title),
+                command,
+            )
+            .enabled(other.writable)
+        };
+        vec![
+            named("Copy", CommandId::CopyToOtherPane),
+            named("Move", CommandId::MoveToOtherPane),
+        ]
     }
 
     /// The menu of the selected entries.
@@ -148,19 +187,35 @@ impl Context<'_> {
             self.command(CommandId::QuickLook),
         ];
         entries.extend(self.extracting());
-        entries.extend([
-            Entry::Separator,
-            if several {
-                Self::send(
-                    format!("Rename {} Items…", self.tab.selected_count),
-                    Event::StartBatchRename { tab },
-                )
-            } else {
-                self.command(CommandId::Rename)
-            },
-            self.command(CommandId::Duplicate),
-            Self::send("Compress…", Event::StartCompress { tab }),
-        ]);
+        entries.push(Entry::Separator);
+        // What a scan found is not renamed, copied beside itself or packed.
+        if self.tab.results.is_none() {
+            entries.extend([
+                if several {
+                    Self::send(
+                        format!("Rename {} Items…", self.tab.selected_count),
+                        Event::StartBatchRename { tab },
+                    )
+                } else {
+                    self.command(CommandId::Rename)
+                },
+                self.command(CommandId::Duplicate),
+                Self::send("Compress…", Event::StartCompress { tab }),
+            ]);
+            if self.folders {
+                entries.push(Self::send(
+                    "Find Duplicates in Selected Folders",
+                    Event::FindDuplicates {
+                        tab,
+                        selected: true,
+                    },
+                ));
+            }
+        }
+        // What differs between two folders is copied to either.
+        if let Some(compare) = self.compared() {
+            entries.extend(self.copying(compare));
+        }
         // A video's thumbnail can be chosen, and a chosen one given up.
         if let Some((row, choice)) = self
             .only
@@ -187,11 +242,19 @@ impl Context<'_> {
                 label: "Copy To".to_owned(),
                 entries: self.send_to(true),
             },
+        ]);
+        entries.extend(self.to_other_pane());
+        entries.push(Entry::Submenu {
+            label: "Tags".to_owned(),
+            entries: self.tagging(),
+        });
+        entries.extend([
             Entry::Separator,
             self.command(CommandId::Copy),
             self.command(CommandId::Cut),
             self.command(CommandId::CopyAsPath),
             Entry::Separator,
+            self.command(CommandId::SelectSameExtension),
             self.command(CommandId::ShowInFinder),
             self.command(CommandId::GetInfo),
             Self::send("Remove from Open History", Event::ForgetOpened { tab }),
@@ -296,8 +359,155 @@ impl Context<'_> {
         entries
     }
 
-    /// The menu of the folder shown, opened on the space no entry covers.
-    pub fn folder(&self) -> Vec<Entry> {
+    /// What the folder's entries can be put into groups by, the way in use
+    /// marked.
+    fn grouping(&self) -> Vec<Entry> {
+        let tab = self.tab.id;
+        self.shared
+            .groupings
+            .iter()
+            .map(|choice| {
+                Entry::checked(
+                    choice.label.clone(),
+                    Action::Send(Box::new(Event::SetGroupBy {
+                        tab,
+                        group: choice.group,
+                    })),
+                    choice.group == self.tab.view.group,
+                )
+            })
+            .collect()
+    }
+
+    /// The tags, the ones every selected item has marked: choosing one
+    /// gives it to the selection, or takes it when all of it has it.
+    fn tagging(&self) -> Vec<Entry> {
+        let tab = self.tab.id;
+        let mut entries: Vec<Entry> = self
+            .shared
+            .tags
+            .iter()
+            .map(|tag| {
+                Entry::checked(
+                    tag.name.clone(),
+                    Action::Send(Box::new(Event::ToggleTag { tab, tag: tag.id })),
+                    self.tab.selection_tags.contains(&tag.id),
+                )
+            })
+            .collect();
+        if !entries.is_empty() {
+            entries.push(Entry::Separator);
+        }
+        entries.extend([
+            Self::send("Clear Tags", Event::ClearTags { tab }),
+            Self::send("New Tag…", Event::EditTag { tag: None }),
+        ]);
+        entries
+    }
+
+    /// The menu of a tag in the sidebar: show its items, change it, move
+    /// it among the others, or delete it.
+    fn tag(&self, id: u32) -> Vec<Entry> {
+        let tab = self.tab.id;
+        let tags = &self.shared.tags;
+        let Some(position) = tags.iter().position(|tag| tag.id == id) else {
+            return Vec::new();
+        };
+        let at = position as u32;
+        vec![
+            Self::send("Show Items", Event::OpenTag { tab, tag: id }),
+            Self::send("Edit…", Event::EditTag { tag: Some(id) }),
+            Entry::Separator,
+            Self::send(
+                "Move Up",
+                Event::MoveTag {
+                    tag: id,
+                    to: at.saturating_sub(1),
+                },
+            )
+            .enabled(position > 0),
+            Self::send(
+                "Move Down",
+                Event::MoveTag {
+                    tag: id,
+                    to: at + 1,
+                },
+            )
+            .enabled(position + 1 < tags.len()),
+            Entry::Separator,
+            Self::send("Delete Tag", Event::DeleteTag { tag: id }),
+            Self::send("New Tag…", Event::EditTag { tag: None }),
+        ]
+    }
+
+    /// The folders the tab compares, when that is what it shows.
+    fn compared(&self) -> Option<&CompareView> {
+        self.tab.results.as_ref()?.compare.as_ref()
+    }
+
+    /// Among compared folders: copying the selection, or everything when
+    /// nothing is selected, to the left folder and to the right one.
+    fn copying(&self, compare: &CompareView) -> Vec<Entry> {
+        [true, false]
+            .into_iter()
+            .map(|to_left| {
+                let copying = crate::results::copying(self.tab, compare, to_left);
+                Self::send(copying.label, copying.event).enabled(copying.enabled)
+            })
+            .collect()
+    }
+
+    /// What the tab's rows are put together by: a folder's by the groups
+    /// chosen; duplicates set by set, with ways to select all but one of
+    /// each; what differs between two folders kind by kind, with what is
+    /// done about it.
+    fn arranging(&self) -> Vec<Entry> {
+        let tab = self.tab.id;
+        // A tag's items are grouped as a folder's are.
+        let Some(results) = self
+            .tab
+            .results
+            .as_ref()
+            .filter(|results| results.tag.is_none())
+        else {
+            return vec![Entry::Submenu {
+                label: "Group By".to_owned(),
+                entries: self.grouping(),
+            }];
+        };
+        let Some(compare) = &results.compare else {
+            return vec![Entry::Submenu {
+                label: "Select All But".to_owned(),
+                entries: self.keeping(),
+            }];
+        };
+        let mut entries = vec![Entry::checked(
+            "Read Files to Tell Them Apart",
+            Action::Send(Box::new(Event::SetCompareOptions {
+                tab,
+                contents: !compare.contents,
+            })),
+            compare.contents,
+        )];
+        entries.extend(self.copying(compare));
+        entries
+    }
+
+    /// Among duplicates: selecting every file of each set but one.
+    fn keeping(&self) -> Vec<Entry> {
+        let tab = self.tab.id;
+        [
+            ("The Newest", Keep::Newest),
+            ("The Oldest", Keep::Oldest),
+            ("The First Listed", Keep::First),
+        ]
+        .into_iter()
+        .map(|(label, keep)| Self::send(label, Event::SelectDuplicates { tab, keep }))
+        .collect()
+    }
+
+    /// How the folder is sorted and shown, the ways in use marked.
+    fn viewing(&self) -> Vec<Entry> {
         let tab = self.tab.id;
         let view = self.tab.view;
         let mut sorting: Vec<Entry> = self
@@ -342,6 +552,13 @@ impl Context<'_> {
                 view.display == DisplayType::List,
             ),
         ]);
+        sorting
+    }
+
+    /// The menu of the folder shown, opened on the space no entry covers.
+    pub fn folder(&self) -> Vec<Entry> {
+        let tab = self.tab.id;
+        let sorting = self.viewing();
         // Nothing is made or pasted where nothing can be changed.
         let mut entries = if self.tab.location.caps.writable {
             vec![
@@ -358,18 +575,46 @@ impl Context<'_> {
             }
             taking
         };
-        entries.extend([
-            Entry::Submenu {
-                label: "View".to_owned(),
-                entries: sorting,
-            },
-            self.command(CommandId::Refresh),
-        ]);
-        if let Some(undo) = &self.shared.undo {
-            entries.push(Entry::item(
-                with_shortcut(undo, CommandId::Undo.shortcut()),
-                Action::Run(CommandId::Undo),
+        entries.push(Entry::Submenu {
+            label: "View".to_owned(),
+            entries: sorting,
+        });
+        // What a scan found is kept its own way, whatever the view groups by.
+        entries.extend(self.arranging());
+        entries.push(self.command(CommandId::SelectByPattern));
+        entries.push(self.command(CommandId::Refresh));
+        // What the two panes do together.
+        if self.other.is_some() {
+            entries.push(self.command(CommandId::SwapPanes));
+            if !self.tab.path.is_empty() {
+                entries.push(self.command(CommandId::MirrorPane));
+            }
+        }
+        // Only folders on this machine are read through.
+        if !self.tab.path.is_empty() && crate::store::is_on_disk(&self.tab.path) {
+            entries.push(Self::send(
+                "Find Duplicates",
+                Event::FindDuplicates {
+                    tab,
+                    selected: false,
+                },
             ));
+        }
+        // The folders the window shows side by side.
+        if let Some(pair) = self.compare.filter(|_| self.tab.results.is_none()) {
+            entries.push(Self::send(
+                format!(
+                    "Compare \u{201c}{}\u{201d} with \u{201c}{}\u{201d}",
+                    pair.left, pair.right
+                ),
+                Event::CompareFolders {
+                    window: self.window,
+                },
+            ));
+        }
+        if let Some(undo) = &self.shared.undo {
+            // Under the name of what it undoes, with the key Undo has now.
+            entries.push(self.named(undo, CommandId::Undo));
         }
         if !self.tab.folder_plugin_actions.is_empty() {
             entries.push(Entry::Separator);
@@ -450,6 +695,7 @@ impl Context<'_> {
                 self.command(CommandId::EmptyTrash),
             ],
             SidebarMenu::Saved(id) => self.saved(*id),
+            SidebarMenu::Tag(id) => self.tag(*id),
         }
     }
 
@@ -538,7 +784,354 @@ mod tests {
             tab,
             sidebar: &[],
             only: None,
+            folders: false,
+            compare: None,
+            other: None,
         }
+    }
+
+    /// Whether the menu runs `command`.
+    fn runs(entries: &[Entry], command: CommandId) -> bool {
+        entries.iter().any(|entry| {
+            matches!(entry, Entry::Item { action: Action::Run(run), .. } if *run == command)
+        })
+    }
+
+    /// The event the menu's item `label` sends.
+    fn sends<'a>(entries: &'a [Entry], label: &str) -> Option<&'a Event> {
+        entries.iter().find_map(|entry| match entry {
+            Entry::Item {
+                label: named,
+                action: Action::Send(event),
+                ..
+            } if named == label => Some(&**event),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn duplicates_are_looked_for_in_a_folder_of_this_machine_or_in_selected_folders() {
+        let shared = ViewModel::default();
+        let mut tab = TabViewModel {
+            id: 4,
+            path: "C:\\Users".to_owned(),
+            selected_count: 2,
+            ..TabViewModel::default()
+        };
+        let folder = context(&shared, &tab).folder();
+        assert_eq!(
+            sends(&folder, "Find Duplicates"),
+            Some(&Event::FindDuplicates {
+                tab: 4,
+                selected: false
+            })
+        );
+        // With folders selected, their menu looks in them.
+        let label = "Find Duplicates in Selected Folders";
+        assert_eq!(sends(&context(&shared, &tab).selection(), label), None);
+        let folders = Context {
+            folders: true,
+            ..context(&shared, &tab)
+        };
+        assert_eq!(
+            sends(&folders.selection(), label),
+            Some(&Event::FindDuplicates {
+                tab: 4,
+                selected: true
+            })
+        );
+        // A server's folders are not read through.
+        tab.path = "sftp://office/files".to_owned();
+        let folder = context(&shared, &tab).folder();
+        assert_eq!(sends(&folder, "Find Duplicates"), None);
+    }
+
+    #[test]
+    fn tags_are_given_from_the_selection_s_menu_and_kept_from_the_sidebar_s() {
+        use dirfleet_core::app::{TagColor, TagView};
+        let tag = |id, name: &str| TagView {
+            id,
+            name: name.to_owned(),
+            color: TagColor::Red,
+            count: 0,
+        };
+        let shared = ViewModel {
+            tags: vec![tag(1, "Red"), tag(5, "Work")],
+            ..ViewModel::default()
+        };
+        let mut tab = TabViewModel {
+            id: 4,
+            path: "C:\\a".to_owned(),
+            selected_count: 2,
+            // Every selected item has the second tag.
+            selection_tags: vec![5],
+            ..TabViewModel::default()
+        };
+        tab.location.caps.real_paths = true;
+        let menu = context(&shared, &tab).selection();
+        let tags = menu
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Submenu { label, entries } if label == "Tags" => Some(entries.clone()),
+                _ => None,
+            })
+            .expect("a Tags menu");
+        assert_eq!(
+            labels(&tags),
+            ["Red", "Work", "-", "Clear Tags", "New Tag…"]
+        );
+        let marked: Vec<bool> = tags
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Item { checked, .. } => Some(*checked),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(marked, [false, true, false, false]);
+        assert_eq!(
+            sends(&tags, "Work"),
+            Some(&Event::ToggleTag { tab: 4, tag: 5 })
+        );
+        assert_eq!(
+            sends(&tags, "Clear Tags"),
+            Some(&Event::ClearTags { tab: 4 })
+        );
+
+        // A tag's own menu, in the sidebar.
+        let own = context(&shared, &tab).sidebar(&SidebarMenu::Tag(5));
+        assert_eq!(
+            sends(&own, "Show Items"),
+            Some(&Event::OpenTag { tab: 4, tag: 5 })
+        );
+        assert_eq!(sends(&own, "Edit…"), Some(&Event::EditTag { tag: Some(5) }));
+        assert_eq!(
+            sends(&own, "Move Up"),
+            Some(&Event::MoveTag { tag: 5, to: 0 })
+        );
+        assert_eq!(
+            sends(&own, "Delete Tag"),
+            Some(&Event::DeleteTag { tag: 5 })
+        );
+        let enabled = |label: &str| {
+            own.iter().find_map(|entry| match entry {
+                Entry::Item {
+                    label: named,
+                    enabled,
+                    ..
+                } if named == label => Some(*enabled),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            (enabled("Move Up"), enabled("Move Down")),
+            (Some(true), Some(false)),
+            "the last tag goes no further down"
+        );
+        assert_eq!(
+            context(&shared, &tab).sidebar(&SidebarMenu::Tag(99)),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn the_other_pane_is_copied_and_moved_to_by_name_and_swapped_with() {
+        use dirfleet_core::app::CommandView;
+        let shared = ViewModel {
+            commands: vec![CommandView {
+                id: CommandId::CopyToOtherPane,
+                label: "Copy to Other Pane".to_owned(),
+                shortcut: "Shift+F5".to_owned(),
+                ..CommandView::default()
+            }],
+            ..ViewModel::default()
+        };
+        let mut tab = TabViewModel {
+            id: 4,
+            path: "C:\\a".to_owned(),
+            selected_count: 1,
+            ..TabViewModel::default()
+        };
+        tab.location.caps.real_paths = true;
+        let copy = "Copy to \u{201c}Downloads\u{201d}\tShift+F5";
+        let moving = "Move to \u{201c}Downloads\u{201d}";
+        // One pane: nothing to copy to or swap with.
+        let alone = context(&shared, &tab);
+        assert!(!labels(&alone.selection()).contains(&copy));
+        assert!(!runs(&alone.folder(), CommandId::SwapPanes));
+        assert!(runs(&alone.folder(), CommandId::SelectByPattern));
+        assert!(runs(&alone.selection(), CommandId::SelectSameExtension));
+
+        let mut other = OtherPane {
+            tab: 5,
+            title: "Downloads".to_owned(),
+            path: "C:\\Downloads".to_owned(),
+            writable: true,
+            reason: String::new(),
+        };
+        let enabled = |other: &OtherPane, label: &str| {
+            let menu = Context {
+                other: Some(other),
+                ..context(&shared, &tab)
+            }
+            .selection();
+            menu.iter().find_map(|entry| match entry {
+                Entry::Item {
+                    label: named,
+                    enabled,
+                    action,
+                    ..
+                } if named == label => Some((*enabled, action.clone())),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            enabled(&other, copy),
+            Some((true, Action::Run(CommandId::CopyToOtherPane)))
+        );
+        assert_eq!(
+            enabled(&other, moving),
+            Some((true, Action::Run(CommandId::MoveToOtherPane)))
+        );
+        let folder = Context {
+            other: Some(&other),
+            ..context(&shared, &tab)
+        }
+        .folder();
+        assert!(runs(&folder, CommandId::SwapPanes));
+        assert!(runs(&folder, CommandId::MirrorPane));
+        // A pane that takes nothing is named but can't be chosen.
+        other.writable = false;
+        assert_eq!(
+            enabled(&other, copy).map(|(enabled, _)| enabled),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn two_folders_side_by_side_are_compared_and_what_differs_is_copied() {
+        use dirfleet_core::app::{ResultsView, SyncCount};
+        let shared = ViewModel::default();
+        let tab = TabViewModel {
+            id: 4,
+            path: "C:\\a".to_owned(),
+            ..TabViewModel::default()
+        };
+        let label = "Compare \u{201c}a\u{201d} with \u{201c}b\u{201d}";
+        assert_eq!(sends(&context(&shared, &tab).folder(), label), None);
+        let pair = ComparePair {
+            left: "a".to_owned(),
+            right: "b".to_owned(),
+        };
+        let beside = Context {
+            compare: Some(&pair),
+            ..context(&shared, &tab)
+        };
+        assert_eq!(
+            sends(&beside.folder(), label),
+            Some(&Event::CompareFolders { window: 1 })
+        );
+
+        // What differs is copied either way from the rows' menu and the
+        // tab's, where there is something to copy.
+        let results = TabViewModel {
+            id: 5,
+            selected_count: 1,
+            results: Some(ResultsView {
+                compare: Some(CompareView {
+                    left: "a".to_owned(),
+                    right: "b".to_owned(),
+                    to_right: SyncCount {
+                        copies: 1,
+                        ..SyncCount::default()
+                    },
+                    ..CompareView::default()
+                }),
+                ..ResultsView::default()
+            }),
+            ..TabViewModel::default()
+        };
+        let sync = |to_left| Event::SyncSelection { tab: 5, to_left };
+        for menu in [
+            context(&shared, &results).selection(),
+            context(&shared, &results).folder(),
+        ] {
+            assert_eq!(sends(&menu, "Copy to a"), Some(&sync(true)));
+            assert_eq!(sends(&menu, "Copy to b"), Some(&sync(false)));
+            let enabled: Vec<bool> = menu
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Item { label, enabled, .. } if label.starts_with("Copy to ") => {
+                        Some(*enabled)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(enabled, [false, true], "nothing goes left");
+        }
+        // The tab's menu says whether files are read, and has no sets to
+        // select from nor groups to choose.
+        let folder = context(&shared, &results).folder();
+        assert_eq!(
+            sends(&folder, "Read Files to Tell Them Apart"),
+            Some(&Event::SetCompareOptions {
+                tab: 5,
+                contents: true
+            })
+        );
+        assert!(!labels(&folder).contains(&"Select All But"));
+        assert!(!labels(&folder).contains(&"Group By"));
+        // Nor is another comparison offered from among the results.
+        let among = Context {
+            compare: Some(&pair),
+            ..context(&shared, &results)
+        };
+        assert_eq!(sends(&among.folder(), label), None);
+    }
+
+    #[test]
+    fn what_a_scan_found_is_opened_and_removed_but_not_renamed_or_copied() {
+        let shared = ViewModel::default();
+        let tab = TabViewModel {
+            id: 4,
+            selected_count: 1,
+            results: Some(dirfleet_core::app::ResultsView::default()),
+            ..TabViewModel::default()
+        };
+        let folders = Context {
+            folders: true,
+            ..context(&shared, &tab)
+        };
+        let menu = folders.selection();
+        assert!(labels(&menu).contains(&"Open"));
+        assert!(runs(&menu, CommandId::MoveToTrash));
+        assert!(runs(&menu, CommandId::ShowInFinder));
+        assert!(!runs(&menu, CommandId::Rename));
+        assert!(!runs(&menu, CommandId::Duplicate));
+        assert!(!labels(&menu).contains(&"Compress…"));
+        assert!(!labels(&menu).contains(&"Find Duplicates in Selected Folders"));
+
+        // Its own menu selects all but one of each set, and groups nothing.
+        let folder = context(&shared, &tab).folder();
+        assert!(!labels(&folder).contains(&"Group By"));
+        assert!(!labels(&folder).contains(&"Find Duplicates"));
+        let keeping = folder
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Submenu { label, entries } if label == "Select All But" => Some(entries),
+                _ => None,
+            })
+            .expect("a menu of what to keep");
+        assert_eq!(
+            labels(keeping),
+            ["The Newest", "The Oldest", "The First Listed"]
+        );
+        assert_eq!(
+            sends(keeping, "The Oldest"),
+            Some(&Event::SelectDuplicates {
+                tab: 4,
+                keep: Keep::Oldest
+            })
+        );
     }
 
     #[test]
@@ -699,6 +1292,43 @@ mod tests {
         assert!(!labels(&context(&shared, &tab).trashed()).contains(&"Put Back"));
         shared.trash.can_restore = true;
         assert_eq!(labels(&context(&shared, &tab).trashed())[0], "Put Back");
+    }
+
+    #[test]
+    fn the_folder_s_menu_offers_the_groupings_with_the_one_in_use_marked() {
+        use dirfleet_core::GroupBy;
+        use dirfleet_core::app::GroupChoice;
+        let choice = |group: GroupBy| GroupChoice {
+            group,
+            label: group.label().to_owned(),
+        };
+        let shared = ViewModel {
+            groupings: vec![choice(GroupBy::None), choice(GroupBy::Kind)],
+            ..ViewModel::default()
+        };
+        let mut tab = TabViewModel::default();
+        tab.view.group = GroupBy::Kind;
+        let menu = context(&shared, &tab).folder();
+        let groupings = menu
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Submenu { label, entries } if label == "Group By" => Some(entries),
+                _ => None,
+            })
+            .expect("a Group By menu");
+        let marked: Vec<(&str, bool)> = groupings
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Item { label, checked, .. } => Some((label.as_str(), *checked)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(marked, [("None", false), ("Kind", true)]);
+        assert!(matches!(
+            &groupings[1],
+            Entry::Item { action: Action::Send(event), .. }
+                if **event == Event::SetGroupBy { tab: tab.id, group: GroupBy::Kind }
+        ));
     }
 
     #[test]

@@ -10,14 +10,18 @@ mod access;
 mod archives;
 mod batch;
 mod checksums;
+mod compare;
 mod files;
 mod finder;
 pub mod format;
 mod inspector;
+mod keymap;
 pub mod layout;
+mod media_info;
 mod navigation;
 pub mod ops;
 mod palette;
+mod panes;
 mod pathbar;
 mod picker;
 mod plugin_forms;
@@ -26,11 +30,14 @@ mod plugin_results;
 mod plugin_views;
 mod plugins;
 mod remote;
+mod results;
 mod saved;
 mod selection;
 mod settings;
 mod sidebar;
+mod sizes;
 mod system;
+mod tags;
 mod thumbnails;
 mod toasts;
 mod trash;
@@ -52,11 +59,12 @@ use crate::columns::{Column, ListColumns};
 pub use crate::fileops::ArchiveFormat;
 use crate::history::{History, Place};
 use crate::ids::{IdAllocator, TabId, WindowId};
+use crate::listing::group::GroupSpan;
 use crate::listing::{EntryType, Listing, is_shown};
 use crate::location::Location;
 use crate::plugins::CallContext;
 use crate::search::Search;
-use crate::{DisplayType, Sort};
+use crate::{DisplayType, GroupBy, Sort};
 pub use access::{
     AccessView, DiskAccess, DiskAccessCheck, DiskAccessPrompt, QuitApp, TerminalCheck,
 };
@@ -64,10 +72,16 @@ pub use archives::{
     CompressView, FormatChoice, LocationView, Materialize, Materialized, PasswordView, Secret,
     SetArchivePassword, Unreadable, is_archive_name,
 };
-pub use batch::{BatchFields, BatchItem, BatchMode, BatchRenameView};
+pub use batch::{
+    BATCH_PREVIEW, BatchCase, BatchFields, BatchItem, BatchRenameView, BatchScope, LocalOffsets,
+};
 pub use checksums::{
     Algorithm, ChecksumRow, ChecksumVerdict, ChecksumsView, HashFile, HashUpdate, ReadSidecar,
     StopHash,
+};
+pub use compare::{
+    CompareFolders, ComparePair, CompareUpdate, CompareView, Difference, Differences, Recompare,
+    SAME_TIME, StopCompare, SyncAsk, SyncCount,
 };
 use egui_mev_core::selection::Selection;
 pub use files::{
@@ -76,18 +90,21 @@ pub use files::{
     OperationView, PauseFileOp, RenameView, RunFileOp, TransferTarget,
 };
 pub use finder::{
-    ChipView, Clock, Delay, FilterChoice, FilterGroup, SearchHelpRow, SearchScope, SearchView,
-    SearchWalk, StopWalk, TextRange, WIDER_DEPTH, WalkUpdate,
+    ChipView, Clock, Delay, FilterChoice, FilterGroup, MatchLine, SearchHelpRow, SearchScope,
+    SearchView, SearchWalk, StopWalk, TextRange, WIDER_DEPTH, WalkUpdate,
 };
-pub use inspector::{FolderSize, InspectorView, ItemInfo, KindCount, SelectionSummary, SizeInfo};
+pub use inspector::{InspectorView, ItemInfo, KindCount, SelectionSummary, SizeInfo};
+pub use keymap::{KeyView, KeymapView, ShortcutConflictView};
 pub use layout::{FlatLayout, FlatPane, FlatSplit, NodeRef, Side};
 use layout::{Node, Pane};
+pub use media_info::{MediaInfo, ProbeMedia};
 pub use ops::{
     FolderView, ListDir, ListDirOutput, ListView, LoadState, LoadedState, OpenWindow, OrderListing,
     Ordered, PersistedState, PersistedWindow, PickFolder, PickFolderOutput, QuickLook,
     STATE_VERSION, SaveState, Unwatch, Watch, WatchEvent, WindowFrame,
 };
 pub use palette::{CommandId, CommandView, PaletteItem, PaletteTarget, PaletteView};
+pub use panes::{OtherPane, SelectPatternView};
 pub use pathbar::{
     Anchor, ChildDirs, ChildDirsOutput, ChildrenView, CrumbView, GoToMatch, GoToView, crumbs,
 };
@@ -112,6 +129,10 @@ pub use remote::{
     Connect, ConnectFields, ConnectOutput, ConnectView, Connection, Disconnect, ForgetSecret,
     HostKeyView, SchemeChoice,
 };
+pub use results::{
+    DuplicateSets, DuplicatesUpdate, FindDuplicates, Keep, ResultsView, SETS_HEADED, ScanProgress,
+    StillThere, StopDuplicates,
+};
 pub use saved::{SavedBadge, SavedSearchView};
 pub use selection::RowRange;
 pub use settings::{Appearance, IconSize, IconSizeChoice, QueueMode, Settings};
@@ -119,7 +140,11 @@ pub use sidebar::{
     Bookmark, DriveList, DriveStatusView, Eject, EjectConfirmView, EjectDone, SidebarIcon,
     SidebarItem, SidebarSection, SidebarSectionView, UserFolders, WatchDrives,
 };
+pub use sizes::{FolderSize, StopFolderSize};
 pub use system::{OpenHistoryOp, PickApp, SystemDone, SystemOp};
+pub use tags::{
+    ListTagged, TagColor, TagDef, TagDraftView, TagOp, TagPlaceView, TagView, Tagged, TaggedListing,
+};
 pub use thumbnails::{MediaNotice, MediaNotices, PreviewState, Thumbnail};
 pub use toasts::{ToastKind, ToastView};
 pub use trash::{ListTrash, TrashDone, TrashInfo, TrashOp};
@@ -881,6 +906,179 @@ pub enum Event {
     DisconnectServer {
         id: String,
     },
+    /// Leave out of the search what `.gitignore` files ignore, or don't.
+    SetSearchIgnored {
+        tab: u32,
+        on: bool,
+    },
+    /// Put the entries of the tab's folder into groups by `group`.
+    SetGroupBy {
+        tab: u32,
+        group: GroupBy,
+    },
+    /// Select every row of the tab's group at `group` (its place among
+    /// `TabViewModel::groups`), and nothing else.
+    SelectGroup {
+        tab: u32,
+        group: u32,
+    },
+    /// Look for files that hold the same bytes as another: in the folders
+    /// selected in the tab when `selected`, in the tab's own folder
+    /// otherwise. What is found shows in a new tab beside it
+    /// (`TabViewModel::results`).
+    FindDuplicates {
+        tab: u32,
+        selected: bool,
+    },
+    /// Stop the scan of the results tab; `Refresh` starts it over.
+    StopResults {
+        tab: u32,
+    },
+    /// In a tab of duplicates, select every file of each set but the one
+    /// `keep` names, ready to be deleted.
+    SelectDuplicates {
+        tab: u32,
+        keep: Keep,
+    },
+    /// Compare the folders the window's two panes show
+    /// (`WindowView::compare`): what differs shows in a new tab beside the
+    /// focused one (`ResultsView::compare`).
+    CompareFolders {
+        window: u32,
+    },
+    /// In a tab of compared folders, whether files of one size are read to
+    /// tell them apart; the folders are compared again.
+    SetCompareOptions {
+        tab: u32,
+        contents: bool,
+    },
+    /// In a tab of compared folders, copy the selected files (all of them
+    /// when none is selected) to the left folder or the right one. When
+    /// that replaces files it is asked about first (`CompareView::asking`).
+    SyncSelection {
+        tab: u32,
+        to_left: bool,
+    },
+    /// The answer to that question: replace the files, skip the ones that
+    /// would replace any, or copy nothing.
+    AnswerSync {
+        tab: u32,
+        choice: ConflictChoice,
+    },
+    /// Copy the focused tab's selection into the folder the window's other
+    /// pane shows (`WindowView::other_pane`), as `CopyTo` does.
+    CopyToOtherPane {
+        window: u32,
+    },
+    /// Move it there, as `MoveTo` does.
+    MoveToOtherPane {
+        window: u32,
+    },
+    /// Have the window's focused pane and its other pane change places.
+    SwapPanes {
+        window: u32,
+    },
+    /// Show the focused tab's folder in the other pane too.
+    MirrorToOtherPane {
+        window: u32,
+    },
+    /// Select every row of the tab that ends as one of its selected rows
+    /// does: files by their extension, folders with folders.
+    SelectSameExtension {
+        tab: u32,
+    },
+    /// Open the tab's Select by Pattern dialog
+    /// (`TabViewModel::select_pattern`), with the pattern used last.
+    OpenSelectPattern {
+        tab: u32,
+    },
+    /// The dialog's pattern, written as a search is.
+    SetSelectPattern {
+        tab: u32,
+        text: String,
+    },
+    /// Close the dialog, adding the rows its pattern matches to the
+    /// selection (`select`) or taking them out of it.
+    ApplySelectPattern {
+        tab: u32,
+        select: bool,
+    },
+    CloseSelectPattern {
+        tab: u32,
+    },
+    /// Start recording a shortcut for the command (`KeymapView::recording`):
+    /// the shell sends the next key pressed with `SetShortcut`.
+    EditShortcut {
+        command: CommandId,
+    },
+    /// Give the command the shortcut `text` (`Ctrl+Shift+K`, where `Ctrl`
+    /// is Cmd on a Mac), or none when it is empty. What can't be taken is
+    /// refused (`KeymapView::error`); what something else has waits for
+    /// `ConfirmShortcut` (`KeymapView::conflict`).
+    SetShortcut {
+        command: CommandId,
+        text: String,
+    },
+    /// Give the command the shortcut the app gives it.
+    ResetShortcut {
+        command: CommandId,
+    },
+    /// Every command gets the app's own shortcut back.
+    ResetAllShortcuts,
+    /// Take the shortcut asked for from what has it.
+    ConfirmShortcut,
+    /// Stop recording, and drop the shortcut that was asked about.
+    CancelShortcut,
+    /// Give the tab's selected items the tag, or take it from them when
+    /// every one of them has it.
+    ToggleTag {
+        tab: u32,
+        tag: u32,
+    },
+    /// Give the tab's selected items the tag (`on`), or take it from them.
+    SetTag {
+        tab: u32,
+        tag: u32,
+        on: bool,
+    },
+    /// Take every tag from the tab's selected items.
+    ClearTags {
+        tab: u32,
+    },
+    /// Open the tag editor (`ViewModel::tag_draft`): for the tag, or for a
+    /// new one with `None`.
+    EditTag {
+        tag: Option<u32>,
+    },
+    /// The editor's name and colour.
+    SetTagDraft {
+        name: String,
+        color: TagColor,
+    },
+    /// Close the editor, keeping the tag as it is there; nothing happens
+    /// while it says why it can't be kept.
+    ApplyTagDraft,
+    CancelTagDraft,
+    /// Delete the tag: no item has it any more.
+    DeleteTag {
+        tag: u32,
+    },
+    /// Put the tag at `to` among the tags.
+    MoveTag {
+        tag: u32,
+        to: u32,
+    },
+    /// Show the tag's items, wherever they are, in a tab beside `tab`
+    /// (`ResultsView::tag`).
+    OpenTag {
+        tab: u32,
+        tag: u32,
+    },
+    /// In a tab of a tag's items, take the tags from the items that are no
+    /// longer where they were.
+    RemoveMissingTagged {
+        tab: u32,
+    },
     /// Open the Compress dialog for the tab's selection.
     StartCompress {
         tab: u32,
@@ -1007,6 +1205,17 @@ pub enum Event {
     SizeCalculated {
         path: String,
         total: Option<u64>,
+        ticket: u64,
+    },
+    #[serde(skip)]
+    #[facet(skip)]
+    MediaProbed {
+        path: String,
+        revision: u128,
+        size: u64,
+        width: u32,
+        height: u32,
+        millis: u64,
     },
     #[serde(skip)]
     #[facet(skip)]
@@ -1201,6 +1410,62 @@ pub enum Event {
     PluginFolderChanged {
         folder: String,
     },
+    #[serde(skip)]
+    #[facet(skip)]
+    DuplicatesScanned {
+        tab: u32,
+        generation: u64,
+        update: DuplicatesUpdate,
+    },
+    /// Whether the files at `entries` of a results tab's listing are still
+    /// there, asked after a file operation.
+    #[serde(skip)]
+    #[facet(skip)]
+    ResultsChecked {
+        tab: u32,
+        generation: u64,
+        entries: Vec<u32>,
+        there: Vec<bool>,
+    },
+    #[serde(skip)]
+    #[facet(skip)]
+    FoldersCompared {
+        tab: u32,
+        generation: u64,
+        update: CompareUpdate,
+    },
+    /// How the files at `entries` of a tab of compared folders differ now,
+    /// asked after a file operation.
+    #[serde(skip)]
+    #[facet(skip)]
+    DifferencesChecked {
+        tab: u32,
+        generation: u64,
+        entries: Vec<u32>,
+        kinds: Vec<Difference>,
+    },
+    /// How far local time was from UTC at each of `times`, for the dates a
+    /// batch rename puts in names.
+    #[serde(skip)]
+    #[facet(skip)]
+    BatchOffsets {
+        tab: u32,
+        times: Vec<u64>,
+        offsets: Vec<i32>,
+    },
+    /// The tags of every tagged item, after they changed.
+    #[serde(skip)]
+    #[facet(skip)]
+    TagsChanged {
+        tagged: Tagged,
+    },
+    #[serde(skip)]
+    #[facet(skip)]
+    TaggedListed {
+        tab: u32,
+        generation: u64,
+        listed: TaggedListing,
+    },
 }
 
 impl Event {
@@ -1240,6 +1505,7 @@ impl Event {
                 | Self::ToggleSearchFilter { .. }
                 | Self::RemoveSearchChip { .. }
                 | Self::SetSearchCase { .. }
+                | Self::SetSearchIgnored { .. }
                 | Self::SetSearchDepth { .. }
                 | Self::SetSearchAny { .. }
                 | Self::CloseSearch { .. }
@@ -1261,6 +1527,7 @@ impl Event {
                 | Self::SetInspector { .. }
                 | Self::CalculateSize { .. }
                 | Self::SizeCalculated { .. }
+                | Self::MediaProbed { .. }
                 | Self::ThumbnailMade { .. }
                 | Self::OpenDiskAccessSettings
                 | Self::DismissDiskAccess { .. }
@@ -1276,6 +1543,12 @@ impl Event {
                 | Self::ChangeSettings { .. }
                 | Self::RestoreDefaultSettings
                 | Self::SetFolderDefaults { .. }
+                | Self::EditShortcut { .. }
+                | Self::SetShortcut { .. }
+                | Self::ResetShortcut { .. }
+                | Self::ResetAllShortcuts
+                | Self::ConfirmShortcut
+                | Self::CancelShortcut
         )
     }
 
@@ -1360,9 +1633,68 @@ impl Event {
         )
     }
 
+    /// Tags (`tags`).
+    const fn is_tags(&self) -> bool {
+        matches!(
+            self,
+            Self::ToggleTag { .. }
+                | Self::SetTag { .. }
+                | Self::ClearTags { .. }
+                | Self::EditTag { .. }
+                | Self::SetTagDraft { .. }
+                | Self::ApplyTagDraft
+                | Self::CancelTagDraft
+                | Self::DeleteTag { .. }
+                | Self::MoveTag { .. }
+                | Self::OpenTag { .. }
+                | Self::RemoveMissingTagged { .. }
+                | Self::TagsChanged { .. }
+                | Self::TaggedListed { .. }
+        )
+    }
+
+    /// Two-pane commands and selecting by pattern (`panes`).
+    const fn is_panes(&self) -> bool {
+        matches!(
+            self,
+            Self::CopyToOtherPane { .. }
+                | Self::MoveToOtherPane { .. }
+                | Self::SwapPanes { .. }
+                | Self::MirrorToOtherPane { .. }
+                | Self::SelectSameExtension { .. }
+                | Self::OpenSelectPattern { .. }
+                | Self::SetSelectPattern { .. }
+                | Self::ApplySelectPattern { .. }
+                | Self::CloseSelectPattern { .. }
+        )
+    }
+
     /// Checksums, archives and servers: see [`DirFleet::place_event`].
     const fn is_place(&self) -> bool {
-        self.is_checksum() || self.is_archive() || self.is_remote()
+        self.is_checksum()
+            || self.is_archive()
+            || self.is_remote()
+            || self.is_results()
+            || self.is_panes()
+            || self.is_tags()
+    }
+
+    /// Tabs that show what a scan found (`results`).
+    const fn is_results(&self) -> bool {
+        matches!(
+            self,
+            Self::FindDuplicates { .. }
+                | Self::StopResults { .. }
+                | Self::SelectDuplicates { .. }
+                | Self::DuplicatesScanned { .. }
+                | Self::ResultsChecked { .. }
+                | Self::CompareFolders { .. }
+                | Self::SetCompareOptions { .. }
+                | Self::SyncSelection { .. }
+                | Self::AnswerSync { .. }
+                | Self::FoldersCompared { .. }
+                | Self::DifferencesChecked { .. }
+        )
     }
 
     /// Connecting to servers (`remote`).
@@ -1413,7 +1745,8 @@ impl Event {
     const fn is_file(&self) -> bool {
         matches!(
             self,
-            Self::NewFolder { .. }
+            Self::BatchOffsets { .. }
+                | Self::NewFolder { .. }
                 | Self::NewTextFile { .. }
                 | Self::StartRename { .. }
                 | Self::Rename { .. }
@@ -1502,6 +1835,7 @@ impl Event {
                 | Self::SelectAll { .. }
                 | Self::InvertSelection { .. }
                 | Self::ClearSelection { .. }
+                | Self::SelectGroup { .. }
                 | Self::OpenSelection { .. }
                 | Self::QuickLook { .. }
                 | Self::OpenPreviewed { .. }
@@ -1533,6 +1867,17 @@ pub enum Effect {
     ChildDirs(ChildDirs),
     OpenHistory(OpenHistoryOp),
     FolderSize(FolderSize),
+    StopFolderSize(StopFolderSize),
+    ProbeMedia(ProbeMedia),
+    FindDuplicates(FindDuplicates),
+    StopDuplicates(StopDuplicates),
+    StillThere(StillThere),
+    CompareFolders(CompareFolders),
+    StopCompare(StopCompare),
+    Recompare(Recompare),
+    LocalOffsets(LocalOffsets),
+    Tags(TagOp),
+    ListTagged(ListTagged),
     HashFile(HashFile),
     Materialize(Materialize),
     SetArchivePassword(SetArchivePassword),
@@ -1592,8 +1937,10 @@ pub struct Model {
     saved: crate::search::saved::SavedSearches,
     /// The palette's text, while it is open.
     palette: Option<String>,
-    /// Folder sizes asked for in the inspector.
-    sizes: inspector::Sizes,
+    /// Folder sizes asked for, by the inspector or for lists.
+    sizes: sizes::Sizes,
+    /// What is known of pictures, videos and sounds.
+    media: media_info::MediaInfos,
     checksums: checksums::Checksums,
     archives: archives::Archives,
     remote: remote::Remote,
@@ -1608,6 +1955,12 @@ pub struct Model {
     now: u64,
     /// The user's home folder, where tabs go when their drive leaves.
     home: String,
+    /// The pattern rows were last selected by, offered again.
+    last_pattern: String,
+    /// The shortcuts the user gave commands.
+    keymap: keymap::Keymap,
+    /// The tags, and which item has which.
+    tags: tags::Tags,
 }
 
 impl Model {
@@ -1651,6 +2004,8 @@ struct Tab {
     history: History,
     /// Shows the Trash rather than a folder (`path` is then `None`).
     trash: bool,
+    /// Shows what a scan found rather than a folder (`path` is then `None`).
+    results: Option<results::Results>,
     /// Where to be once the folder is listed, when Back or Forward got here.
     returning_to: Option<Place>,
     /// A row the shell should scroll to, and a count that changes each time.
@@ -1661,6 +2016,8 @@ struct Tab {
     opened: Arc<Vec<(u32, u32)>>,
     /// The entries shown, as indices into `listing`, in display order.
     order: Vec<u32>,
+    /// The groups `order` is in, when the view groups its entries.
+    groups: Vec<GroupSpan>,
     view: FolderView,
     /// Rows selected, as positions in `order`.
     selection: selection::Tracked,
@@ -1686,6 +2043,11 @@ struct Tab {
     walk: Option<(u64, AbortHandle)>,
     /// The folder as the last walk named it, for the Folder column.
     walk_root: Option<String>,
+    /// The matching line of each entry of the listing, while file contents
+    /// are searched.
+    matched: Arc<Vec<finder::MatchLine>>,
+    /// How many files' contents the walk has read.
+    scanned: u64,
     /// The folders searched instead of the tab's own (the favorites).
     scope: Option<Vec<String>>,
     renaming: Option<files::Renaming>,
@@ -1699,6 +2061,8 @@ struct Tab {
     /// A crumb's subfolders, once read: the crumb's path and their names.
     children: Option<(String, Vec<String>)>,
     goto: Option<pathbar::GoTo>,
+    /// The pattern of the Select by Pattern dialog, while it is open.
+    select_pattern: Option<String>,
     /// The grid tile the pointer is on.
     hover: thumbnails::Hover,
     /// The folder couldn't be read for lack of permission.
@@ -1715,11 +2079,29 @@ struct Tab {
 }
 
 impl Tab {
+    /// Shows the tab's listing in `order`, as sorted for the tab's view: put
+    /// into the view's groups, with ages counted from `now`.
+    fn set_order(&mut self, mut order: Vec<u32>, now: u64) {
+        self.groups = match &mut self.results {
+            // What a scan found is kept set by set, whatever the view groups by.
+            Some(results) if results.arranges() => results.arrange(&self.listing, &mut order),
+            _ => crate::listing::group::arrange(
+                &self.listing,
+                &mut order,
+                self.view.group,
+                self.view.sort,
+                now,
+            ),
+        };
+        self.order = order;
+    }
+
     /// Drops what the tab showed, for a new place read with `generation`.
     fn reset_for(&mut self, generation: u64) {
         self.generation = generation;
         self.listing = Arc::default();
         self.order = Vec::new();
+        self.groups = Vec::new();
         *self.selection = Selection::default();
         self.loading = true;
         self.error = None;
@@ -1732,6 +2114,8 @@ impl Tab {
     fn title(&self) -> String {
         if self.trash {
             crate::current_path::TRASH_LABEL.to_owned()
+        } else if let Some(title) = self.results_title() {
+            title
         } else {
             title_of(self.path.as_deref().unwrap_or_default())
         }
@@ -1749,10 +2133,13 @@ impl Tab {
                 }))
     }
 
-    /// The key the tab's view is kept under: its folder, or the Trash's.
+    /// The key the tab's view is kept under: its folder, the Trash's, or
+    /// the one every tab of results shares.
     fn view_key(&self) -> Option<String> {
         if self.trash {
             Some(trash::TRASH_VIEW.to_owned())
+        } else if let Some(results) = &self.results {
+            Some(results.view_key().to_owned())
         } else {
             self.path.clone()
         }
@@ -1760,7 +2147,9 @@ impl Tab {
 
     /// Stops watching and reading, for a tab that closes.
     fn stop_reading(&mut self) -> Command<Effect, Event> {
-        self.stop_watching().and(self.stop_walk())
+        self.stop_watching()
+            .and(self.stop_walk())
+            .and(self.stop_scan())
     }
 
     /// Stops watching the folder, telling the handler too (crux #622).
@@ -1781,6 +2170,8 @@ pub struct ViewModel {
     pub windows: Vec<WindowView>,
     /// Every sort, in menu order, with its label.
     pub sorts: Vec<SortChoice>,
+    /// Every way of grouping, in menu order, with its label.
+    pub groupings: Vec<GroupChoice>,
     /// The list view's columns, in order, Name first.
     pub columns: Vec<ColumnView>,
     /// The columns that can be shown or hidden, in menu order.
@@ -1822,6 +2213,12 @@ pub struct ViewModel {
     pub plugin_jobs: Vec<PluginJobView>,
     /// Plugin actions bound to shortcuts, for the menu bar.
     pub plugin_shortcuts: Vec<PluginShortcutView>,
+    /// The keyboard settings: what is being recorded, refused or asked.
+    pub keymap: KeymapView,
+    /// The tags, in the user's order.
+    pub tags: Vec<TagView>,
+    /// The tag editor, while it is open.
+    pub tag_draft: Option<TagDraftView>,
     /// A plugin's results dialog, while shown.
     pub plugin_results: Option<PluginResultsView>,
     /// What Undo and Redo would do ("rename"), when they can.
@@ -1861,6 +2258,20 @@ pub struct SortChoice {
     pub label: String,
 }
 
+#[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GroupChoice {
+    pub group: GroupBy,
+    pub label: String,
+}
+
+/// A run of a tab's rows under one heading.
+#[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GroupView {
+    pub label: String,
+    pub first_row: u32,
+    pub count: u32,
+}
+
 impl ViewModel {
     pub fn window(&self, id: u32) -> Option<&WindowView> {
         self.windows.iter().find(|window| window.id == id)
@@ -1883,6 +2294,13 @@ pub struct WindowView {
     pub frame: Option<WindowFrame>,
     /// The window's sidebar: rows mark what its focused tab shows.
     pub sidebar: Vec<SidebarSectionView>,
+    /// The two folders `CompareFolders` would compare: the one the focused
+    /// pane shows and the next pane's, the one further left first. `None`
+    /// unless both are folders of this machine, neither inside the other.
+    pub compare: Option<ComparePair>,
+    /// The pane the two-pane commands act with: the one after the focused
+    /// pane. `None` in a window of one pane.
+    pub other_pane: Option<OtherPane>,
 }
 
 #[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1954,6 +2372,16 @@ pub struct TabViewModel {
     /// Results come from several folders: rows fill `folder`, and lists
     /// show the Folder column.
     pub show_folder: bool,
+    /// File contents are searched: rows fill `matched`, and lists show the
+    /// Match column.
+    pub show_match: bool,
+    /// The groups the rows are in, first to last, each with its heading;
+    /// empty when the view does not group. Together they hold every row.
+    pub groups: Vec<GroupView>,
+    /// The tab shows what a scan found rather than a folder: `path` is
+    /// empty, every row fills `folder` with the whole of its folder, and
+    /// `groups` are the sets found.
+    pub results: Option<ResultsView>,
     /// The row being renamed in place.
     pub renaming: Option<RenameView>,
     /// The path bar's crumbs, from the anchor on.
@@ -1962,6 +2390,10 @@ pub struct TabViewModel {
     pub crumbs_above: Vec<CrumbView>,
     pub children: Option<ChildrenView>,
     pub goto: Option<GoToView>,
+    /// The Select by Pattern dialog, while it is open.
+    pub select_pattern: Option<SelectPatternView>,
+    /// The tags every selected item has, for menus to mark.
+    pub selection_tags: Vec<u32>,
     /// The selection described, while the inspector is shown.
     pub inspector: Option<InspectorView>,
     /// The saved search the tab's search came from.
@@ -2010,6 +2442,14 @@ pub struct RowView {
     /// A file's size, for the line under large grid tiles ("" for folders;
     /// search results show `folder` there instead).
     pub detail: String,
+    /// The first line of the file that the content search matched, or "".
+    pub matched: String,
+    /// That line's number, from 1; 0 when there is none.
+    pub matched_line: u32,
+    /// Where in `matched` the search's text is.
+    pub matched_highlights: Vec<TextRange>,
+    /// The colours of the item's tags, in the tags' order.
+    pub tags: Vec<TagColor>,
 }
 
 fn tab_id(number: u32) -> Option<TabId> {
@@ -2052,7 +2492,7 @@ impl DirFleet {
         tab.path = Some(path.clone());
         tab.trash = false;
 
-        let stop_old = tab.stop_watching();
+        let stop_old = tab.stop_watching().and(tab.leave_results());
         let number = id.number();
         let watch = Command::stream_from_shell(Watch {
             id: generation,
@@ -2193,6 +2633,9 @@ impl DirFleet {
         model.saved = state.saved_searches.normalized();
         model.remote.connections = state.connections;
         model.plugins.settings = state.plugins;
+        model.keymap.load(state.keymap);
+        model.tags.load(state.tags);
+        model.plugins.set_command_shortcuts(model.keymap.taken());
         if let Some(path) = open {
             return Self::new_window(model, Some(path));
         }
@@ -2283,6 +2726,8 @@ impl DirFleet {
             saved_searches: model.saved.clone(),
             connections: model.remote.connections.clone(),
             plugins: model.plugins.settings.clone(),
+            keymap: model.keymap.saved(),
+            tags: Some(model.tags.saved()),
         }
     }
 
@@ -2354,6 +2799,7 @@ impl DirFleet {
         if let ListDirOutput::NeedsConnection { connection } = &output {
             return Self::listing_needs_connection(model, tab, connection);
         }
+        let now = model.now;
         let Some(state) = Self::current(model, tab, generation) else {
             return Command::done();
         };
@@ -2369,7 +2815,7 @@ impl DirFleet {
                 let kept = state.keep_selection();
                 state.listing = listing;
                 state.opened = opened;
-                state.order = order;
+                state.set_order(order, now);
                 state.restore_selection(&kept);
                 // Back or Forward: where you were.
                 if let Some(place) = state.returning_to.take() {
@@ -2489,7 +2935,9 @@ impl DirFleet {
             .iter_mut()
             .filter(|(_, state)| state.view_key().as_deref() == Some(path.as_str()))
             .filter_map(|(id, state)| {
-                let relist = state.view.list_view() != view.list_view();
+                // Groups are made of a sorted order: it is asked for again.
+                let relist =
+                    state.view.list_view() != view.list_view() || state.view.group != view.group;
                 state.view = view;
                 relist.then(|| Self::refilter(state, id.number(), generation))
             })
@@ -2536,6 +2984,12 @@ impl DirFleet {
             Event::ChangeSettings { .. }
             | Event::RestoreDefaultSettings
             | Event::SetFolderDefaults { .. } => Self::settings_event(model, event),
+            Event::EditShortcut { .. }
+            | Event::SetShortcut { .. }
+            | Event::ResetShortcut { .. }
+            | Event::ResetAllShortcuts
+            | Event::ConfirmShortcut
+            | Event::CancelShortcut => Self::keymap_event(model, event),
             Event::OpenDiskAccessSettings
             | Event::DismissDiskAccess { .. }
             | Event::RestartApp
@@ -2548,7 +3002,31 @@ impl DirFleet {
             | Event::HoverRow { .. }
             | Event::HoverRested { .. }
             | Event::MediaNoticed { .. } => Self::thumbnail_event(model, event),
-            event => Self::inspector_event(model, event),
+            Event::CalculateSize { .. } | Event::SizeCalculated { .. } => {
+                Self::size_event(model, event)
+            }
+            Event::MediaProbed {
+                path,
+                revision,
+                size,
+                width,
+                height,
+                millis,
+            } => Self::media_probed(
+                model,
+                &path,
+                (revision, size),
+                MediaInfo {
+                    width,
+                    height,
+                    millis,
+                },
+            ),
+            Event::SetInspector { shown } => {
+                model.inspector_shown = shown;
+                render()
+            }
+            _ => Command::done(),
         }
     }
 
@@ -2593,6 +3071,7 @@ impl DirFleet {
             | Event::SelectAll { tab }
             | Event::InvertSelection { tab }
             | Event::ClearSelection { tab }
+            | Event::SelectGroup { tab, .. }
             | Event::OpenSelection { tab }
             | Event::QuickLook { tab }
             | Event::OpenPreviewed { tab, .. } => *tab,
@@ -2624,6 +3103,13 @@ impl DirFleet {
             Event::SelectAll { .. } => state.selection.select_all(state.order.len()),
             Event::InvertSelection { .. } => state.selection.invert(state.order.len()),
             Event::ClearSelection { .. } => state.selection.deselect_all(),
+            Event::SelectGroup { group, .. } => {
+                let Some(span) = state.groups.get(group as usize) else {
+                    return Command::done();
+                };
+                let rows = span.first as usize..(span.first + span.len) as usize;
+                state.selection.set_rows(rows);
+            }
             Event::OpenSelection { .. } => return Self::open_selection(model, tab),
             Event::QuickLook { .. } => {
                 let (paths, index) = state.selected_paths();
@@ -2668,6 +3154,9 @@ impl DirFleet {
             Event::SetShowHidden { tab, show } => {
                 Self::change_view(model, tab, |view| view.show_hidden = show)
             }
+            Event::SetGroupBy { tab, group } => {
+                Self::change_view(model, tab, |view| view.group = group)
+            }
             _ => Command::done(),
         }
     }
@@ -2689,6 +3178,7 @@ impl DirFleet {
 
     /// A new order for the tab, unless its listing was replaced meanwhile.
     fn ordered(model: &mut Model, tab: u32, output: Ordered) -> Command<Effect, Event> {
+        let now = model.now;
         let Some(state) = tab_id(tab).and_then(|id| model.tabs.get_mut(&id)) else {
             return Command::done();
         };
@@ -2696,7 +3186,7 @@ impl DirFleet {
             return Command::done();
         }
         let kept = state.keep_selection();
-        state.order = output.order;
+        state.set_order(output.order, now);
         state.restore_selection(&kept);
         // The view or search changed again while this order was made.
         if output.view != state.list_view() {
@@ -2720,11 +3210,17 @@ impl DirFleet {
         let meta = tab.listing.meta(entry);
         let name = tab.listing.name(entry);
         let path = tab.row_path(position as usize);
+        let path_text = path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let found = tab.match_line(entry);
         let cut = !files.cut_is_empty()
             && tab
                 .row_op_path(position as usize)
                 .is_some_and(|path| files.is_cut(&path));
         RowView {
+            tags: model.row_tags(tab, position as usize),
             index: position,
             name: name.to_owned(),
             is_dir: meta.entry_type == EntryType::Directory,
@@ -2740,6 +3236,14 @@ impl DirFleet {
                         Some(&(count, _)) if count > 0 => count.to_string(),
                         _ => String::new(),
                     },
+                    Column::Size
+                        if model.settings.folder_sizes
+                            && meta.entry_type == EntryType::Directory =>
+                    {
+                        model.sizes.cell(&path_text)
+                    }
+                    Column::Dimensions => model.media.dimensions(&path_text, meta),
+                    Column::Duration => model.media.duration(&path_text, meta),
                     _ => format::cell(column, name, meta),
                 })
                 .collect(),
@@ -2757,6 +3261,16 @@ impl DirFleet {
                 String::new()
             },
             highlights: finder::ranges(highlights, name),
+            matched: found.map(|found| found.text.clone()).unwrap_or_default(),
+            matched_line: found.map_or(0, |found| found.line),
+            matched_highlights: found
+                .filter(|found| found.end > found.start)
+                .map(|found| TextRange {
+                    start: found.start,
+                    end: found.end,
+                })
+                .into_iter()
+                .collect(),
             cut,
             thumbnail_choice: path.as_ref().map_or(ThumbnailChoice::None, |path| {
                 model.thumbnails.choice(&path.to_string_lossy(), meta)
@@ -2824,6 +3338,7 @@ impl DirFleet {
         };
         let path = tab.path.clone().unwrap_or_default();
         let can_go_up = Location::parse(&path).parent().is_some();
+        let results = model.results_of(tab);
         TabViewModel {
             id: id.number(),
             title: model.remote.top_title(&path).unwrap_or_else(|| tab.title()),
@@ -2842,15 +3357,7 @@ impl DirFleet {
             loading: tab.loading || tab.walk.is_some(),
             error: tab.error.clone(),
             denied: tab.denied,
-            progress: if tab.walk.is_some() {
-                let folders = tab.listing.dirs().len();
-                format!(
-                    "Scanning {folders} folder{}…",
-                    if folders == 1 { "" } else { "s" }
-                )
-            } else {
-                String::new()
-            },
+            progress: tab.busy_text(results.as_ref()),
             total_rows,
             hidden_count,
             in_trash: tab.trash,
@@ -2870,14 +3377,25 @@ impl DirFleet {
             },
             search: tab.search_view(!model.sidebar.favorites.is_empty()),
             show_folder,
+            show_match: tab.shows_matches(),
+            groups: tab
+                .groups
+                .iter()
+                .map(|span| GroupView {
+                    label: span.label.clone(),
+                    first_row: span.first,
+                    count: span.len,
+                })
+                .collect(),
+            results,
             renaming: tab.rename_view(),
             crumbs,
             crumbs_above,
             children: tab.children_view(),
             goto: Self::goto_view(model, tab),
-            inspector: model
-                .inspector_shown
-                .then(|| tab.inspector_view(&model.sizes, &model.thumbnails, &model.checksums)),
+            select_pattern: tab.select_pattern_view(model.now, &model.tags),
+            selection_tags: model.selection_tags(tab),
+            inspector: model.inspector_shown.then(|| tab.inspector_view(model)),
             saved: tab.saved_badge(&model.saved.searches),
             selection: tab.selected_ranges(),
             selected_count: u32::try_from(tab.selection.len()).unwrap_or(u32::MAX),
@@ -2899,6 +3417,8 @@ impl App for DirFleet {
         command
             .and(Self::save_if_changed(model))
             .and(Self::request_thumbnails(model))
+            .and(Self::request_sizes(model))
+            .and(Self::request_media_info(model))
             .and(Self::request_activation(model))
             .and(Self::request_plugin_views(model))
     }
@@ -2929,9 +3449,7 @@ impl DirFleet {
             Event::Started { open, home } => Self::started(model, open, home),
             Event::StateLoaded { open, home, loaded } => {
                 let command = Self::state_loaded(model, open, home, loaded);
-                command
-                    .and(Self::check_access(model))
-                    .and(Self::load_plugins())
+                command.and(Self::after_state(model))
             }
             Event::ClockTicked { now } => {
                 model.now = now;
@@ -2971,7 +3489,8 @@ impl DirFleet {
             Event::SortBy { .. }
             | Event::SetReverse { .. }
             | Event::SetDisplay { .. }
-            | Event::SetShowHidden { .. } => Self::view_event(model, &event),
+            | Event::SetShowHidden { .. }
+            | Event::SetGroupBy { .. } => Self::view_event(model, &event),
             Event::ToggleColumn { .. } | Event::SetColumnWidth { .. } | Event::ResetColumns => {
                 Self::column_event(model, &event)
             }
@@ -3029,12 +3548,19 @@ impl DirFleet {
         }
     }
 
-    /// The events of checksums, archives and servers: each module has its own.
+    /// The events of checksums, archives, results, panes and servers: each
+    /// module has its own.
     fn place_event(model: &mut Model, event: Event) -> Command<Effect, Event> {
         if event.is_checksum() {
             Self::checksum_event(model, event)
         } else if event.is_archive() {
             Self::archive_event(model, event)
+        } else if event.is_results() {
+            Self::scan_event(model, event)
+        } else if event.is_panes() {
+            Self::pane_event(model, event)
+        } else if event.is_tags() {
+            Self::tag_event(model, event)
         } else {
             Self::remote_event(model, event)
         }
@@ -3099,7 +3625,10 @@ impl DirFleet {
                 &model.settings,
                 &model.saved.searches,
                 &model.remote,
+                &model.tags.views(),
             ),
+            compare: model.compare_pair_view(window),
+            other_pane: model.other_pane(window),
         }
     }
 
@@ -3134,6 +3663,13 @@ impl DirFleet {
         ViewModel {
             windows,
             sorts: Self::sort_choices(),
+            groupings: GroupBy::ALL
+                .iter()
+                .map(|&group| GroupChoice {
+                    group,
+                    label: group.label().to_owned(),
+                })
+                .collect(),
             columns,
             optional_columns,
             trash: TrashInfo::here(),
@@ -3141,7 +3677,7 @@ impl DirFleet {
             toasts: model.toasts.views(),
             inspector_shown: model.inspector_shown,
             settings: model.settings.clone(),
-            commands: palette::command_views(),
+            commands: palette::command_views(&model.keymap),
             palette: model.palette.as_ref().map(|text| PaletteView {
                 text: text.clone(),
                 items: palette::palette_items(model, text),
@@ -3160,6 +3696,9 @@ impl DirFleet {
             plugin_form: model.plugins.form_view(),
             plugin_jobs: model.plugins.job_views(),
             plugin_shortcuts: model.plugins.bindings().0,
+            keymap: model.keymap.view(),
+            tags: model.tags.views(),
+            tag_draft: model.tags.draft_view(),
             plugin_results: Self::results_view(model),
             undo: model.files.undo_label(),
             redo: model.files.redo_label(),

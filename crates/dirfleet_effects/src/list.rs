@@ -275,12 +275,30 @@ pub fn display_order_with(
     } else {
         Vec::new()
     };
+    // `tag:name` is answered by the tags, not by the listing.
+    let wanted = query
+        .as_ref()
+        .map(CompiledQuery::wanted_tags)
+        .filter(|names| !names.is_empty());
+    let tags = wanted.and_then(|_| history.tags());
+    let tagged = |index: usize| {
+        wanted.is_none_or(|names| {
+            tags.as_ref().is_some_and(|tags| {
+                // As the core names items.
+                let path = dirfleet_core::location::Location::parse(listing.dir(index))
+                    .join(listing.name(index))
+                    .to_string();
+                tags.has_all(&path, names)
+            })
+        })
+    };
     let keep = |index: u32| {
         let index = index as usize;
         is_shown(listing.name(index), listing.meta(index), view.show_hidden)
             && query
                 .as_ref()
                 .is_none_or(|query| query.matches(listing, folded, &opened, index))
+            && tagged(index)
     };
     if order.len() < PARALLEL_FILTER_THRESHOLD {
         return order.into_iter().filter(|&index| keep(index)).collect();
@@ -408,7 +426,14 @@ mod tests {
         assert_eq!(names(&list_dir(dir.path(), view.clone())), ["notes.txt"]);
 
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        let found = crate::walk::walk(&[dir.path().to_path_buf()], 3, false, &cancel, &|_| {});
+        let found = crate::walk::walk(
+            &[dir.path().to_path_buf()],
+            3,
+            false,
+            &cancel,
+            crate::walk::WalkOptions::default(),
+            &|_| {},
+        );
         let order = display_order(&found.listing, &view);
         let mut names: Vec<_> = order
             .iter()

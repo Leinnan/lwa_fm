@@ -539,3 +539,139 @@ fn respelling_a_name_is_not_a_conflict() {
             .any(|entry| entry.file_name() == "NOTES.txt")
     );
 }
+
+#[test]
+fn files_are_copied_each_to_its_own_place_as_one_step() {
+    let sandbox = Sandbox::new("pairs");
+    let new = sandbox.write("a/new.txt", "new");
+    let deep = sandbox.write("a/made/deep/one.txt", "one");
+    let deeper = sandbox.write("a/made/deep/er/two.txt", "two");
+    let newer = sandbox.write("a/sub/changed.txt", "newer words");
+    sandbox.write("b/sub/changed.txt", "old");
+    sandbox.write("b/sub/kept.txt", "kept");
+    let gone = sandbox.path("a/gone.txt");
+    let outcome = run(FileOp::CopyPairs {
+        pairs: vec![
+            (new, sandbox.path("b/new.txt")),
+            (deep, sandbox.path("b/made/deep/one.txt")),
+            (deeper, sandbox.path("b/made/deep/er/two.txt")),
+            (newer.clone(), sandbox.path("b/sub/changed.txt")),
+            (gone, sandbox.path("b/gone.txt")),
+        ],
+        into: sandbox.path("b"),
+    });
+    assert_eq!(outcome.description, "Copying 5 items to b");
+    // What is not there to copy is said, and the rest is copied.
+    assert_eq!(outcome.errors.len(), 1, "{:?}", outcome.errors);
+    assert!(outcome.errors[0].starts_with("gone.txt"));
+    assert_eq!(read(&sandbox.path("b/new.txt")), "new");
+    assert_eq!(read(&sandbox.path("b/made/deep/one.txt")), "one");
+    assert_eq!(read(&sandbox.path("b/made/deep/er/two.txt")), "two");
+    assert_eq!(read(&sandbox.path("b/sub/changed.txt")), "newer words");
+    assert_eq!(read(&sandbox.path("b/sub/kept.txt")), "kept");
+    // A copy is changed when its original was, so the two pass for one.
+    let changed = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    assert_eq!(changed(&sandbox.path("b/sub/changed.txt")), changed(&newer));
+    // Undo takes back the new file and the folder made, whole; the file
+    // that was replaced stays replaced.
+    assert_eq!(
+        outcome.undo,
+        Some(Undo::Created(vec![
+            sandbox.path("b/new.txt"),
+            sandbox.path("b/made")
+        ]))
+    );
+    // Every folder that changed is told of: where a file was put, and
+    // where a folder was made.
+    for dir in ["b", "b/made/deep", "b/made/deep/er", "b/sub"] {
+        assert!(
+            outcome.affected_dirs.contains(&sandbox.path(dir)),
+            "{dir}: {:?}",
+            outcome.affected_dirs
+        );
+    }
+}
+
+#[test]
+fn names_are_swapped_and_handed_down_a_line_and_undo_puts_them_back() {
+    let sandbox = Sandbox::new("swap");
+    let a = sandbox.write("a.txt", "was a");
+    let b = sandbox.write("b.txt", "was b");
+    let c = sandbox.write("c.txt", "was c");
+    let d = sandbox.path("d.txt");
+    let outcome = run(FileOp::RenameMany(vec![
+        // a and b change names; c moves on to a free one.
+        (a.clone(), b.clone()),
+        (b.clone(), a.clone()),
+        (c.clone(), d.clone()),
+    ]));
+    assert!(outcome.succeeded(), "{:?}", outcome.errors);
+    assert_eq!(read(&a), "was b");
+    assert_eq!(read(&b), "was a");
+    assert_eq!(read(&d), "was c");
+    assert!(!c.exists());
+    // A line: each takes the name of the next, the last a new one.
+    let line = run(FileOp::RenameMany(vec![
+        (a.clone(), b.clone()),
+        (b.clone(), d.clone()),
+        (d.clone(), c.clone()),
+    ]));
+    assert!(line.succeeded(), "{:?}", line.errors);
+    assert_eq!(read(&b), "was b");
+    assert_eq!(read(&d), "was a");
+    assert_eq!(read(&c), "was c");
+    // Nothing waits under a temporary name once it is over.
+    let left: Vec<String> = fs::read_dir(&sandbox.0)
+        .expect("read")
+        .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+        .collect();
+    assert_eq!(left.len(), 3, "{left:?}");
+
+    // Undo hands the names back up the line, then swaps them back.
+    let undone = run(FileOp::Undo(line.undo.expect("undo")));
+    assert!(undone.succeeded(), "{:?}", undone.errors);
+    assert_eq!(read(&a), "was b");
+    assert_eq!(read(&b), "was a");
+    assert_eq!(read(&d), "was c");
+    let undone = run(FileOp::Undo(outcome.undo.expect("undo")));
+    assert!(undone.succeeded(), "{:?}", undone.errors);
+    assert_eq!(
+        (read(&a), read(&b), read(&c)),
+        ("was a".to_owned(), "was b".to_owned(), "was c".to_owned())
+    );
+    assert!(!d.exists());
+}
+
+#[test]
+fn a_batch_rename_that_cannot_finish_renames_nothing() {
+    let sandbox = Sandbox::new("rollback");
+    let a = sandbox.write("a.txt", "was a");
+    let b = sandbox.write("b.txt", "was b");
+    let taken = sandbox.write("taken.txt", "stays");
+    let outcome = run(FileOp::RenameMany(vec![
+        (a.clone(), b.clone()),
+        (b.clone(), sandbox.path("c.txt")),
+        // Not one of the batch: its name can't be taken.
+        (sandbox.path("c.txt"), taken.clone()),
+    ]));
+    assert_eq!(outcome.errors.len(), 1, "{:?}", outcome.errors);
+    assert_eq!(outcome.undo, None);
+    assert_eq!(read(&a), "was a");
+    assert_eq!(read(&b), "was b");
+    assert_eq!(read(&taken), "stays");
+    assert!(!sandbox.path("c.txt").exists());
+    let left = fs::read_dir(&sandbox.0).expect("read").count();
+    assert_eq!(left, 3, "no temporary name is left behind");
+
+    // A name written another way is the item's own to take.
+    let respelled = sandbox.path("A.TXT");
+    let outcome = run(FileOp::RenameMany(vec![(a, respelled)]));
+    assert!(outcome.succeeded(), "{:?}", outcome.errors);
+    let names: Vec<String> = fs::read_dir(&sandbox.0)
+        .expect("read")
+        .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+        .collect();
+    assert!(names.contains(&"A.TXT".to_owned()), "{names:?}");
+    let undone = run(FileOp::Undo(outcome.undo.expect("undo")));
+    assert!(undone.succeeded(), "{:?}", undone.errors);
+}

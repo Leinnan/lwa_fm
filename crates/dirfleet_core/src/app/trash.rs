@@ -113,7 +113,7 @@ impl DirFleet {
         tab.trash = true;
         tab.committed = None;
         tab.set_search(None);
-        let stop_old = tab.stop_watching();
+        let stop_old = tab.stop_watching().and(tab.leave_results());
         render().and(stop_old).and(Self::load(tab, id.number()))
     }
 

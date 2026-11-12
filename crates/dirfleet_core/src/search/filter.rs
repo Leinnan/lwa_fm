@@ -12,9 +12,7 @@ const IMAGE_EXTS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "ico", "svg", "heic", "avif", "raw",
     "psd",
 ];
-const AUDIO_EXTS: &[&str] = &[
-    "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", "aiff",
-];
+use crate::listing::kinds::AUDIO_EXTS;
 const DOCUMENT_EXTS: &[&str] = &[
     "pdf", "doc", "docx", "odt", "rtf", "txt", "md", "xls", "xlsx", "ods", "csv", "ppt", "pptx",
     "odp", "epub",
@@ -230,6 +228,10 @@ pub struct CompiledQuery {
     pub needs_folded: bool,
     /// An `opened:` filter is present, so `matches` needs open times.
     pub needs_opened: bool,
+    /// The names, in small letters, of the tags an entry must have. Which
+    /// entry has which tag is not the listing's to say: whoever knows asks
+    /// [`Self::wanted_tags`] and leaves out the entries that lack one.
+    tags: Vec<String>,
 }
 
 impl CompiledQuery {
@@ -241,6 +243,7 @@ impl CompiledQuery {
         let mut names = Vec::new();
         let mut excluded = Vec::new();
         let mut predicates = Vec::new();
+        let mut tags = Vec::new();
         // A chip still being filled in (blank) filters nothing yet.
         for chip in search
             .effective_chips()
@@ -270,11 +273,13 @@ impl CompiledQuery {
                 Chip::Opened(age) => {
                     predicates.push(Predicate::OpenedSince(now.saturating_sub(age.seconds())));
                 }
-                // Extra folders change what is scanned, not what matches.
-                Chip::In(_) => {}
+                // Extra folders and content terms change what is read, not
+                // which of the entries read match.
+                Chip::In(_) | Chip::Content { .. } => {}
+                Chip::Tag(name) => tags.push(name.trim().to_lowercase()),
             }
         }
-        if names.is_empty() && excluded.is_empty() && predicates.is_empty() {
+        if names.is_empty() && excluded.is_empty() && predicates.is_empty() && tags.is_empty() {
             return None;
         }
         let needs_folded = !case_sensitive
@@ -293,7 +298,14 @@ impl CompiledQuery {
             case_sensitive,
             needs_folded,
             needs_opened,
+            tags,
         })
+    }
+
+    /// The names of the tags an entry must have, which [`Self::matches`]
+    /// does not look at.
+    pub fn wanted_tags(&self) -> &[String] {
+        &self.tags
     }
 
     /// Whether entry `index` matches. `folded` is the listing's folded names

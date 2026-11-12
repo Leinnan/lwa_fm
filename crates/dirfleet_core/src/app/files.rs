@@ -911,6 +911,7 @@ impl DirFleet {
                 | Event::SetBatchRename { .. }
                 | Event::ApplyBatchRename { .. }
                 | Event::CancelBatchRename { .. }
+                | Event::BatchOffsets { .. }
         ) {
             return Self::batch_event(model, event);
         }
@@ -934,8 +935,9 @@ impl DirFleet {
                 let Some(state) = tab_id(tab).and_then(|id| model.tabs.get_mut(&id)) else {
                     return Command::done();
                 };
-                // Several selected: batch rename. Nothing renames in the Trash.
-                if state.trash {
+                // Several selected: batch rename. Nothing renames in the
+                // Trash, or among what a scan found.
+                if state.trash || state.results.is_some() {
                     return Command::done();
                 }
                 if state.selection.rows().nth(1).is_some() {
@@ -993,6 +995,10 @@ impl DirFleet {
                 };
                 let paths = model.tabs[&id].op_targets();
                 if paths.is_empty() || model.tabs[&id].trash {
+                    return Command::done();
+                }
+                // No more copies are made among the duplicates found.
+                if matches!(event, Event::Duplicate { .. }) && model.tabs[&id].results.is_some() {
                     return Command::done();
                 }
                 let server = paths.iter().any(|path| on_server(path));
@@ -1190,7 +1196,7 @@ impl DirFleet {
     }
 
     /// Copies or moves the tab's selection into `folder`.
-    fn send_selection(
+    pub(super) fn send_selection(
         model: &mut Model,
         tab: u32,
         folder: String,
@@ -1380,6 +1386,28 @@ impl DirFleet {
             .iter()
             .map(|dir| dir.to_string_lossy().into_owned())
             .collect();
+        // What was added up there, around it and inside it has changed.
+        model.sizes.touched(&affected);
+        let refreshes = Self::refresh_changed(model, outcome, &affected);
+        let told = Self::tell_plugins_file_op(model, outcome);
+        // Its drives are free for whatever waited behind it.
+        let next = Self::pump(model);
+        render()
+            .and(toast)
+            .and(told)
+            .and(Self::follow_renames(model, outcome))
+            .and(Command::all(refreshes))
+            .and(next)
+    }
+
+    /// Reads again the tabs that show the folders in `affected`, or the
+    /// Trash when it changed. What a scan found is not read again: its files
+    /// in those folders are checked for still being there.
+    fn refresh_changed(
+        model: &mut Model,
+        outcome: &Outcome,
+        affected: &[String],
+    ) -> Vec<Command<Effect, Event>> {
         // Collected first: refreshing needs the model.
         #[allow(clippy::needless_collect)]
         let refresh: Vec<u32> = model
@@ -1387,6 +1415,8 @@ impl DirFleet {
             .iter()
             .filter(|(_, tab)| {
                 (outcome.trash_changed && tab.trash)
+                    // A tag's items may have been removed or put back.
+                    || tab.shown_tag().is_some()
                     || tab
                         .path
                         .as_ref()
@@ -1394,19 +1424,17 @@ impl DirFleet {
             })
             .map(|(id, _)| id.number())
             .collect();
-        let refreshes: Vec<_> = refresh
+        let mut refreshes: Vec<_> = refresh
             .into_iter()
             .map(|tab| Self::refresh(model, tab))
             .collect();
-        let told = Self::tell_plugins_file_op(model, outcome);
-        // Its drives are free for whatever waited behind it.
-        let next = Self::pump(model);
-        render()
-            .and(toast)
-            .and(told)
-            .and(Self::follow_renames(outcome))
-            .and(Command::all(refreshes))
-            .and(next)
+        refreshes.extend(
+            model
+                .tabs
+                .iter()
+                .filter_map(|(id, tab)| tab.check_results(id.number(), affected)),
+        );
+        refreshes
     }
 
     /// Plugins subscribed to `file_op_finished` hear how it went, as egui's.
@@ -1433,7 +1461,7 @@ impl DirFleet {
 
     /// Open counts and chosen thumbnails follow renamed and moved items, as
     /// egui's do; before the folders are read again.
-    fn follow_renames(outcome: &Outcome) -> Command<Effect, Event> {
+    fn follow_renames(model: &Model, outcome: &Outcome) -> Command<Effect, Event> {
         let text = |path: &Path| path.to_string_lossy().into_owned();
         let renamed: Vec<(String, String)> = match &outcome.undo {
             Some(Undo::Rename { from, to }) => vec![(text(from), text(to))],
@@ -1443,7 +1471,9 @@ impl DirFleet {
                 .collect(),
             _ => return Command::done(),
         };
-        Self::history(OpenHistoryOp::Rename(renamed.clone())).and(Self::rename_choices(renamed))
+        Self::history(OpenHistoryOp::Rename(renamed.clone()))
+            .and(Self::rename_tagged(model, renamed.clone()))
+            .and(Self::rename_choices(renamed))
     }
 }
 

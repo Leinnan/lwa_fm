@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use dirfleet_core::app::{
-    FilterGroup, RenameView, RowRange, RowView, TabTitle, TabViewModel, ViewModel, WindowView,
+    FilterGroup, GroupView, RenameView, RowRange, RowView, TabTitle, TabViewModel, ViewModel,
+    WindowView,
 };
 
 use crate::files::ColumnSet;
@@ -23,11 +24,17 @@ pub struct TabRows {
     /// The folder shown; with `in_trash`, what makes the list start at its top again.
     pub path: String,
     pub in_trash: bool,
+    /// The tab shows what a scan found: it has no folder, and each row names
+    /// the whole of its own.
+    pub found: bool,
     /// Every row of the folder, in sight or not.
     pub total_rows: u32,
     /// The position of `rows[0]`.
     pub first_row: u32,
     pub rows: Vec<Rc<RowView>>,
+    /// The groups the rows are in, each with its heading; none when the
+    /// folder is not grouped.
+    pub groups: Vec<GroupView>,
     pub selection: Vec<RowRange>,
     pub cursor: Option<u32>,
     pub scroll_to: Option<u32>,
@@ -52,9 +59,10 @@ impl TabRows {
 
     /// Where the entry `row` is on disk. `None` for what has no path of its
     /// own to act on: an item in the Recycle Bin, a tab without a folder, an
-    /// entry inside an archive.
+    /// entry inside an archive. What a scan found is in the folder its row
+    /// names in full.
     pub fn path_of(&self, row: &RowView) -> Option<PathBuf> {
-        (!self.in_trash && !self.path.is_empty() && is_on_disk(&self.path))
+        (!self.in_trash && (self.found || !self.path.is_empty()) && is_on_disk(&self.path))
             .then(|| Path::new(&self.path).join(&row.folder).join(&row.name))
     }
 
@@ -90,9 +98,11 @@ impl TabRows {
             tab: tab.id,
             path: tab.path.clone(),
             in_trash: tab.in_trash,
+            found: tab.results.is_some(),
             total_rows: tab.total_rows,
             first_row,
             rows,
+            groups: std::mem::take(&mut tab.groups),
             selection: std::mem::take(&mut tab.selection),
             cursor: tab.cursor.take(),
             scroll_to: tab.scroll_to.take(),
@@ -224,6 +234,10 @@ mod tests {
             animation: String::new(),
             tooltip: String::new(),
             detail: String::new(),
+            matched: String::new(),
+            matched_line: 0,
+            matched_highlights: Vec::new(),
+            tags: Vec::new(),
         }
     }
 

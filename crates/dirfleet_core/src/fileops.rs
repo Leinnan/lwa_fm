@@ -131,6 +131,15 @@ pub enum FileOp {
         /// its top goes into a new folder named after it.
         own_folder: bool,
     },
+    /// Copy each file to the place named for it, making the folders it
+    /// needs on the way and replacing a file already there. Many files in
+    /// many folders, as one step.
+    CopyPairs {
+        /// Each file, and where its copy goes.
+        pairs: Vec<(PathBuf, PathBuf)>,
+        /// The folder all the copies end up under, for what is said of it.
+        into: PathBuf,
+    },
     /// Reverts an earlier operation.
     Undo(Undo),
 }
@@ -151,7 +160,7 @@ impl FileOp {
                 paths.iter().map(PathBuf::as_path).collect()
             }
             Self::Rename { from, to } => vec![from, to],
-            Self::RenameMany(pairs) => pairs
+            Self::RenameMany(pairs) | Self::CopyPairs { pairs, .. } => pairs
                 .iter()
                 .flat_map(|(from, to)| [from.as_path(), to.as_path()])
                 .collect(),
@@ -177,6 +186,7 @@ impl FileOp {
                 | Self::Delete(_)
                 | Self::Extract { .. }
                 | Self::Compress { .. }
+                | Self::CopyPairs { .. }
         )
     }
 
@@ -225,6 +235,9 @@ impl FileOp {
             Self::Compress { srcs, dst, .. } => {
                 format!("Compressed {} to {}", count(srcs.len()), display_name(dst))
             }
+            Self::CopyPairs { pairs, into } => {
+                format!("Copied {} to {}", count(pairs.len()), display_name(into))
+            }
             Self::Undo(undo) => format!("Undid {}", undo.describe()),
         }
     }
@@ -264,6 +277,9 @@ impl FileOp {
             ),
             Self::Compress { srcs, dst, .. } => {
                 format!("Compressing {} to {}", items(srcs.len()), display_name(dst))
+            }
+            Self::CopyPairs { pairs, into } => {
+                format!("Copying {} to {}", items(pairs.len()), display_name(into))
             }
             Self::Undo(undo) => format!("Undo {}", undo.describe()),
         }

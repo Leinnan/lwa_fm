@@ -14,6 +14,8 @@ use crate::core_link::CoreLink;
 pub const HEADER_HEIGHT: f64 = 30.0;
 /// The width of the Folder column search results add.
 const FOLDER_WIDTH: f64 = 180.0;
+/// How wide the line a content search matched is shown.
+const MATCH_WIDTH: f64 = 300.0;
 /// The space between columns; the grip that resizes a column sits in it.
 pub const COLUMN_GAP: f64 = 12.0;
 /// Columns are not dragged narrower than this.
@@ -37,9 +39,10 @@ pub struct Cell {
     pub sort: Option<Sort>,
 }
 
-/// The columns a list shows; `show_folder` adds each entry's folder after its name.
-pub fn cells(columns: &ColumnSet, show_folder: bool) -> Vec<Cell> {
-    let mut cells = Vec::with_capacity(columns.shown.len() + 1);
+/// The columns a list shows; `show_folder` adds each entry's folder after
+/// its name, and `show_match` the line a content search matched.
+pub fn cells(columns: &ColumnSet, show_folder: bool, show_match: bool) -> Vec<Cell> {
+    let mut cells = Vec::with_capacity(columns.shown.len() + 2);
     for column in &columns.shown {
         cells.push(Cell {
             column: column.column,
@@ -53,6 +56,15 @@ pub fn cells(columns: &ColumnSet, show_folder: bool) -> Vec<Cell> {
                 column: Column::Folder,
                 title: "Folder".to_owned(),
                 width: Some(FOLDER_WIDTH),
+                right_aligned: false,
+                sort: None,
+            });
+        }
+        if column.column == Column::Name && show_match {
+            cells.push(Cell {
+                column: Column::Match,
+                title: "Match".to_owned(),
+                width: Some(MATCH_WIDTH),
                 right_aligned: false,
                 sort: None,
             });
@@ -265,7 +277,7 @@ mod tests {
             shown: vec![column(Column::Name, 0), column(Column::Size, 90)],
             optional: Vec::new(),
         };
-        let cells = cells(&set, false);
+        let cells = cells(&set, false, false);
         assert_eq!(cells[0].width, None);
         assert_eq!(cells[1].width, Some(90.0));
     }
@@ -276,8 +288,25 @@ mod tests {
             shown: vec![column(Column::Name, 0), column(Column::Size, 90)],
             optional: Vec::new(),
         };
-        let shown: Vec<Column> = cells(&set, true).iter().map(|cell| cell.column).collect();
-        assert_eq!(shown, [Column::Name, Column::Folder, Column::Size]);
+        let shown = |folder, matched| -> Vec<Column> {
+            cells(&set, folder, matched)
+                .iter()
+                .map(|cell| cell.column)
+                .collect()
+        };
+        assert_eq!(
+            shown(true, false),
+            [Column::Name, Column::Folder, Column::Size]
+        );
+        // A search inside files shows the line it matched as well.
+        assert_eq!(
+            shown(true, true),
+            [Column::Name, Column::Folder, Column::Match, Column::Size]
+        );
+        assert_eq!(
+            shown(false, true),
+            [Column::Name, Column::Match, Column::Size]
+        );
     }
 
     #[test]

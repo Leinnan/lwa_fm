@@ -584,6 +584,9 @@ impl PreviewSpec {
 #[derive(Debug, Clone, Default)]
 pub struct ProbeInfo {
     pub duration: Option<f64>,
+    /// The picture's width and height, as stored.
+    pub width: u32,
+    pub height: u32,
     pub pixels: u64,
     pub frame_rate: Option<f64>,
     pub stream: usize,
@@ -785,7 +788,10 @@ fn parse_probe(bytes: &[u8]) -> Result<ProbeInfo, MediaError> {
             "Video dimensions exceed thumbnail decoding limit",
         ));
     }
+    let side = |name: &str| u32::try_from(stream[name].as_u64().unwrap_or(0)).unwrap_or(0);
     Ok(ProbeInfo {
+        width: side("width"),
+        height: side("height"),
         pixels,
         frame_rate: stream["avg_frame_rate"].as_str().and_then(parse_frame_rate),
         duration: valid_duration(&stream["duration"])
@@ -905,18 +911,10 @@ fn parse_probe_stderr(header: &str) -> Result<ProbeInfo, MediaError> {
             "Video dimensions exceed thumbnail decoding limit",
         ));
     }
-    let duration = header
-        .split("Duration:")
-        .nth(1)
-        .and_then(|value| value.trim().split(',').next())
-        .and_then(|value| {
-            let mut values = value.split(':').map(str::parse::<f64>);
-            let hours = values.next()?.ok()?;
-            let minutes = values.next()?.ok()?;
-            let seconds = hours.mul_add(3600.0, minutes.mul_add(60.0, values.next()?.ok()?));
-            (seconds > 0.0 && Duration::try_from_secs_f64(seconds).is_ok()).then_some(seconds)
-        });
+    let duration = header_duration(header);
     Ok(ProbeInfo {
+        width: u32::try_from(width).unwrap_or(0),
+        height: u32::try_from(height).unwrap_or(0),
         pixels: width.saturating_mul(height),
         frame_rate: stream
             .split(',')
@@ -930,6 +928,58 @@ fn parse_probe_stderr(header: &str) -> Result<ProbeInfo, MediaError> {
         matrix: stream.contains("bt2020nc").then(|| "bt2020nc".into()),
         range: None,
     })
+}
+
+/// The playing time `FFmpeg` writes at the top of what it says of a file,
+/// in seconds.
+fn header_duration(header: &str) -> Option<f64> {
+    header
+        .split("Duration:")
+        .nth(1)
+        .and_then(|value| value.trim().split(',').next())
+        .and_then(|value| {
+            let mut values = value.split(':').map(str::parse::<f64>);
+            let hours = values.next()?.ok()?;
+            let minutes = values.next()?.ok()?;
+            let seconds = hours.mul_add(3600.0, minutes.mul_add(60.0, values.next()?.ok()?));
+            (seconds > 0.0 && Duration::try_from_secs_f64(seconds).is_ok()).then_some(seconds)
+        })
+}
+
+/// How long the sound or video at `path` plays, in seconds, as the file
+/// itself says: asked of `FFprobe`, or read from `FFmpeg`'s header where
+/// there is no `FFprobe`.
+pub fn playing_time(path: &Path, cancel: &AtomicBool, deadline: Instant) -> Option<f64> {
+    let mut command = backend_command(true);
+    command
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path);
+    match process::run(&mut command, cancel, deadline, 4096) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes)
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|seconds| *seconds > 0.0 && Duration::try_from_secs_f64(*seconds).is_ok()),
+        Err(error) if error.kind == ErrorKind::Unavailable => {
+            let mut command = backend_command(false);
+            command.args(["-hide_banner", "-nostdin", "-i"]).arg(path);
+            match process::run(&mut command, cancel, deadline, 1024) {
+                // Without an output `FFmpeg` fails, having said what the file is.
+                Err(error) if error.kind == ErrorKind::InvalidMedia => {
+                    header_duration(&error.message)
+                }
+                _ => None,
+            }
+        }
+        Err(_) => None,
+    }
 }
 
 fn hdr_filters_available(cancel: &AtomicBool, deadline: Instant) -> Result<bool, MediaError> {

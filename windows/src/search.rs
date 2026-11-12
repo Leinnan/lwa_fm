@@ -24,6 +24,8 @@ pub enum Choice {
     Any,
     Depth(u32),
     Favorites,
+    /// Leave out what `.gitignore` files ignore.
+    Ignored,
     Filter(String),
 }
 
@@ -34,13 +36,20 @@ impl Choice {
             Self::Any => Key::from("any"),
             Self::Depth(depth) => Key::from(format!("depth-{depth}")),
             Self::Favorites => Key::from("favorites"),
+            Self::Ignored => Key::from("ignored"),
             Self::Filter(token) => Key::from(format!("filter-{token}")),
         }
     }
 
     /// Every choice the menu offers, to find the one a key names.
     fn all(filters: &[FilterGroup]) -> Vec<Self> {
-        let mut all = vec![Self::Case, Self::Any, Self::Depth(1), Self::Favorites];
+        let mut all = vec![
+            Self::Case,
+            Self::Any,
+            Self::Depth(1),
+            Self::Favorites,
+            Self::Ignored,
+        ];
         all.extend(DEPTHS.map(Self::Depth));
         all.extend(
             filters
@@ -73,6 +82,10 @@ impl Choice {
             Self::Favorites => Event::SetSearchFavorites {
                 tab,
                 on: !search.is_some_and(|search| search.scope == SearchScope::Favorites),
+            },
+            Self::Ignored => Event::SetSearchIgnored {
+                tab,
+                on: !search.is_some_and(|search| search.skip_ignored),
             },
             Self::Filter(token) => Event::ToggleSearchFilter { tab, token },
         }
@@ -120,6 +133,14 @@ pub fn options(
             marked(
                 "Favorites",
                 search.is_some_and(|search| search.scope == SearchScope::Favorites),
+            ),
+        ),
+        MenuItem::separator("leave-out"),
+        MenuItem::item(
+            Choice::Ignored.key(),
+            marked(
+                "Skip What Git Ignores",
+                search.is_some_and(|search| search.skip_ignored),
             ),
         ),
     ];
@@ -210,7 +231,7 @@ pub fn chips(core: &CoreLink, tab: &TabViewModel) -> Option<View> {
     let search = tab.search.as_ref()?;
     // The saved search this one came from stands before its filters.
     let mut parts = crate::saved::badge(core, tab);
-    if search.chips.is_empty() && !search.searching && parts.is_empty() {
+    if search.chips.is_empty() && !search.searching && !search.content_pending && parts.is_empty() {
         return None;
     }
     let id = tab.id;
@@ -237,6 +258,20 @@ pub fn chips(core: &CoreLink, tab: &TabViewModel) -> Option<View> {
                 }
             }),
     );
+    // Text to find inside files is searched only once it is a filter.
+    let note = |text: String| -> View {
+        TextBlock::new()
+            .text(text)
+            .font_size(12.0)
+            .opacity(0.7)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into()
+    };
+    if search.content_pending {
+        parts.push(note("Press Enter to search inside files".to_owned()));
+    } else if search.scanned > 0 {
+        parts.push(note(format!("{} files read", search.scanned)));
+    }
     if search.searching {
         let core = core.clone();
         parts.push(
@@ -290,6 +325,22 @@ mod tests {
         assert_eq!(
             Choice::Depth(3).event(4, None),
             Event::SetSearchDepth { tab: 4, depth: 3 }
+        );
+        let skipping = SearchView {
+            skip_ignored: true,
+            ..SearchView::default()
+        };
+        assert_eq!(
+            Choice::Ignored.event(4, None),
+            Event::SetSearchIgnored { tab: 4, on: true }
+        );
+        assert_eq!(
+            Choice::Ignored.event(4, Some(&skipping)),
+            Event::SetSearchIgnored { tab: 4, on: false }
+        );
+        assert_eq!(
+            Choice::of(&Choice::Ignored.key(), &[]),
+            Some(Choice::Ignored)
         );
         assert_eq!(
             Choice::Filter("type:image".to_owned()).event(4, None),

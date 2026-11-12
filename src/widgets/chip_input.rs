@@ -157,7 +157,8 @@ fn chip_icon(chip: &Chip, invalid: bool) -> Option<Icon> {
             kind: SearchTermType::Glob,
             ..
         } => Icon::Asterisk,
-        Chip::Name { .. } => return None,
+        // A plain word has no icon; nor has a tag, which is the native apps'.
+        Chip::Name { .. } | Chip::Tag(_) => return None,
         Chip::Ext(_) => Icon::FileType,
         Chip::Kind(kinds) => match kinds.first() {
             Some(FileKind::Folder) => Icon::Folder,
@@ -171,6 +172,7 @@ fn chip_icon(chip: &Chip, invalid: bool) -> Option<Icon> {
         Chip::Size { .. } => Icon::HardDrive,
         Chip::Modified(_) | Chip::Opened(_) => Icon::Calendar,
         Chip::In(_) => Icon::FolderSearch,
+        Chip::Content { .. } => Icon::FileText,
     })
 }
 
@@ -424,6 +426,8 @@ fn chip_editor(
         Chip::Modified(_) => "Modified",
         Chip::Opened(_) => "Opened",
         Chip::In(_) => "Also search in folder",
+        Chip::Content { .. } => "File contains",
+        Chip::Tag(_) => "Tag",
     };
     ui.strong(title);
     ui.add_space(2.0);
@@ -461,6 +465,14 @@ fn chip_editor(
         }
         Chip::Ext(exts) => extension_editor(ui, exts, editing, context.extensions),
         Chip::In(path) => folder_editor(ui, path, editing, context.folders),
+        Chip::Content { .. } => {
+            ui.weak("File contents are searched in the native apps only");
+            false
+        }
+        Chip::Tag(_) => {
+            ui.weak("Tags are given and searched for in the native apps only");
+            false
+        }
     };
     ui.add_space(4.0);
     ui.separator();

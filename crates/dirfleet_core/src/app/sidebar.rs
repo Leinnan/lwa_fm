@@ -33,15 +33,17 @@ pub enum SidebarSection {
     Recent,
     Locations,
     Drives,
+    Tags,
 }
 
 impl SidebarSection {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Favorites,
         Self::SavedSearches,
         Self::Recent,
         Self::Locations,
         Self::Drives,
+        Self::Tags,
     ];
 
     pub const fn title(self) -> &'static str {
@@ -51,6 +53,7 @@ impl SidebarSection {
             Self::Recent => "Recent",
             Self::Locations => "Locations",
             Self::Drives => "Drives",
+            Self::Tags => "Tags",
         }
     }
 }
@@ -69,6 +72,7 @@ pub enum SidebarIcon {
     Trash,
     SavedSearch,
     Drive(DriveKind),
+    Tag(super::TagColor),
 }
 
 /// The question before ejecting a drive that operations still use.
@@ -118,6 +122,8 @@ pub struct SidebarItem {
     pub used_permille: Option<u16>,
     /// "Eject" or "Disconnect" for a drive that can be.
     pub eject: Option<String>,
+    /// The tag whose items it shows (`OpenTag`), for a tag.
+    pub tag: Option<u32>,
     /// A saved search to run, rather than a folder.
     pub saved_search: Option<u64>,
 }
@@ -227,7 +233,9 @@ impl Sidebar {
         settings: &Settings,
         saved: &[SavedSearch],
         remote: &super::remote::Remote,
+        tags: &[super::TagView],
     ) -> Vec<SidebarSectionView> {
+        let shown_tag = shown.and_then(Tab::shown_tag);
         let running = shown.and_then(|tab| tab.search.as_ref()?.saved_from);
         let active_path = shown.and_then(|tab| tab.path.as_deref());
         let in_trash = shown.is_some_and(|tab| tab.trash);
@@ -242,6 +250,7 @@ impl Sidebar {
             used_permille: None,
             eject: None,
             saved_search: None,
+            tag: None,
         };
         let favorites = self
             .favorites
@@ -314,12 +323,28 @@ impl Sidebar {
                 ..item(&search.name, "", SidebarIcon::SavedSearch)
             })
             .collect();
+        let tags = tags
+            .iter()
+            .filter(|_| settings.show_tags)
+            .map(|tag| SidebarItem {
+                detail: match tag.count {
+                    0 => "No items".to_owned(),
+                    1 => "1 item".to_owned(),
+                    count => format!("{count} items"),
+                },
+                active: shown_tag == Some(tag.id),
+                tag: Some(tag.id),
+                favorite: false,
+                ..item(&tag.name, "", SidebarIcon::Tag(tag.color))
+            })
+            .collect();
         let mut sections = [
             (SidebarSection::Favorites, favorites),
             (SidebarSection::SavedSearches, saved_searches),
             (SidebarSection::Recent, recent),
             (SidebarSection::Locations, locations),
             (SidebarSection::Drives, drives),
+            (SidebarSection::Tags, tags),
         ];
         let order = self.order();
         sections.sort_by_key(|(section, _)| order.iter().position(|s| s == section));

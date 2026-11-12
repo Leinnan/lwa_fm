@@ -11,11 +11,70 @@ use windows_reactor::{
 };
 
 use super::columns::{COLUMN_GAP, Cell, lengths};
+use super::highlighted;
 use super::layout::ROW_HEIGHT;
 use super::press::{DragWatch, EntryHooks, PressClaim, Presses};
 use super::rename::{RenameBox, RenameInput};
-use super::{entry_icon, highlighted};
+
+/// The cell of the line a content search matched: the line after its
+/// number, with what matched in bold. A row without a match gets an empty
+/// cell instead, never another column's text.
+fn matched_line(row: &RowView, alignment: HorizontalAlignment, position: i32) -> View {
+    let number = format!("{}:  ", row.matched_line);
+    let shift = u32::try_from(number.len()).unwrap_or(0);
+    let marks: Vec<dirfleet_core::app::TextRange> = row
+        .matched_highlights
+        .iter()
+        .map(|range| dirfleet_core::app::TextRange {
+            start: range.start + shift,
+            end: range.end + shift,
+        })
+        .collect();
+    highlighted(&format!("{number}{}", row.matched), &marks)
+        .opacity(0.8)
+        .vertical_alignment(VerticalAlignment::Center)
+        .horizontal_alignment(alignment)
+        .grid_column(position)
+        .into()
+}
 use crate::core_link::CoreLink;
+
+/// The line a group's heading takes in the list: its name and how many it
+/// holds, over a rule. A press selects the group.
+pub fn group_heading(
+    core: &CoreLink,
+    tab: u32,
+    group: u32,
+    (label, count): (&str, u32),
+    width: f64,
+    claim: &PressClaim,
+) -> View {
+    let (core, claim) = (core.clone(), claim.clone());
+    Border::new()
+        .height(ROW_HEIGHT)
+        .width(width)
+        .padding(Thickness::new(10.0, 0.0, 10.0, 0.0))
+        // Transparent, not absent, so the whole line takes the pointer.
+        .background(Color::transparent())
+        .border_brush(crate::theme::stroke())
+        .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+        .automation_name(format!("{label}, {count}"))
+        .on_pointer_pressed(move |info: PointerEventInfo| {
+            // Not a press on empty space, which would clear the selection.
+            claim.claim(&info);
+            if info.is_left_button_pressed {
+                core.send(Event::SelectGroup { tab, group });
+            }
+        })
+        .content(
+            super::heading_text(label, count)
+                .font_size(12.0)
+                .opacity(0.8)
+                .vertical_alignment(VerticalAlignment::Bottom)
+                .margin(Thickness::new(0.0, 0.0, 0.0, 4.0)),
+        )
+        .into()
+}
 
 #[derive(Clone, PartialEq)]
 pub struct RowInput {
@@ -174,8 +233,12 @@ impl Component for Row {
                         .grid_column(position)
                         .into();
                 }
+                if cell.column == Column::Match && row.matched_line > 0 {
+                    return matched_line(row, alignment, position);
+                }
                 let text = match cell.column {
                     Column::Name => TextBlock::new().text(row.name.clone()),
+                    Column::Match => TextBlock::new(),
                     Column::Folder => TextBlock::new()
                         .text(row.folder.clone())
                         .font_size(12.0)
@@ -225,9 +288,7 @@ impl Component for Row {
                             .corner_radius(1.5)
                             .background(mark)
                             .vertical_alignment(VerticalAlignment::Center),
-                        Border::new()
-                            .grid_column(1)
-                            .content(entry_icon(&row.name, row.is_dir, 16.0)),
+                        super::tagged_icon(row, 16.0, 6.0).grid_column(1),
                         Grid::new()
                             .grid_column(2)
                             .columns(lengths(&input.cells))

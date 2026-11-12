@@ -170,6 +170,25 @@ impl Node {
         self.insert(beside, tab, index)
     }
 
+    /// Has the pane that holds `a` and the one that holds `b` change places:
+    /// each takes the other's tabs, and shows the tab the other showed.
+    pub fn swap_panes(&mut self, a: TabId, b: TabId) -> bool {
+        let mut panes = self.panes_mut();
+        let place = |panes: &[&mut Pane], tab: TabId| {
+            panes.iter().position(|pane| pane.tabs.contains(&tab))
+        };
+        let (Some(first), Some(second)) = (place(&panes, a), place(&panes, b)) else {
+            return false;
+        };
+        if first == second {
+            return false;
+        }
+        let other = panes[second].clone();
+        let one = std::mem::replace(&mut *panes[first], other);
+        *panes[second] = one;
+        true
+    }
+
     /// Takes `tab` out. A pane left empty goes, and its split with it.
     pub fn remove(&mut self, tab: TabId) -> bool {
         let removed = match self {
@@ -390,6 +409,24 @@ mod tests {
         assert!(!layout.split(t(2), Side::Below), "a pane's only tab stays");
         layout.remove(t(2));
         assert_eq!(layout, pane(&[1], 0));
+    }
+
+    #[test]
+    fn two_panes_change_places_with_all_their_tabs() {
+        let mut layout = Node::Split {
+            vertical: false,
+            permille: 300,
+            first: Box::new(pane(&[1, 2], 1)),
+            second: Box::new(pane(&[3], 0)),
+        };
+        assert!(layout.swap_panes(t(2), t(3)));
+        assert_eq!(layout.tabs(), [t(3), t(1), t(2)]);
+        assert_eq!(layout.shown(), [t(3), t(2)], "each shows what it showed");
+        // A pane does not change places with itself, nor with a tab that
+        // is nowhere.
+        assert!(!layout.swap_panes(t(1), t(2)));
+        assert!(!layout.swap_panes(t(1), t(9)));
+        assert_eq!(layout.tabs(), [t(3), t(1), t(2)]);
     }
 
     #[test]

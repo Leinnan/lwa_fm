@@ -1230,6 +1230,8 @@ fn the_selection_tells_apart_files_of_one_name_in_different_folders() {
         output: listing(&found, view),
         done: true,
         root: "/x".into(),
+        matched: Arc::default(),
+        scanned: 0,
     })
     .expect("done");
     let event = cmd.events().next().expect("all results");
@@ -2427,6 +2429,8 @@ fn searching_subfolders_walks_them_and_rows_say_where_they_are() {
         output: listing(&found[..1], view.clone()),
         done: false,
         root: "/real/x".into(),
+        matched: Arc::default(),
+        scanned: 0,
     })
     .expect("partial");
     let event = cmd.events().next().expect("partial results");
@@ -2446,6 +2450,8 @@ fn searching_subfolders_walks_them_and_rows_say_where_they_are() {
         output: listing(&found, view),
         done: true,
         root: "/real/x".into(),
+        matched: Arc::default(),
+        scanned: 0,
     })
     .expect("done");
     let event = cmd.events().next().expect("all results");
@@ -2499,6 +2505,8 @@ fn stopping_keeps_what_was_found_and_closing_shows_the_folder_again() {
         output: listing(&[entry("a", false)], view),
         done: false,
         root: "/x".into(),
+        matched: Arc::default(),
+        scanned: 0,
     })
     .expect("partial");
     let event = cmd.events().next().expect("partial results");
@@ -6526,8 +6534,7 @@ fn renaming_several_items_previews_names_and_flags_clashes() {
     set(
         &mut model,
         BatchFields {
-            mode: BatchMode::Pattern,
-            pattern: "Trip {n}{ext}".into(),
+            template: "Trip {n}{ext}".into(),
             ..BatchFields::default()
         },
     );
@@ -6545,8 +6552,7 @@ fn renaming_several_items_previews_names_and_flags_clashes() {
     set(
         &mut model,
         BatchFields {
-            mode: BatchMode::Pattern,
-            pattern: "same".into(),
+            template: "same".into(),
             ..BatchFields::default()
         },
     );
@@ -7163,11 +7169,13 @@ fn sidebar_sections_move_and_their_order_is_kept() {
     let mut model = Model::default();
     let _ = start(&app, &mut model, Some("/a"), LoadedState::Missing);
     let _ = app.update(Event::AddFavorite { path: "/a".into() }, &mut model);
+    // The tags, which every sidebar lists last, are left aside here.
     let order = |model: &Model| -> Vec<SidebarSection> {
         app.view(model).windows[0]
             .sidebar
             .iter()
             .map(|section| section.section)
+            .filter(|section| *section != SidebarSection::Tags)
             .collect()
     };
     assert_eq!(
@@ -9699,4 +9707,3241 @@ fn what_is_copied_on_a_server_is_kept_and_pasted_unless_the_clipboard_took_somet
         cmd.effects()
             .any(|effect| matches!(effect, Effect::Clipboard(_)))
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one story, told in order")]
+fn file_contents_are_searched_once_the_term_is_committed_and_rows_show_the_matching_line() {
+    use crate::search::{Chip, SearchTermType};
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(
+        &app,
+        &mut model,
+        tab,
+        "/x",
+        &[entry("a.txt", false), entry("b.md", false)],
+    );
+    let reads = |cmd: &mut Command<Effect, Event>| {
+        cmd.effects()
+            .filter(|effect| matches!(effect, Effect::ListDir(_) | Effect::SearchWalk(_)))
+            .count()
+    };
+
+    // Typing reads nothing: the term waits for Enter, and the bar says so.
+    let mut cmd = search_text(&app, &mut model, tab, "content:todo");
+    assert_eq!(reads(&mut cmd), 0);
+    let view = shown(&app, &model);
+    assert!(
+        view.search
+            .as_ref()
+            .is_some_and(|search| search.content_pending)
+    );
+    assert!(!view.show_match);
+    assert_eq!(view.total_rows, 2, "nothing is filtered yet");
+
+    // Committed: the folder's own files are read, by the committed search.
+    let mut cmd = app.update(Event::CommitSearchText { tab }, &mut model);
+    let mut walk = walks(&mut cmd).pop().expect("contents are read");
+    let term = Chip::Content {
+        pattern: "todo".into(),
+        kind: SearchTermType::Plain,
+    };
+    let read = walk
+        .operation
+        .content
+        .clone()
+        .expect("the search to read by");
+    assert_eq!(read.chips, std::slice::from_ref(&term));
+    assert_eq!(
+        (walk.operation.depth, walk.operation.skip_ignored),
+        (0, false)
+    );
+    let view = shown(&app, &model);
+    assert!(view.show_match);
+    let bar = view.search.expect("the bar");
+    assert!(!bar.content_pending);
+    assert_eq!(bar.chips[0].token, "content:todo");
+
+    // What matched comes back with its line.
+    let found = [DirEntry::test_new("/x/a.txt")];
+    walk.resolve(WalkUpdate {
+        output: listing(&found, walk.operation.view.clone()),
+        done: true,
+        root: "/x".into(),
+        matched: Arc::new(vec![MatchLine {
+            line: 3,
+            text: "a TODO b".into(),
+            start: 2,
+            end: 6,
+        }]),
+        scanned: 2,
+    })
+    .expect("done");
+    let event = cmd.events().next().expect("the results");
+    let _ = app.update(event, &mut model);
+    let view = shown(&app, &model);
+    assert_eq!(view.total_rows, 1);
+    let row = &view.rows[0];
+    assert_eq!(
+        (row.name.as_str(), row.matched.as_str()),
+        ("a.txt", "a TODO b")
+    );
+    assert_eq!(row.matched_line, 3);
+    assert_eq!(row.matched_highlights, [TextRange { start: 2, end: 6 }]);
+    assert_eq!(view.search.map(|search| search.scanned), Some(2));
+
+    // More typing only narrows what was found; nothing is read again.
+    let mut cmd = search_text(&app, &mut model, tab, "a");
+    assert_eq!(reads(&mut cmd), 0);
+
+    // Another committed filter, or another choice about ignored files,
+    // changes which files are opened: they are read again.
+    let _ = search_text(&app, &mut model, tab, "ext:txt");
+    let mut cmd = app.update(Event::CommitSearchText { tab }, &mut model);
+    let walk = walks(&mut cmd).pop().expect("contents are read again");
+    let read = walk.operation.content.expect("the search to read by");
+    assert_eq!(read.chips, [term, Chip::Ext(vec!["txt".into()])]);
+    let mut cmd = app.update(Event::SetSearchIgnored { tab, on: true }, &mut model);
+    let walk = walks(&mut cmd).pop().expect("contents are read again");
+    assert!(walk.operation.skip_ignored);
+    assert!(
+        shown(&app, &model)
+            .search
+            .is_some_and(|search| search.skip_ignored)
+    );
+
+    // Without the term the folder is listed as it is, and no line is shown.
+    let mut cmd = app.update(Event::RemoveSearchChip { tab, index: 0 }, &mut model);
+    assert!(walks(&mut cmd).is_empty());
+    let view = shown(&app, &model);
+    assert!(!view.show_match);
+    assert!(view.rows.iter().all(|row| row.matched.is_empty()));
+}
+
+#[test]
+fn a_content_term_is_typed_shown_and_typed_again_the_same() {
+    use crate::search::query::{chip_label, chip_token, parse};
+    use crate::search::{Chip, Search, SearchTermType};
+    // An expression with a space in it is quoted, like any such text.
+    let chips = parse("content:TODO text:\"two words\" content:\"/fn \\w+/\" report").chips;
+    assert_eq!(
+        chips,
+        [
+            Chip::Content {
+                pattern: "TODO".into(),
+                kind: SearchTermType::Plain
+            },
+            Chip::Content {
+                pattern: "two words".into(),
+                kind: SearchTermType::Plain
+            },
+            Chip::Content {
+                pattern: "fn \\w+".into(),
+                kind: SearchTermType::Regex
+            },
+            Chip::name("report"),
+        ]
+    );
+    let tokens: Vec<String> = chips.iter().map(chip_token).collect();
+    assert_eq!(
+        tokens,
+        [
+            "content:TODO",
+            "content:\"two words\"",
+            "content:\"/fn \\w+/\"",
+            "report"
+        ]
+    );
+    assert_eq!(parse(&tokens.join(" ")).chips, chips);
+    assert_eq!(chip_label(&chips[0]), "Contains: TODO");
+
+    // While it is typed a content term filters nothing; committed, it is
+    // what file contents are read by, without the text typed after it.
+    let mut search = Search {
+        value: "report content:todo".into(),
+        ..Search::default()
+    };
+    assert!(search.content_pending());
+    assert_eq!(search.effective_chips(), [Chip::name("report")]);
+    assert!(!search.has_content());
+    search.commit_text();
+    search.value = "more".into();
+    assert!(search.has_content() && !search.content_pending());
+    assert_eq!(search.committed().value, "");
+    assert_eq!(search.committed().chips, search.chips);
+}
+
+/// The folder sizes asked for in `cmd`, and what was told to stop.
+fn sizes_asked(cmd: &mut Command<Effect, Event>) -> (Vec<Request<FolderSize>>, Vec<String>) {
+    let (mut asked, mut stopped) = (Vec::new(), Vec::new());
+    for effect in cmd.effects() {
+        match effect {
+            Effect::FolderSize(request) => asked.push(request),
+            Effect::StopFolderSize(request) => stopped.push(request.operation.path.clone()),
+            _ => {}
+        }
+    }
+    (asked, stopped)
+}
+
+/// Each shown row's Size cell, with the default columns.
+fn size_cells(app: &DirFleet, model: &Model) -> Vec<String> {
+    shown(app, model)
+        .rows
+        .iter()
+        .map(|row| row.cells[1].clone())
+        .collect()
+}
+
+fn folder_sizes_on(app: &DirFleet, model: &mut Model) -> Command<Effect, Event> {
+    app.update(
+        Event::ChangeSettings {
+            settings: Settings {
+                folder_sizes: true,
+                ..Settings::default()
+            },
+        },
+        model,
+    )
+}
+
+#[test]
+fn with_the_setting_on_folders_in_view_are_added_up_two_at_a_time_for_the_size_column() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let entries = [
+        entry("a", true),
+        entry("b", true),
+        entry("c", true),
+        entry("f.txt", false),
+    ];
+    open(&app, &mut model, tab, "/x", &entries);
+    // Off unless asked for: a folder's row says nothing of its size.
+    let mut idle = app.update(
+        Event::ViewportChanged {
+            tab,
+            first_row: 0,
+            rows: 10,
+        },
+        &mut model,
+    );
+    assert!(sizes_asked(&mut idle).0.is_empty());
+    assert_eq!(size_cells(&app, &model), ["", "", "", "10 B"]);
+
+    let mut cmd = folder_sizes_on(&app, &mut model);
+    let (mut asked, _) = sizes_asked(&mut cmd);
+    let names: Vec<_> = asked
+        .iter()
+        .map(|request| request.operation.path.clone())
+        .collect();
+    assert_eq!(names.len(), 2, "two at a time: {names:?}");
+    assert!(
+        names[0].ends_with('a') && names[1].ends_with('b'),
+        "{names:?}"
+    );
+    assert_eq!(
+        size_cells(&app, &model),
+        ["\u{2026}", "\u{2026}", "", "10 B"]
+    );
+
+    // One answered: its size shows, and the next folder is asked for.
+    asked[0].resolve(Some(2_500_000)).expect("resolves");
+    let event = cmd.events().next().expect("the size comes back");
+    let mut next = app.update(event, &mut model);
+    let (mut third, _) = sizes_asked(&mut next);
+    assert_eq!(third.len(), 1);
+    assert!(third[0].operation.path.ends_with('c'));
+    assert_eq!(
+        size_cells(&app, &model),
+        ["2.5 MB", "\u{2026}", "\u{2026}", "10 B"]
+    );
+    // A folder that can't be read shows nothing, and is not asked again.
+    third[0].resolve(None).expect("resolves");
+    let event = next.events().next().expect("the answer comes back");
+    let mut after = app.update(event, &mut model);
+    assert!(sizes_asked(&mut after).0.is_empty());
+    assert_eq!(size_cells(&app, &model)[2], "");
+
+    // The folder changed: it is added up again, its old size still shown.
+    let mut changed = entries.clone();
+    changed[0].meta.source_revision = 7;
+    let mut cmd = app.update(Event::Refresh { tab }, &mut model);
+    let mut list = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::ListDir(request) => Some(request),
+            _ => None,
+        })
+        .expect("listed again");
+    let view = list.operation.view.clone();
+    list.resolve(listing(&changed, view)).expect("resolves");
+    let event = cmd.events().next().expect("the listing comes back");
+    let mut again = app.update(event, &mut model);
+    let (asked, _) = sizes_asked(&mut again);
+    assert_eq!(asked.len(), 1, "b is still being added up");
+    assert!(asked[0].operation.path.ends_with('a'));
+    assert_eq!(size_cells(&app, &model)[0], "2.5 MB");
+}
+
+#[test]
+fn folders_scrolled_out_of_view_are_no_longer_added_up() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let entries: Vec<_> = (0..300)
+        .map(|index| entry(&format!("d{index:03}"), true))
+        .collect();
+    open(&app, &mut model, tab, "/x", &entries);
+    let _ = app.update(
+        Event::ViewportChanged {
+            tab,
+            first_row: 0,
+            rows: 10,
+        },
+        &mut model,
+    );
+    let mut cmd = folder_sizes_on(&app, &mut model);
+    let (mut first, _) = sizes_asked(&mut cmd);
+    assert_eq!(first.len(), 2);
+    let early: Vec<_> = first
+        .iter()
+        .map(|request| request.operation.path.clone())
+        .collect();
+
+    let mut moved = app.update(
+        Event::ViewportChanged {
+            tab,
+            first_row: 200,
+            rows: 10,
+        },
+        &mut model,
+    );
+    let (asked, mut stopped) = sizes_asked(&mut moved);
+    stopped.sort();
+    assert_eq!(stopped, early, "what left the view is stopped");
+    assert_eq!(asked.len(), 2);
+    assert!(asked[0].operation.path.ends_with("d200"));
+
+    // A stopped walk's answer says nothing of the folder.
+    first[0].resolve(None).expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let mut late = app.update(event, &mut model);
+    assert!(sizes_asked(&mut late).0.is_empty(), "two are still asked");
+    let _ = app.update(
+        Event::ViewportChanged {
+            tab,
+            first_row: 0,
+            rows: 10,
+        },
+        &mut model,
+    );
+    assert_eq!(size_cells(&app, &model)[0], "\u{2026}", "asked for anew");
+}
+
+#[test]
+fn a_size_asked_for_in_the_inspector_is_not_stopped_and_file_operations_make_sizes_stale() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(&app, &mut model, tab, "/x", &[entry("sub", true)]);
+    let _ = app.update(Event::SetInspector { shown: true }, &mut model);
+    click(&app, &mut model, tab, 0, false, false);
+    let path = shown(&app, &model)
+        .inspector
+        .and_then(|inspector| inspector.item)
+        .expect("one item")
+        .path;
+    let mut cmd = app.update(Event::CalculateSize { path: path.clone() }, &mut model);
+    let (mut asked, _) = sizes_asked(&mut cmd);
+    assert_eq!(asked.len(), 1);
+    // Asked again while it is added up: nothing more.
+    let mut twice = app.update(Event::CalculateSize { path: path.clone() }, &mut model);
+    assert!(sizes_asked(&mut twice).0.is_empty());
+    // Leaving the folder stops nothing: the inspector asked, not a list.
+    let mut away = app.update(
+        Event::Navigate {
+            tab,
+            path: "/elsewhere".into(),
+        },
+        &mut model,
+    );
+    assert_eq!(sizes_asked(&mut away).1, Vec::<String>::new());
+    asked[0].resolve(Some(1_000)).expect("resolves");
+    let event = cmd.events().next().expect("the size comes back");
+    let _ = app.update(event, &mut model);
+    assert_eq!(model.sizes.info(&path), SizeInfo::Known("1.0 KB".into()));
+
+    // A copy into the folder, or into one inside it: the size is stale, and
+    // added up again once a list shows the folder with the setting on.
+    let inside = Path::new(&path).join("deeper");
+    model
+        .sizes
+        .touched(&[inside.to_string_lossy().into_owned()]);
+    open(&app, &mut model, tab, "/x", &[entry("sub", true)]);
+    let mut cmd = folder_sizes_on(&app, &mut model);
+    let (asked, _) = sizes_asked(&mut cmd);
+    assert_eq!(asked.len(), 1, "added up again");
+    assert_eq!(
+        size_cells(&app, &model),
+        ["1.0 KB"],
+        "the old size meanwhile"
+    );
+}
+
+/// The media files asked about in `cmd`.
+fn probes(cmd: &mut Command<Effect, Event>) -> Vec<Request<ProbeMedia>> {
+    cmd.effects()
+        .filter_map(|effect| match effect {
+            Effect::ProbeMedia(request) => Some(request),
+            _ => None,
+        })
+        .collect()
+}
+
+fn probed_names(asked: &[Request<ProbeMedia>]) -> Vec<String> {
+    asked
+        .iter()
+        .map(|request| {
+            Path::new(&request.operation.path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+#[test]
+fn the_dimensions_and_duration_columns_ask_about_the_media_in_view() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let entries = [
+        entry("p.png", false),
+        entry("clip.mp4", false),
+        entry("song.mp3", false),
+        entry("notes.txt", false),
+    ];
+    open(&app, &mut model, tab, "/x", &entries);
+    let mut cmd = app.update(
+        Event::ToggleColumn {
+            column: Column::Dimensions,
+        },
+        &mut model,
+    );
+    let mut sized = probes(&mut cmd);
+    // A sound has no picture, and text has neither.
+    assert_eq!(probed_names(&sized), ["p.png", "clip.mp4"]);
+    sized[0]
+        .resolve(MediaInfo {
+            width: 640,
+            height: 480,
+            millis: 0,
+        })
+        .expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let _ = app.update(event, &mut model);
+    // Modified, Size, Dimensions.
+    let cell = |model: &Model, row: usize, column: usize| {
+        shown(&app, model).rows[row].cells[column].clone()
+    };
+    assert_eq!(cell(&model, 0, 2), "640 \u{d7} 480");
+    assert_eq!(cell(&model, 1, 2), "", "not read yet");
+
+    let mut timed = app.update(
+        Event::ToggleColumn {
+            column: Column::Duration,
+        },
+        &mut model,
+    );
+    assert_eq!(
+        probed_names(&probes(&mut timed)),
+        ["song.mp3"],
+        "the video is already asked about"
+    );
+    sized[1]
+        .resolve(MediaInfo {
+            width: 1920,
+            height: 1080,
+            millis: 187_000,
+        })
+        .expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let _ = app.update(event, &mut model);
+    assert_eq!(cell(&model, 1, 2), "1920 \u{d7} 1080");
+    assert_eq!(cell(&model, 1, 3), "3:07");
+    assert_eq!(cell(&model, 3, 2), "");
+
+    // The inspector says the same of its item.
+    let _ = app.update(Event::SetInspector { shown: true }, &mut model);
+    click(&app, &mut model, tab, 1, false, false);
+    let item = shown(&app, &model)
+        .inspector
+        .and_then(|inspector| inspector.item)
+        .expect("one item");
+    assert_eq!(
+        (item.dimensions.as_str(), item.duration.as_str()),
+        ("1920 \u{d7} 1080", "3:07")
+    );
+
+    // The file changed: what was read is about what it used to hold.
+    let mut changed = entries.clone();
+    changed[1].meta.size = 99;
+    let mut cmd = app.update(Event::Refresh { tab }, &mut model);
+    let mut list = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::ListDir(request) => Some(request),
+            _ => None,
+        })
+        .expect("listed again");
+    let view = list.operation.view.clone();
+    list.resolve(listing(&changed, view)).expect("resolves");
+    let event = cmd.events().next().expect("the listing comes back");
+    let mut again = app.update(event, &mut model);
+    assert!(probed_names(&probes(&mut again)).contains(&"clip.mp4".to_owned()));
+    assert_eq!(cell(&model, 1, 2), "");
+}
+
+#[test]
+fn the_inspector_alone_asks_about_its_media_item() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(
+        &app,
+        &mut model,
+        tab,
+        "/x",
+        &[entry("p.png", false), entry("q.png", false)],
+    );
+    // Neither column is shown: nothing is read for the list.
+    let mut quiet = app.update(Event::SetInspector { shown: true }, &mut model);
+    assert!(probes(&mut quiet).is_empty());
+    let mut cmd = app.update(
+        Event::Click {
+            tab,
+            row: 1,
+            command: false,
+            shift: false,
+        },
+        &mut model,
+    );
+    assert_eq!(probed_names(&probes(&mut cmd)), ["q.png"]);
+}
+
+/// Answers the ordering `cmd` asks for with the listing's entries as they
+/// are, as if sorted, and hands the answer to the app.
+fn answer_order(app: &DirFleet, model: &mut Model, mut cmd: Command<Effect, Event>) {
+    let mut ask = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::OrderListing(request) => Some(request),
+            _ => None,
+        })
+        .expect("the order is asked for again");
+    let listing = Arc::clone(&ask.operation.listing);
+    let order = (0..listing.len() as u32).collect();
+    let view = ask.operation.view.clone();
+    ask.resolve(Ordered {
+        listing,
+        order,
+        view,
+    })
+    .expect("resolves");
+    let event = cmd.events().next().expect("the order comes back");
+    let _ = app.update(event, model);
+}
+
+/// The shown tab's groups as `label first..count`, and its rows' names.
+fn groups_shown(app: &DirFleet, model: &Model) -> (Vec<String>, Vec<String>) {
+    let tab = shown(app, model);
+    (
+        tab.groups
+            .iter()
+            .map(|group| format!("{} {}+{}", group.label, group.first_row, group.count))
+            .collect(),
+        tab.rows.iter().map(|row| row.name.clone()).collect(),
+    )
+}
+
+#[test]
+fn a_folder_s_entries_are_put_into_groups_selected_by_group_and_ungrouped_again() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let entries = [
+        entry("a.txt", false),
+        entry("b.png", false),
+        entry("sub", true),
+        entry("c.txt", false),
+    ];
+    open(&app, &mut model, tab, "/x", &entries);
+    assert!(
+        shown(&app, &model).groups.is_empty(),
+        "not grouped at first"
+    );
+    assert_eq!(
+        app.view(&model)
+            .groupings
+            .iter()
+            .map(|choice| choice.label.as_str())
+            .collect::<Vec<_>>(),
+        ["None", "Kind", "Date modified", "Size", "Name"]
+    );
+
+    let cmd = app.update(
+        Event::SetGroupBy {
+            tab,
+            group: GroupBy::Kind,
+        },
+        &mut model,
+    );
+    answer_order(&app, &mut model, cmd);
+    assert_eq!(shown(&app, &model).view.group, GroupBy::Kind);
+    let (groups, names) = groups_shown(&app, &model);
+    assert_eq!(groups, ["Folder 0+1", "PNG image 1+1", "TXT file 2+2"]);
+    assert_eq!(names, ["sub", "b.png", "a.txt", "c.txt"]);
+
+    // A group's heading selects its rows, and only those.
+    click(&app, &mut model, tab, 0, false, false);
+    let _ = app.update(Event::SelectGroup { tab, group: 2 }, &mut model);
+    assert_eq!(rows_selected(&app, &model), ["a.txt", "c.txt"]);
+    let _ = app.update(Event::SelectGroup { tab, group: 9 }, &mut model);
+    assert_eq!(
+        rows_selected(&app, &model),
+        ["a.txt", "c.txt"],
+        "no such group"
+    );
+
+    // The folder keeps its grouping when it is read again, and the selection
+    // stays on the same entries.
+    open(&app, &mut model, tab, "/x", &entries);
+    let (groups, _) = groups_shown(&app, &model);
+    assert_eq!(groups, ["Folder 0+1", "PNG image 1+1", "TXT file 2+2"]);
+
+    let cmd = app.update(
+        Event::SetGroupBy {
+            tab,
+            group: GroupBy::None,
+        },
+        &mut model,
+    );
+    answer_order(&app, &mut model, cmd);
+    let (groups, names) = groups_shown(&app, &model);
+    assert_eq!(groups, Vec::<String>::new());
+    assert_eq!(names, ["a.txt", "b.png", "sub", "c.txt"]);
+}
+
+#[test]
+fn a_folder_s_grouping_is_kept_with_its_view() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let _ = start(&app, &mut model, Some("/x"), LoadedState::Missing);
+    let tab = shown(&app, &model).id;
+    let mut cmd = app.update(
+        Event::SetGroupBy {
+            tab,
+            group: GroupBy::Size,
+        },
+        &mut model,
+    );
+    let saved = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::SaveState(request) => Some(request.operation.state),
+            _ => None,
+        })
+        .expect("the state is saved");
+    let text = serde_json::to_string(&saved).expect("serializes");
+    let read: PersistedState = serde_json::from_str(&text).expect("reads back");
+    assert_eq!(read, saved);
+    assert!(text.contains("\"group\":\"Size\""), "{text}");
+    // A view saved before there were groups reads as not grouped.
+    let old: FolderView = serde_json::from_str(
+        r#"{"sort":"Name","invert":false,"display":"List","show_hidden":false}"#,
+    )
+    .expect("reads");
+    assert_eq!(old.group, GroupBy::None);
+}
+
+/// A file found by a scan: where it is, how large, and when it changed.
+fn found_file(path: &str, size: u64, modified: u32) -> DirEntry {
+    let mut entry = DirEntry::test_new(path);
+    entry.meta.size = size;
+    entry.meta.modified_at = TimestampSeconds::from_unix(modified);
+    entry
+}
+
+/// The scan `cmd` starts.
+fn scan_asked(cmd: &mut Command<Effect, Event>) -> Request<FindDuplicates> {
+    cmd.effects()
+        .find_map(|effect| match effect {
+            Effect::FindDuplicates(request) => Some(request),
+            _ => None,
+        })
+        .expect("a scan is started")
+}
+
+/// Answers `scan` with the files of each set in `sets` (a set's size, then
+/// its files as path and time changed), and hands the answer to the app.
+fn scan_found(
+    app: &DirFleet,
+    model: &mut Model,
+    cmd: &mut Command<Effect, Event>,
+    scan: &mut Request<FindDuplicates>,
+    sets: &[(u64, &[(&str, u32)])],
+) -> Command<Effect, Event> {
+    let mut entries = Vec::new();
+    let mut set_of = Vec::new();
+    for (set, (size, files)) in sets.iter().enumerate() {
+        for (path, modified) in *files {
+            entries.push(found_file(path, *size, *modified));
+            set_of.push(set as u32);
+        }
+    }
+    let files = entries.len() as u64 + 7;
+    scan.resolve(DuplicatesUpdate::Found(DuplicateSets {
+        output: listing(&entries, scan.operation.view.clone()),
+        set_of: Arc::new(set_of),
+        sizes: Arc::new(sets.iter().map(|(size, _)| *size).collect()),
+        unread: 0,
+        files,
+    }))
+    .expect("resolves");
+    let event = cmd.events().next().expect("what was found comes back");
+    app.update(event, model)
+}
+
+/// A tab of duplicates beside a tab at `/x`: two sets, the first of two
+/// large files and the second of three small ones.
+fn duplicates_tab(app: &DirFleet, model: &mut Model) -> u32 {
+    let tab = window(app, model);
+    open(app, model, tab, "/x", &[entry("docs", true)]);
+    let mut cmd = app.update(
+        Event::FindDuplicates {
+            tab,
+            selected: false,
+        },
+        model,
+    );
+    let mut scan = scan_asked(&mut cmd);
+    let _ = scan_found(
+        app,
+        model,
+        &mut cmd,
+        &mut scan,
+        &[
+            (1000, &[("/x/docs/film.bin", 50), ("/x/pics/film.bin", 90)]),
+            (
+                5,
+                &[
+                    ("/x/docs/n.txt", 30),
+                    ("/x/pics/n.txt", 10),
+                    ("/x/pics/old/n.txt", 20),
+                ],
+            ),
+        ],
+    );
+    shown(app, model).id
+}
+
+/// `path` with `/` between its parts, whatever this system puts there.
+fn slashed(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+/// The shown tab's rows as `folder/name`.
+fn rows_with_folders(app: &DirFleet, model: &Model) -> Vec<String> {
+    shown(app, model)
+        .rows
+        .iter()
+        .map(|row| slashed(&format!("{}/{}", row.folder, row.name)))
+        .collect()
+}
+
+/// The scans `cmd` stops, and the one it starts.
+fn scans(cmd: &mut Command<Effect, Event>) -> (Vec<u64>, Option<u64>) {
+    let mut stopped = Vec::new();
+    let mut started = None;
+    for effect in cmd.effects() {
+        match effect {
+            Effect::StopDuplicates(request) => stopped.push(request.operation.id),
+            Effect::FindDuplicates(request) => started = Some(request.operation.id),
+            _ => {}
+        }
+    }
+    (stopped, started)
+}
+
+#[test]
+fn looking_for_duplicates_opens_a_tab_that_shows_the_sets_found() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(
+        &app,
+        &mut model,
+        tab,
+        "/x",
+        &[entry("docs", true), entry("a.txt", false)],
+    );
+    // Whatever is selected, it is the tab's folder that is looked through.
+    click(&app, &mut model, tab, 0, false, false);
+    let mut cmd = app.update(
+        Event::FindDuplicates {
+            tab,
+            selected: false,
+        },
+        &mut model,
+    );
+    let mut scan = scan_asked(&mut cmd);
+    assert_eq!(scan.operation.roots, ["/x"], "the tab's own folder");
+
+    // A tab of its own beside the folder's, which stays as it was.
+    let (tabs, active) = tabs_of(&app, &model, 0);
+    assert_eq!(tabs.len(), 2);
+    assert_eq!(active, tabs[1]);
+    let results = shown(&app, &model);
+    assert_ne!(results.id, tab);
+    assert_eq!(results.title, "Duplicates in x");
+    assert_eq!(results.path, "");
+    assert!(results.loading);
+    let bar = results.results.expect("a results tab");
+    assert!(bar.running);
+    assert_eq!(bar.summary, "");
+    // Nothing is made or renamed among results.
+    assert!(!results.location.caps.writable && !results.location.caps.rename);
+    assert!(results.location.caps.real_paths && results.location.caps.trash);
+
+    scan.resolve(DuplicatesUpdate::Progress(ScanProgress {
+        found: 1200,
+        ..ScanProgress::default()
+    }))
+    .expect("resolves");
+    let event = cmd.events().next().expect("progress comes back");
+    let _ = app.update(event, &mut model);
+    assert_eq!(shown(&app, &model).progress, "Reading folders… 1200 items");
+    scan.resolve(DuplicatesUpdate::Progress(ScanProgress {
+        found: 1300,
+        candidates: 40,
+        compared: 250_000,
+        to_compare: 1_000_000,
+    }))
+    .expect("resolves");
+    let event = cmd.events().next().expect("progress comes back");
+    let _ = app.update(event, &mut model);
+    assert_eq!(
+        shown(&app, &model).progress,
+        "Comparing files… 25% of 1.0 MB"
+    );
+
+    let _ = scan_found(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut scan,
+        &[
+            (1000, &[("/x/docs/film.bin", 50), ("/x/pics/film.bin", 90)]),
+            (
+                5,
+                &[
+                    ("/x/docs/n.txt", 30),
+                    ("/x/pics/n.txt", 10),
+                    ("/x/pics/old/n.txt", 20),
+                ],
+            ),
+        ],
+    );
+    let results = shown(&app, &model);
+    assert!(!results.loading);
+    assert_eq!(results.progress, "");
+    assert!(results.show_folder);
+    let bar = results.results.expect("a results tab");
+    assert!(!bar.running);
+    assert_eq!(
+        bar.summary,
+        "2 sets of duplicates, 5 files. The extra copies take 1.0 KB"
+    );
+    assert_eq!((bar.sets, bar.whole_sets), (2, 0));
+    // Each set under a heading, its files with the whole of their folders.
+    let (groups, _) = groups_shown(&app, &model);
+    assert_eq!(groups, ["1.0 KB each 0+2", "5 B each 2+3"]);
+    assert_eq!(
+        rows_with_folders(&app, &model),
+        [
+            "/x/docs/film.bin",
+            "/x/pics/film.bin",
+            "/x/docs/n.txt",
+            "/x/pics/n.txt",
+            "/x/pics/old/n.txt"
+        ]
+    );
+}
+
+#[test]
+fn a_file_found_is_previewed_by_its_own_path_and_its_tab_is_not_kept() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = duplicates_tab(&app, &mut model);
+    click(&app, &mut model, tab, 4, false, false);
+    let mut cmd = app.update(Event::QuickLook { tab }, &mut model);
+    let look = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::QuickLook(request) => Some(request.operation),
+            _ => None,
+        })
+        .expect("previewed");
+    assert_eq!(
+        slashed(&look.paths[look.index as usize]),
+        "/x/pics/old/n.txt"
+    );
+
+    // A tab without a folder is not kept between launches.
+    assert_eq!(DirFleet::persisted(&model).windows[0].tabs, ["/x"]);
+}
+
+#[test]
+fn the_folders_selected_are_the_ones_searched_for_duplicates() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(
+        &app,
+        &mut model,
+        tab,
+        "/x",
+        &[
+            entry("docs", true),
+            entry("pics", true),
+            entry("a.txt", false),
+        ],
+    );
+    click(&app, &mut model, tab, 0, false, false);
+    click(&app, &mut model, tab, 1, true, false);
+    click(&app, &mut model, tab, 2, true, false);
+    let find = |tab, selected| Event::FindDuplicates { tab, selected };
+    let mut cmd = app.update(find(tab, true), &mut model);
+    let roots: Vec<String> = scan_asked(&mut cmd)
+        .operation
+        .roots
+        .iter()
+        .map(|root| slashed(root))
+        .collect();
+    assert_eq!(roots, ["/x/docs", "/x/pics"], "the folders, not the file");
+    assert_eq!(shown(&app, &model).title, "Duplicates in 2 folders");
+
+    // Nothing is looked for from a tab without a folder of its own, or
+    // among a selection that holds no folder.
+    let results = shown(&app, &model).id;
+    let mut cmd = app.update(find(results, false), &mut model);
+    assert!(cmd.effects().next().is_none());
+    let _ = app.update(Event::CloseTab { tab: results }, &mut model);
+    click(&app, &mut model, tab, 2, false, false);
+    let mut cmd = app.update(find(tab, true), &mut model);
+    assert!(cmd.effects().next().is_none());
+    assert_eq!(tabs_of(&app, &model, 0).0.len(), 1);
+}
+
+#[test]
+fn all_but_one_file_of_each_set_is_selected_and_whole_sets_are_counted() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = duplicates_tab(&app, &mut model);
+
+    let select = |model: &mut Model, keep| {
+        let _ = app.update(Event::SelectDuplicates { tab, keep }, model);
+        shown(&app, model)
+            .selection
+            .iter()
+            .flat_map(|range| range.start..range.end)
+            .collect::<Vec<u32>>()
+    };
+    // Rows 0-1 are the films (changed at 50, 90), rows 2-4 the notes
+    // (changed at 30, 10, 20).
+    assert_eq!(select(&mut model, Keep::Newest), [0, 3, 4]);
+    assert_eq!(select(&mut model, Keep::Oldest), [1, 2, 4]);
+    assert_eq!(select(&mut model, Keep::First), [1, 3, 4]);
+    let bar = shown(&app, &model).results.expect("a results tab");
+    assert_eq!(bar.whole_sets, 0, "one file of each set stays");
+
+    // Every film selected: deleting them would leave no copy.
+    click(&app, &mut model, tab, 0, false, false);
+    click(&app, &mut model, tab, 1, true, false);
+    click(&app, &mut model, tab, 2, true, false);
+    let bar = shown(&app, &model).results.expect("a results tab");
+    assert_eq!(bar.whole_sets, 1);
+    let _ = app.update(Event::SelectAll { tab }, &mut model);
+    let bar = shown(&app, &model).results.expect("a results tab");
+    assert_eq!(bar.whole_sets, 2);
+
+    // A heading selects its set, like any group's.
+    let _ = app.update(Event::SelectGroup { tab, group: 1 }, &mut model);
+    assert_eq!(rows_selected(&app, &model), ["n.txt", "n.txt", "n.txt"]);
+
+    // Nothing is renamed or copied among results.
+    click(&app, &mut model, tab, 0, false, false);
+    let _ = app.update(Event::StartRename { tab }, &mut model);
+    assert_eq!(shown(&app, &model).renaming, None);
+    let mut cmd = app.update(Event::Duplicate { tab }, &mut model);
+    assert!(file_ops(&mut cmd).is_empty());
+}
+
+#[test]
+fn files_deleted_leave_the_results_and_a_set_of_one_is_no_set() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = duplicates_tab(&app, &mut model);
+
+    // The second and third note go to the bin.
+    click(&app, &mut model, tab, 3, false, false);
+    click(&app, &mut model, tab, 4, true, false);
+    let mut cmd = app.update(Event::TrashSelection { tab }, &mut model);
+    let mut run = file_ops(&mut cmd).pop().expect("an operation runs");
+    assert_eq!(
+        run.operation.op,
+        crate::fileops::FileOp::Trash(vec![
+            PathBuf::from("/x/pics/n.txt"),
+            PathBuf::from("/x/pics/old/n.txt")
+        ])
+    );
+    let id = run.operation.id;
+    run.resolve(FileOpUpdate(crate::fileops::FileOpEvent::Finished(
+        crate::fileops::Outcome {
+            affected_dirs: vec![PathBuf::from("/x/pics"), PathBuf::from("/x/pics/old")],
+            ..outcome(id, crate::fileops::Origin::User)
+        },
+    )))
+    .expect("resolves");
+    let event = cmd.events().next().expect("the outcome comes back");
+    let mut done = app.update(event, &mut model);
+    // Nothing is scanned again: the files in those folders are asked about.
+    let effects: Vec<Effect> = done.effects().collect();
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FindDuplicates(_)))
+    );
+    let mut check = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::StillThere(request) => Some(request),
+            _ => None,
+        })
+        .expect("the files are checked");
+    let asked = |check: &Request<StillThere>| -> Vec<String> {
+        check
+            .operation
+            .paths
+            .iter()
+            .map(|path| slashed(path))
+            .collect()
+    };
+    assert_eq!(
+        asked(&check),
+        ["/x/pics/film.bin", "/x/pics/n.txt", "/x/pics/old/n.txt"]
+    );
+    check.resolve(vec![true, false, false]).expect("resolves");
+    let event = done.events().next().expect("the answer comes back");
+    let cmd = app.update(event, &mut model);
+    answer_order(&app, &mut model, cmd);
+
+    // One note is left, which is no set; the films stay.
+    let (groups, _) = groups_shown(&app, &model);
+    assert_eq!(groups, ["1.0 KB each 0+2"]);
+    assert_eq!(
+        rows_with_folders(&app, &model),
+        ["/x/docs/film.bin", "/x/pics/film.bin"]
+    );
+    let bar = shown(&app, &model).results.expect("a results tab");
+    assert_eq!(
+        bar.summary,
+        "1 set of duplicates, 2 files. The extra copies take 1.0 KB"
+    );
+
+    // Undo puts a note back: the set shows again.
+    let mut checks = model
+        .tabs
+        .iter()
+        .filter_map(|(id, state)| state.check_results(id.number(), &["/x/pics".to_owned()]))
+        .collect::<Vec<_>>();
+    let mut cmd = checks.pop().expect("the results are checked");
+    let mut check = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::StillThere(request) => Some(request),
+            _ => None,
+        })
+        .expect("the files are checked");
+    assert_eq!(
+        asked(&check),
+        ["/x/pics/film.bin", "/x/pics/n.txt"],
+        "a file found gone is asked about again"
+    );
+    check.resolve(vec![true, true]).expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let cmd = app.update(event, &mut model);
+    answer_order(&app, &mut model, cmd);
+    let (groups, _) = groups_shown(&app, &model);
+    assert_eq!(groups, ["1.0 KB each 0+2", "5 B each 2+2"]);
+}
+
+#[test]
+fn a_scan_is_stopped_started_over_and_ended_by_leaving() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(&app, &mut model, tab, "/x", &[entry("docs", true)]);
+    let find = |tab| Event::FindDuplicates {
+        tab,
+        selected: false,
+    };
+    let mut cmd = app.update(find(tab), &mut model);
+    let first = scan_asked(&mut cmd).operation.id;
+    let results = shown(&app, &model).id;
+
+    let mut cmd = app.update(Event::StopResults { tab: results }, &mut model);
+    assert_eq!(scans(&mut cmd), (vec![first], None));
+    let view = shown(&app, &model);
+    assert!(!view.loading);
+    let bar = view.results.expect("a results tab");
+    assert!(!bar.running);
+    assert_eq!(bar.summary, "Stopped before the scan was done");
+    // Nothing runs now: stopping again changes nothing.
+    let mut cmd = app.update(Event::StopResults { tab: results }, &mut model);
+    assert!(cmd.effects().next().is_none());
+
+    // Refresh scans again, and a scan under way is stopped for the next.
+    let mut cmd = app.update(Event::Refresh { tab: results }, &mut model);
+    let (stopped, second) = scans(&mut cmd);
+    let second = second.expect("a scan is started");
+    assert_eq!(stopped, Vec::<u64>::new());
+    assert_ne!(second, first);
+    assert!(shown(&app, &model).results.expect("a results tab").running);
+    let mut cmd = app.update(Event::Refresh { tab: results }, &mut model);
+    let (stopped, third) = scans(&mut cmd);
+    let third = third.expect("a scan is started");
+    assert_eq!(stopped, [second]);
+
+    // Going to a folder ends the scan, and the tab is a folder's again.
+    let mut cmd = app.update(
+        Event::Navigate {
+            tab: results,
+            path: "/y".into(),
+        },
+        &mut model,
+    );
+    assert_eq!(scans(&mut cmd), (vec![third], None));
+    let view = shown(&app, &model);
+    assert_eq!((view.path.as_str(), view.results), ("/y", None));
+    assert!(view.location.caps.writable);
+
+    // Closing a tab of results stops its scan too.
+    let mut cmd = app.update(find(results), &mut model);
+    let running = scan_asked(&mut cmd).operation.id;
+    let closing = shown(&app, &model).id;
+    let mut cmd = app.update(Event::CloseTab { tab: closing }, &mut model);
+    assert_eq!(scans(&mut cmd), (vec![running], None));
+}
+
+/// Hands the tab what a scan found: `listing` in `order`, with each entry's
+/// set and each set's size.
+fn scan_answers(
+    app: &DirFleet,
+    model: &mut Model,
+    tab: u32,
+    (listing, order): (Listing, Vec<u32>),
+    (set_of, sizes): (Vec<u32>, Vec<u64>),
+    unread: u32,
+) {
+    let generation = model.tabs[&tab_id(tab).expect("an id")].generation;
+    let view = shown(app, model).view.list_view();
+    let _ = app.update(
+        Event::DuplicatesScanned {
+            tab,
+            generation,
+            update: DuplicatesUpdate::Found(DuplicateSets {
+                output: ListDirOutput::Listed {
+                    listing: Arc::new(listing),
+                    order,
+                    view,
+                    opened: Arc::default(),
+                },
+                set_of: Arc::new(set_of),
+                sizes: Arc::new(sizes),
+                unread,
+                files: 9000,
+            }),
+        },
+        model,
+    );
+}
+
+#[test]
+fn sets_stay_together_however_the_results_are_sorted_and_past_a_point_share_a_heading() {
+    let entries: Vec<DirEntry> = (0..6)
+        .map(|index| found_file(&format!("/x/{index}/f.bin"), 10, index))
+        .collect();
+    let listing = Listing::from_entries(&entries);
+    // No sets are known for a listing that is not the scan's: it stays as it is.
+    let mut order: Vec<u32> = vec![5, 4, 3, 2, 1, 0];
+    assert_eq!(
+        results::Results::default().arrange(&listing, &mut order),
+        Vec::new()
+    );
+    assert_eq!(order, [5, 4, 3, 2, 1, 0]);
+
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = duplicates_tab(&app, &mut model);
+    // As sorted the other way round.
+    scan_answers(
+        &app,
+        &mut model,
+        tab,
+        (listing, order),
+        (vec![0, 1, 0, 1, 2, 2], vec![30, 20, 10]),
+        0,
+    );
+    // Sets in their own order, each set's files in the sorted one.
+    let (groups, _) = groups_shown(&app, &model);
+    assert_eq!(groups, ["30 B each 0+2", "20 B each 2+2", "10 B each 4+2"]);
+    assert_eq!(
+        rows_with_folders(&app, &model),
+        [
+            "/x/2/f.bin",
+            "/x/0/f.bin",
+            "/x/3/f.bin",
+            "/x/1/f.bin",
+            "/x/5/f.bin",
+            "/x/4/f.bin"
+        ]
+    );
+
+    // More sets than get a heading: the rest share the last one.
+    let many = SETS_HEADED + 3;
+    let entries: Vec<DirEntry> = (0..many * 2)
+        .map(|index| found_file(&format!("/x/{index}.bin"), 10, 0))
+        .collect();
+    let files = many as u32 * 2;
+    scan_answers(
+        &app,
+        &mut model,
+        tab,
+        (Listing::from_entries(&entries), (0..files).collect()),
+        ((0..files).map(|entry| entry / 2).collect(), vec![10; many]),
+        2,
+    );
+    let view = shown(&app, &model);
+    assert_eq!(view.groups.len(), SETS_HEADED + 1);
+    let last = view.groups.last().expect("groups");
+    assert_eq!(
+        (last.label.as_str(), last.first_row, last.count),
+        ("More duplicates", SETS_HEADED as u32 * 2, 6)
+    );
+    let bar = view.results.expect("a results tab");
+    assert_eq!(bar.sets as usize, many);
+    assert!(
+        bar.summary.ends_with(". 2 files could not be read"),
+        "{}",
+        bar.summary
+    );
+}
+
+/// A window with two panes: the left one shows `/l/a`, the right one, which
+/// has the focus, shows `right`. Returns the two tabs.
+fn two_panes(app: &DirFleet, model: &mut Model, right: &str) -> (u32, u32) {
+    let left = window(app, model);
+    open(app, model, left, "/l/a", &[]);
+    let _ = app.update(
+        Event::SplitNew {
+            tab: left,
+            side: Side::Right,
+        },
+        model,
+    );
+    let beside = shown(app, model).id;
+    open(app, model, beside, right, &[]);
+    (left, beside)
+}
+
+/// The comparisons `cmd` stops, and the one it starts.
+fn compares(cmd: &mut Command<Effect, Event>) -> (Vec<u64>, Option<Request<CompareFolders>>) {
+    let mut stopped = Vec::new();
+    let mut started = None;
+    for effect in cmd.effects() {
+        match effect {
+            Effect::StopCompare(request) => stopped.push(request.operation.id),
+            Effect::CompareFolders(request) => started = Some(request),
+            _ => {}
+        }
+    }
+    (stopped, started)
+}
+
+/// Answers `scan` with the files that differ (each as its path, its size,
+/// when it was changed and how it differs; a file under `/l/a` is the left
+/// folder's), and hands the answer to the app.
+fn compare_found(
+    app: &DirFleet,
+    model: &mut Model,
+    cmd: &mut Command<Effect, Event>,
+    scan: &mut Request<CompareFolders>,
+    files: &[(&str, u64, u32, Difference)],
+) -> Command<Effect, Event> {
+    let entries: Vec<DirEntry> = files
+        .iter()
+        .map(|(path, size, modified, _)| found_file(path, *size, *modified))
+        .collect();
+    let listing = Arc::new(Listing::from_entries(&entries));
+    let (left, right) = (scan.operation.left.clone(), scan.operation.right.clone());
+    let on_left: Vec<bool> = listing
+        .dirs()
+        .iter()
+        .map(|dir| slashed(dir).starts_with(&left))
+        .collect();
+    let other_dirs = listing
+        .dirs()
+        .iter()
+        .map(|dir| {
+            let dir = slashed(dir);
+            dir.strip_prefix(&left).map_or_else(
+                || format!("{left}{}", dir.strip_prefix(&right).unwrap_or_default()),
+                |rest| format!("{right}{rest}"),
+            )
+        })
+        .collect();
+    scan.resolve(CompareUpdate::Found(Differences {
+        output: ListDirOutput::Listed {
+            order: (0..entries.len() as u32).collect(),
+            listing,
+            view: scan.operation.view.clone(),
+            opened: Arc::default(),
+        },
+        kinds: files.iter().map(|(.., kind)| *kind).collect(),
+        other_dirs: Arc::new(other_dirs),
+        on_left: Arc::new(on_left),
+        alike: 40,
+        unread: 0,
+    }))
+    .expect("resolves");
+    let event = cmd.events().next().expect("what was found comes back");
+    app.update(event, model)
+}
+
+/// What differs between `/l/a` and `/r/b` in the tests below: two files
+/// only on the left, one only on the right, one newer on each side, and
+/// one that differs though changed at the same time.
+const DIFFERING: [(&str, u64, u32, Difference); 6] = [
+    ("/l/a/only left.txt", 10, 100, Difference::OnlyLeft),
+    ("/r/b/sub/only right.txt", 10, 100, Difference::OnlyRight),
+    ("/l/a/sub/newer left.txt", 20, 900, Difference::NewerLeft),
+    ("/r/b/newer right.txt", 20, 900, Difference::NewerRight),
+    ("/l/a/odd.txt", 5, 100, Difference::Different),
+    ("/l/a/sub/second.txt", 10, 100, Difference::OnlyLeft),
+];
+
+/// A tab that shows how `/l/a` and `/r/b` differ ([`DIFFERING`]).
+fn compare_tab(app: &DirFleet, model: &mut Model) -> u32 {
+    let _ = two_panes(app, model, "/r/b");
+    let window = app.view(model).windows[0].id;
+    let mut cmd = app.update(Event::CompareFolders { window }, model);
+    let mut scan = compares(&mut cmd).1.expect("the folders are compared");
+    let _ = compare_found(app, model, &mut cmd, &mut scan, &DIFFERING);
+    shown(app, model).id
+}
+
+/// The files `run` copies, each with where it goes.
+fn pairs_copied(run: &Request<RunFileOp>) -> Vec<(String, String)> {
+    let crate::fileops::FileOp::CopyPairs { pairs, into } = &run.operation.op else {
+        panic!("not a copy of pairs: {:?}", run.operation.op);
+    };
+    assert_eq!(slashed(&into.to_string_lossy()), "/r/b");
+    pairs
+        .iter()
+        .map(|(from, to)| {
+            (
+                slashed(&from.to_string_lossy()),
+                slashed(&to.to_string_lossy()),
+            )
+        })
+        .collect()
+}
+
+/// Ends `run` as done, with `affected` as the folders it changed.
+fn finish_op(
+    app: &DirFleet,
+    model: &mut Model,
+    cmd: &mut Command<Effect, Event>,
+    mut run: Request<RunFileOp>,
+    affected: &[&str],
+) -> Command<Effect, Event> {
+    let id = run.operation.id;
+    run.resolve(FileOpUpdate(crate::fileops::FileOpEvent::Finished(
+        crate::fileops::Outcome {
+            affected_dirs: affected.iter().map(PathBuf::from).collect(),
+            ..outcome(id, crate::fileops::Origin::User)
+        },
+    )))
+    .expect("resolves");
+    let event = cmd.events().next().expect("the outcome comes back");
+    app.update(event, model)
+}
+
+fn compare_bar(app: &DirFleet, model: &Model) -> CompareView {
+    shown(app, model)
+        .results
+        .and_then(|results| results.compare)
+        .expect("a tab of compared folders")
+}
+
+#[test]
+fn two_folders_side_by_side_and_apart_are_what_a_window_compares() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(&app, &mut model, tab, "/l/a", &[]);
+    let offered = |model: &Model| app.view(model).windows[0].compare.clone();
+    assert_eq!(
+        offered(&model),
+        None,
+        "one pane has nothing to compare with"
+    );
+    let _ = app.update(
+        Event::SplitNew {
+            tab,
+            side: Side::Right,
+        },
+        &mut model,
+    );
+    assert_eq!(offered(&model), None, "nor has a folder shown twice");
+    let right = shown(&app, &model).id;
+    open(&app, &mut model, right, "/l/a/inside", &[]);
+    assert_eq!(offered(&model), None, "nor a folder and one inside it");
+    let window = app.view(&model).windows[0].id;
+    let mut cmd = app.update(Event::CompareFolders { window }, &mut model);
+    assert!(cmd.effects().next().is_none());
+    assert_eq!(tabs_of(&app, &model, 0).0.len(), 2);
+
+    open(&app, &mut model, right, "/r/b", &[]);
+    assert_eq!(
+        offered(&model),
+        Some(ComparePair {
+            left: "a".to_owned(),
+            right: "b".to_owned()
+        })
+    );
+    let mut cmd = app.update(Event::CompareFolders { window }, &mut model);
+    let scan = compares(&mut cmd).1.expect("the folders are compared");
+    assert_eq!(
+        (
+            scan.operation.left.as_str(),
+            scan.operation.right.as_str(),
+            scan.operation.contents
+        ),
+        ("/l/a", "/r/b", false),
+        "the pane further left is the left folder, whichever has the focus"
+    );
+    // A tab of its own beside the focused one, which hides one of the two
+    // folders: there is no pair to compare while it shows.
+    let (tabs, active) = tabs_of(&app, &model, 0);
+    assert_eq!((tabs.len(), active), (3, tabs[2]));
+    assert_eq!(offered(&model), None);
+}
+
+#[test]
+fn comparing_two_panes_opens_a_tab_that_shows_what_differs_kind_by_kind() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let _ = two_panes(&app, &mut model, "/r/b");
+    let window = app.view(&model).windows[0].id;
+    let mut cmd = app.update(Event::CompareFolders { window }, &mut model);
+    let mut scan = compares(&mut cmd).1.expect("the folders are compared");
+    let results = shown(&app, &model);
+    assert_eq!(results.title, "Compare a with b");
+    assert_eq!(results.path, "");
+    assert!(results.loading);
+    assert_eq!(results.view.display, DisplayType::List);
+    assert!(!results.location.caps.writable && !results.location.caps.rename);
+    let bar = results.results.expect("a results tab");
+    assert!(bar.running);
+    assert_eq!(compare_bar(&app, &model).differences, 0);
+
+    scan.resolve(CompareUpdate::Progress(ScanProgress {
+        found: 300,
+        ..ScanProgress::default()
+    }))
+    .expect("resolves");
+    let event = cmd.events().next().expect("progress comes back");
+    let _ = app.update(event, &mut model);
+    assert_eq!(shown(&app, &model).progress, "Reading folders… 300 items");
+
+    let _ = compare_found(&app, &mut model, &mut cmd, &mut scan, &DIFFERING);
+    let results = shown(&app, &model);
+    assert!(!results.loading && results.show_folder);
+    let bar = results.results.expect("a results tab");
+    assert!(!bar.running);
+    assert_eq!(
+        bar.summary,
+        "6 differences: 2 only in a, 1 only in b, 1 newer in a, 1 newer in b, 1 different"
+    );
+    assert_eq!((bar.sets, bar.whole_sets), (0, 0));
+    let (groups, _) = groups_shown(&app, &model);
+    assert_eq!(
+        groups,
+        [
+            "Only in a 0+2",
+            "Only in b 2+1",
+            "Newer in a 3+1",
+            "Newer in b 4+1",
+            "Different, though changed at the same time 5+1"
+        ]
+    );
+    // Each path by the file of one side, with the whole of its folder.
+    assert_eq!(
+        rows_with_folders(&app, &model),
+        [
+            "/l/a/only left.txt",
+            "/l/a/sub/second.txt",
+            "/r/b/sub/only right.txt",
+            "/l/a/sub/newer left.txt",
+            "/r/b/newer right.txt",
+            "/l/a/odd.txt"
+        ]
+    );
+    // With nothing selected, every difference would be copied.
+    let bar = compare_bar(&app, &model);
+    assert_eq!((bar.left.as_str(), bar.right.as_str()), ("a", "b"));
+    assert_eq!(bar.differences, 6);
+    assert_eq!(
+        bar.to_left,
+        SyncCount {
+            copies: 4,
+            replaces: 3,
+            newer: 1
+        }
+    );
+    assert_eq!(
+        bar.to_right,
+        SyncCount {
+            copies: 5,
+            replaces: 3,
+            newer: 1
+        }
+    );
+    // A tab without a folder is not kept between launches.
+    assert_eq!(
+        DirFleet::persisted(&model).windows[0].tabs,
+        ["/l/a", "/r/b"]
+    );
+}
+
+#[test]
+fn folders_called_the_same_are_told_apart_by_their_paths() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let _ = two_panes(&app, &mut model, "/r/A");
+    let window = app.view(&model).windows[0].id;
+    let mut cmd = app.update(Event::CompareFolders { window }, &mut model);
+    let mut scan = compares(&mut cmd).1.expect("the folders are compared");
+    let _ = compare_found(
+        &app,
+        &mut model,
+        &mut cmd,
+        &mut scan,
+        &[("/l/a/x.txt", 1, 1, Difference::OnlyLeft)],
+    );
+    assert_eq!(shown(&app, &model).title, "Compare /l/a with /r/A");
+    assert_eq!(groups_shown(&app, &model).0, ["Only in /l/a 0+1"]);
+    let bar = shown(&app, &model).results.expect("a results tab");
+    assert_eq!(bar.summary, "1 difference: 1 only in /l/a");
+}
+
+#[test]
+fn files_are_copied_to_the_other_folder_and_it_is_asked_before_any_is_replaced() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = compare_tab(&app, &mut model);
+    let sync = |to_left| Event::SyncSelection { tab, to_left };
+    let answer = |choice| Event::AnswerSync { tab, choice };
+    let new_ones = [
+        (
+            "/l/a/only left.txt".to_owned(),
+            "/r/b/only left.txt".to_owned(),
+        ),
+        (
+            "/l/a/sub/second.txt".to_owned(),
+            "/r/b/sub/second.txt".to_owned(),
+        ),
+    ];
+
+    // The files only on the left, selected by their heading: copied to the
+    // right at once, since nothing is replaced.
+    let _ = app.update(Event::SelectGroup { tab, group: 0 }, &mut model);
+    let bar = compare_bar(&app, &model);
+    assert_eq!((bar.to_right.copies, bar.to_right.replaces), (2, 0));
+    assert_eq!(bar.to_left, SyncCount::default(), "nothing to bring left");
+    let mut cmd = app.update(sync(true), &mut model);
+    assert!(cmd.effects().next().is_none());
+    assert_eq!(compare_bar(&app, &model).asking, None);
+    let mut cmd = app.update(sync(false), &mut model);
+    let run = file_ops(&mut cmd).pop().expect("an operation runs");
+    assert_eq!(pairs_copied(&run), new_ones);
+    assert_eq!(run.operation.op.describe(), "Copying 2 items to b");
+    assert_eq!(run.operation.op.describe_done(), "Copied 2 items to b");
+    let _ = finish_op(&app, &mut model, &mut cmd, run, &[]);
+
+    // Everything, with nothing selected: three files would be replaced, so
+    // it is asked first.
+    let _ = app.update(Event::ClearSelection { tab }, &mut model);
+    let mut cmd = app.update(sync(false), &mut model);
+    assert!(file_ops(&mut cmd).is_empty());
+    assert_eq!(
+        compare_bar(&app, &model).asking,
+        Some(SyncAsk {
+            to_left: false,
+            from: "a".to_owned(),
+            into: "b".to_owned(),
+            count: SyncCount {
+                copies: 5,
+                replaces: 3,
+                newer: 1
+            },
+        })
+    );
+    // Closed without an answer: nothing is copied.
+    let mut cmd = app.update(answer(ConflictChoice::Cancel), &mut model);
+    assert!(file_ops(&mut cmd).is_empty());
+    assert_eq!(compare_bar(&app, &model).asking, None);
+    let mut cmd = app.update(answer(ConflictChoice::Replace), &mut model);
+    assert!(file_ops(&mut cmd).is_empty(), "no question, no answer");
+
+    // Skipping the ones that replace a file copies the new ones alone.
+    let _ = app.update(sync(false), &mut model);
+    let mut cmd = app.update(answer(ConflictChoice::Skip), &mut model);
+    let run = file_ops(&mut cmd).pop().expect("an operation runs");
+    assert_eq!(pairs_copied(&run), new_ones);
+    let _ = finish_op(&app, &mut model, &mut cmd, run, &[]);
+
+    // Replacing copies them all: from the left, whichever file the row
+    // shows, and never the file that is only on the right.
+    let _ = app.update(sync(false), &mut model);
+    let mut cmd = app.update(answer(ConflictChoice::Replace), &mut model);
+    let run = file_ops(&mut cmd).pop().expect("an operation runs");
+    let mut all = new_ones.to_vec();
+    all.extend(
+        [
+            ("/l/a/sub/newer left.txt", "/r/b/sub/newer left.txt"),
+            ("/l/a/newer right.txt", "/r/b/newer right.txt"),
+            ("/l/a/odd.txt", "/r/b/odd.txt"),
+        ]
+        .map(|(from, to)| (from.to_owned(), to.to_owned())),
+    );
+    assert_eq!(pairs_copied(&run), all);
+    assert_eq!(compare_bar(&app, &model).asking, None);
+}
+
+#[test]
+fn what_was_copied_is_compared_again_and_leaves_once_the_folders_agree() {
+    use Difference::{NewerLeft, Same};
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = compare_tab(&app, &mut model);
+    // The file only on the right, and the one newer there, go left.
+    click(&app, &mut model, tab, 2, false, false);
+    click(&app, &mut model, tab, 4, true, false);
+    let _ = app.update(Event::SyncSelection { tab, to_left: true }, &mut model);
+    let mut cmd = app.update(
+        Event::AnswerSync {
+            tab,
+            choice: ConflictChoice::Replace,
+        },
+        &mut model,
+    );
+    let run = file_ops(&mut cmd).pop().expect("an operation runs");
+    let crate::fileops::FileOp::CopyPairs { pairs, into } = &run.operation.op else {
+        panic!("not a copy of pairs");
+    };
+    assert_eq!(slashed(&into.to_string_lossy()), "/l/a");
+    let copied: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(from, to)| {
+            (
+                slashed(&from.to_string_lossy()),
+                slashed(&to.to_string_lossy()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        copied,
+        [
+            (
+                "/r/b/sub/only right.txt".to_owned(),
+                "/l/a/sub/only right.txt".to_owned()
+            ),
+            (
+                "/r/b/newer right.txt".to_owned(),
+                "/l/a/newer right.txt".to_owned()
+            ),
+        ]
+    );
+
+    // The folders are not compared again: the paths in the folders that
+    // changed are, on whichever side their rows' files are.
+    let mut done = finish_op(&app, &mut model, &mut cmd, run, &["/l/a", "/l/a/sub"]);
+    let effects: Vec<Effect> = done.effects().collect();
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CompareFolders(_)))
+    );
+    let mut check = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Recompare(request) => Some(request),
+            _ => None,
+        })
+        .expect("the paths are compared again");
+    assert!(!check.operation.contents);
+    assert_eq!(pairs_asked(&check), every_pair());
+    check
+        .resolve(vec![
+            Difference::OnlyLeft,
+            Same,
+            NewerLeft,
+            Same,
+            Difference::Different,
+            Difference::OnlyLeft,
+        ])
+        .expect("resolves");
+    let event = done.events().next().expect("the answer comes back");
+    let cmd = app.update(event, &mut model);
+    answer_order(&app, &mut model, cmd);
+    let (groups, _) = groups_shown(&app, &model);
+    assert_eq!(
+        groups,
+        [
+            "Only in a 0+2",
+            "Newer in a 2+1",
+            "Different, though changed at the same time 3+1"
+        ]
+    );
+    let bar = shown(&app, &model).results.expect("a results tab");
+    assert_eq!(
+        bar.summary,
+        "4 differences: 2 only in a, 1 newer in a, 1 different"
+    );
+}
+
+/// The paths [`DIFFERING`] is about, each in the left folder and in the
+/// right one.
+fn every_pair() -> Vec<(String, String)> {
+    [
+        "only left.txt",
+        "sub/only right.txt",
+        "sub/newer left.txt",
+        "newer right.txt",
+        "odd.txt",
+        "sub/second.txt",
+    ]
+    .iter()
+    .map(|path| (format!("/l/a/{path}"), format!("/r/b/{path}")))
+    .collect()
+}
+
+/// The paths `check` asks about.
+fn pairs_asked(check: &Request<Recompare>) -> Vec<(String, String)> {
+    check
+        .operation
+        .pairs
+        .iter()
+        .map(|(left, right)| (slashed(left), slashed(right)))
+        .collect()
+}
+
+/// Has the shown tab's results checked after a file operation in
+/// `affected`, answers with `kinds`, and returns the paths asked about.
+fn recompared(
+    app: &DirFleet,
+    model: &mut Model,
+    affected: &str,
+    kinds: Vec<Difference>,
+) -> Vec<(String, String)> {
+    let mut checks = model
+        .tabs
+        .iter()
+        .filter_map(|(id, state)| state.check_results(id.number(), &[affected.to_owned()]))
+        .collect::<Vec<_>>();
+    let mut cmd = checks.pop().expect("the results are checked");
+    let mut check = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::Recompare(request) => Some(request),
+            _ => None,
+        })
+        .expect("the paths are compared again");
+    let asked = pairs_asked(&check);
+    check.resolve(kinds).expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let cmd = app.update(event, model);
+    answer_order(app, model, cmd);
+    asked
+}
+
+#[test]
+fn a_path_that_differs_again_comes_back_to_the_results() {
+    use Difference::{NewerLeft, OnlyLeft, OnlyRight, Same};
+    let app = DirFleet;
+    let mut model = Model::default();
+    let _ = compare_tab(&app, &mut model);
+    let every = every_pair();
+    let in_sub = [every[1].clone(), every[2].clone(), every[5].clone()];
+    // The files under `sub` come to agree: on either side, whichever
+    // folder the operation touched.
+    let asked = recompared(&app, &mut model, "/r/b/sub", vec![Same, Same, Same]);
+    assert_eq!(asked, in_sub);
+    let (groups, _) = groups_shown(&app, &model);
+    assert_eq!(
+        groups,
+        [
+            "Only in a 0+1",
+            "Newer in b 1+1",
+            "Different, though changed at the same time 2+1"
+        ]
+    );
+    // Undo takes the copies back: the paths are asked about again though
+    // they no longer differ, and their rows are back under their headings.
+    let asked = recompared(
+        &app,
+        &mut model,
+        "/l/a/sub",
+        vec![OnlyRight, NewerLeft, OnlyLeft],
+    );
+    assert_eq!(asked, in_sub);
+    let (groups, _) = groups_shown(&app, &model);
+    assert_eq!(
+        groups,
+        [
+            "Only in a 0+2",
+            "Only in b 2+1",
+            "Newer in a 3+1",
+            "Newer in b 4+1",
+            "Different, though changed at the same time 5+1"
+        ]
+    );
+}
+
+#[test]
+fn reading_the_files_compares_again_and_a_comparison_is_stopped_and_left() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = compare_tab(&app, &mut model);
+    let contents = |contents| Event::SetCompareOptions { tab, contents };
+
+    // Asking for what is already so compares nothing again.
+    let mut cmd = app.update(contents(false), &mut model);
+    assert!(cmd.effects().next().is_none());
+    let mut cmd = app.update(contents(true), &mut model);
+    let (stopped, started) = compares(&mut cmd);
+    let scan = started.expect("the folders are compared again");
+    assert_eq!(stopped, Vec::<u64>::new(), "nothing ran");
+    assert!(scan.operation.contents);
+    let first = scan.operation.id;
+    let bar = shown(&app, &model).results.expect("a results tab");
+    assert!(bar.running);
+    assert!(compare_bar(&app, &model).contents);
+
+    // Nothing is copied while the folders are being compared.
+    assert_eq!(compare_bar(&app, &model).to_right, SyncCount::default());
+    let mut cmd = app.update(
+        Event::SyncSelection {
+            tab,
+            to_left: false,
+        },
+        &mut model,
+    );
+    assert!(cmd.effects().next().is_none());
+    assert_eq!(compare_bar(&app, &model).asking, None);
+
+    // Stopped: what the comparison before found stays.
+    let mut cmd = app.update(Event::StopResults { tab }, &mut model);
+    assert_eq!(compares(&mut cmd).0, [first]);
+    let bar = shown(&app, &model).results.expect("a results tab");
+    assert!(!bar.running);
+    assert_eq!(
+        bar.summary,
+        "6 differences: 2 only in a, 1 only in b, 1 newer in a, 1 newer in b, 1 different. \
+         The new scan was stopped"
+    );
+
+    // Refresh compares again; duplicates' sets mean nothing here.
+    let mut cmd = app.update(Event::Refresh { tab }, &mut model);
+    let (stopped, started) = compares(&mut cmd);
+    let second = started.expect("compared again").operation.id;
+    assert_eq!(stopped, Vec::<u64>::new());
+    assert_ne!(second, first);
+    let _ = app.update(
+        Event::SelectDuplicates {
+            tab,
+            keep: Keep::Newest,
+        },
+        &mut model,
+    );
+    assert_eq!(rows_selected(&app, &model), Vec::<String>::new());
+
+    // Going to a folder ends the comparison and the results.
+    let mut cmd = app.update(
+        Event::Navigate {
+            tab,
+            path: "/x".into(),
+        },
+        &mut model,
+    );
+    assert_eq!(compares(&mut cmd).0, [second]);
+    assert_eq!(shown(&app, &model).results, None);
+}
+
+/// A window with two panes: the left one shows `/l/a`; the right one, which
+/// has the focus, shows `/x` with `entries`. Returns the window and the two
+/// tabs.
+fn beside(app: &DirFleet, model: &mut Model, entries: &[DirEntry]) -> (u32, u32, u32) {
+    let left = window(app, model);
+    open(app, model, left, "/l/a", &[]);
+    let _ = app.update(
+        Event::SplitNew {
+            tab: left,
+            side: Side::Right,
+        },
+        model,
+    );
+    let right = shown(app, model).id;
+    open(app, model, right, "/x", entries);
+    (app.view(model).windows[0].id, left, right)
+}
+
+/// The texts of the messages shown.
+fn toasts(app: &DirFleet, model: &Model) -> Vec<String> {
+    app.view(model)
+        .toasts
+        .iter()
+        .map(|toast| toast.text.clone())
+        .collect()
+}
+
+/// Answers the check of names `cmd` asks for with no clash, and returns
+/// the operation that then runs.
+fn unclashing(
+    app: &DirFleet,
+    model: &mut Model,
+    mut cmd: Command<Effect, Event>,
+) -> crate::fileops::FileOp {
+    let mut check = cmd
+        .effects()
+        .find_map(|effect| match effect {
+            Effect::FindConflicts(request) => Some(request),
+            _ => None,
+        })
+        .expect("names are checked");
+    check.resolve(Conflicts(Vec::new())).expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let mut cmd = app.update(event, model);
+    let run = file_ops(&mut cmd).pop().expect("an operation runs");
+    run.operation.op
+}
+
+#[test]
+fn the_selection_is_copied_or_moved_into_the_folder_the_other_pane_shows() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    model.settings.queue_mode = QueueMode::Unlimited;
+    let (window, left, right) = beside(
+        &app,
+        &mut model,
+        &[entry("one.txt", false), entry("two.txt", false)],
+    );
+    let other = |model: &Model| app.view(model).windows[0].other_pane.clone();
+    assert_eq!(
+        other(&model),
+        Some(OtherPane {
+            tab: left,
+            title: "a".to_owned(),
+            path: "/l/a".to_owned(),
+            writable: true,
+            reason: String::new(),
+        })
+    );
+    click(&app, &mut model, right, 0, false, false);
+    let cmd = app.update(Event::CopyToOtherPane { window }, &mut model);
+    assert!(matches!(
+        unclashing(&app, &mut model, cmd),
+        crate::fileops::FileOp::Copy { srcs, dst, .. }
+            if srcs == [Path::new("/x").join("one.txt")] && dst == Path::new("/l/a")
+    ));
+    click(&app, &mut model, right, 1, false, false);
+    let cmd = app.update(Event::MoveToOtherPane { window }, &mut model);
+    assert!(matches!(
+        unclashing(&app, &mut model, cmd),
+        crate::fileops::FileOp::Move { srcs, dst, .. }
+            if srcs == [Path::new("/x").join("two.txt")] && dst == Path::new("/l/a")
+    ));
+
+    // The other pane is the one after the focused pane: from the left
+    // pane, it is the right one.
+    let _ = app.update(Event::ActivateTab { tab: left }, &mut model);
+    assert_eq!(other(&model).map(|pane| pane.path), Some("/x".to_owned()));
+    let _ = app.update(Event::ActivateTab { tab: right }, &mut model);
+
+    // Nothing is put where nothing can be: the reason is said instead.
+    let _ = app.update(Event::OpenTrash { tab: left }, &mut model);
+    let pane = other(&model).expect("the other pane");
+    assert!(!pane.writable);
+    assert_eq!(
+        pane.reason,
+        "Things get into the Recycle Bin only by being deleted"
+    );
+    let mut cmd = app.update(Event::CopyToOtherPane { window }, &mut model);
+    assert!(
+        cmd.effects()
+            .all(|effect| !matches!(effect, Effect::RunFileOp(_) | Effect::FindConflicts(_)))
+    );
+    assert_eq!(toasts(&app, &model), [pane.reason]);
+}
+
+#[test]
+fn a_window_of_one_pane_has_no_other_pane_to_act_with() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(&app, &mut model, tab, "/x", &[entry("one.txt", false)]);
+    let window = app.view(&model).windows[0].id;
+    assert_eq!(app.view(&model).windows[0].other_pane, None);
+    click(&app, &mut model, tab, 0, false, false);
+    for (event, said) in [
+        (
+            Event::CopyToOtherPane { window },
+            "There is no other pane to copy to",
+        ),
+        (
+            Event::MoveToOtherPane { window },
+            "There is no other pane to move to",
+        ),
+        (Event::SwapPanes { window }, "This window has one pane"),
+    ] {
+        let mut cmd = app.update(event, &mut model);
+        assert!(cmd.effects().all(|effect| !matches!(
+            effect,
+            Effect::RunFileOp(_) | Effect::FindConflicts(_) | Effect::ListDir(_)
+        )));
+        assert_eq!(toasts(&app, &model).last().map(String::as_str), Some(said));
+    }
+}
+
+#[test]
+fn panes_change_places_and_a_folder_is_shown_in_the_other_pane_too() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let (window, left, right) = beside(&app, &mut model, &[]);
+    let panes = |model: &Model| -> (Vec<u32>, u32) {
+        let window = app.view(model).windows[0].clone();
+        (
+            window.panes.iter().map(|pane| pane.shown.id).collect(),
+            window.active.id,
+        )
+    };
+    assert_eq!(panes(&model), (vec![left, right], right));
+    let mut cmd = app.update(Event::SwapPanes { window }, &mut model);
+    assert_eq!(
+        listed_paths(&mut cmd),
+        Vec::<String>::new(),
+        "nothing is read"
+    );
+    assert_eq!(
+        panes(&model),
+        (vec![right, left], right),
+        "the focus stays with its tab"
+    );
+    let _ = app.update(Event::SwapPanes { window }, &mut model);
+    assert_eq!(panes(&model), (vec![left, right], right));
+
+    // The focused pane's folder, shown in the other pane as well.
+    let mut cmd = app.update(Event::MirrorToOtherPane { window }, &mut model);
+    assert_eq!(listed_paths(&mut cmd), ["/x"]);
+    let view = app.view(&model).windows[0].clone();
+    assert_eq!(view.panes[0].shown.path, "/x");
+    assert_eq!(view.active.id, right, "the focus stays where it was");
+    // Already there: nothing is read again.
+    let mut cmd = app.update(Event::MirrorToOtherPane { window }, &mut model);
+    assert_eq!(listed_paths(&mut cmd), Vec::<String>::new());
+    // The other pane goes back like after any visit.
+    assert!(view.panes[0].shown.nav.back);
+}
+
+#[test]
+fn rows_are_selected_and_deselected_by_a_pattern_written_as_a_search_is() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(
+        &app,
+        &mut model,
+        tab,
+        "/x",
+        &[
+            entry("a.jpg", false),
+            entry("b.JPG", false),
+            entry("notes.txt", false),
+            entry("docs", true),
+            entry("c.png", false),
+        ],
+    );
+    let dialog = |model: &Model| shown(&app, model).select_pattern;
+    let typed = |model: &mut Model, text: &str| {
+        let _ = app.update(
+            Event::SetSelectPattern {
+                tab,
+                text: text.to_owned(),
+            },
+            model,
+        );
+        dialog(model).expect("the dialog is open")
+    };
+    assert_eq!(dialog(&model), None);
+    // Typing with no dialog open changes nothing.
+    let _ = app.update(
+        Event::SetSelectPattern {
+            tab,
+            text: "*".to_owned(),
+        },
+        &mut model,
+    );
+    assert_eq!(dialog(&model), None);
+
+    let _ = app.update(Event::OpenSelectPattern { tab }, &mut model);
+    assert_eq!(dialog(&model), Some(SelectPatternView::default()));
+    let view = typed(&mut model, "*.jpg");
+    assert_eq!((view.matches, view.error.as_str()), (2, ""));
+    let apply = |model: &mut Model, select| {
+        let _ = app.update(Event::ApplySelectPattern { tab, select }, model);
+        rows_selected(&app, model)
+    };
+    assert_eq!(apply(&mut model, true), ["a.jpg", "b.JPG"]);
+    assert_eq!(dialog(&model), None, "applying closes the dialog");
+
+    // The pattern used last is offered again; what matches is added.
+    let _ = app.update(Event::OpenSelectPattern { tab }, &mut model);
+    assert_eq!(
+        dialog(&model).map(|view| view.text),
+        Some("*.jpg".to_owned())
+    );
+    assert_eq!(typed(&mut model, "ext:png").matches, 1);
+    assert_eq!(apply(&mut model, true), ["a.jpg", "b.JPG", "c.png"]);
+    // Deselecting takes what matches out of the selection.
+    let _ = app.update(Event::OpenSelectPattern { tab }, &mut model);
+    assert_eq!(typed(&mut model, "a*").matches, 1);
+    assert_eq!(apply(&mut model, false), ["b.JPG", "c.png"]);
+
+    // Every way a search is written: kinds, words, several at once.
+    let _ = app.update(Event::OpenSelectPattern { tab }, &mut model);
+    assert_eq!(typed(&mut model, "kind:folder").matches, 1);
+    assert_eq!(typed(&mut model, "o").matches, 2, "notes.txt and docs");
+    assert_eq!(typed(&mut model, "o -notes").matches, 1);
+    assert_eq!(
+        typed(&mut model, "").matches,
+        0,
+        "nothing typed, nothing matched"
+    );
+    // A pattern that can't be read says why and matches nothing.
+    let broken = typed(&mut model, "/[/");
+    assert_eq!(broken.matches, 0);
+    assert_ne!(broken.error, "");
+    // Closed without applying: the selection stays, and so does the
+    // pattern used last.
+    let _ = app.update(Event::CloseSelectPattern { tab }, &mut model);
+    assert_eq!(dialog(&model), None);
+    assert_eq!(rows_selected(&app, &model), ["b.JPG", "c.png"]);
+    let _ = app.update(Event::OpenSelectPattern { tab }, &mut model);
+    assert_eq!(dialog(&model).map(|view| view.text), Some("a*".to_owned()));
+}
+
+#[test]
+fn rows_that_end_as_the_selected_ones_do_are_selected() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(
+        &app,
+        &mut model,
+        tab,
+        "/x",
+        &[
+            entry("a.jpg", false),
+            entry("docs", true),
+            entry("b.JPG", false),
+            entry("notes.txt", false),
+            entry("more", true),
+            entry("README", false),
+            entry("LICENSE", false),
+        ],
+    );
+    let same = |model: &mut Model| {
+        let _ = app.update(Event::SelectSameExtension { tab }, model);
+        rows_selected(&app, model)
+    };
+    // Nothing selected and no cursor: nothing to go by.
+    assert_eq!(same(&mut model), Vec::<String>::new());
+    click(&app, &mut model, tab, 0, false, false);
+    assert_eq!(same(&mut model), ["a.jpg", "b.JPG"], "whatever the case");
+    // Folders go with folders, files without an ending with their like.
+    click(&app, &mut model, tab, 1, false, false);
+    assert_eq!(same(&mut model), ["docs", "more"]);
+    click(&app, &mut model, tab, 5, false, false);
+    click(&app, &mut model, tab, 3, true, false);
+    assert_eq!(same(&mut model), ["notes.txt", "README", "LICENSE"]);
+}
+
+#[test]
+fn no_two_commands_share_a_shortcut_and_each_has_a_name() {
+    for shortcut in [CommandId::mac_shortcut, CommandId::other_shortcut] {
+        let mut seen: Vec<&str> = Vec::new();
+        for command in CommandId::ALL {
+            assert_ne!(command.label(), "", "{command:?}");
+            let keys = shortcut(command);
+            if keys.is_empty() {
+                continue;
+            }
+            assert!(!seen.contains(&keys), "{keys} is taken twice ({command:?})");
+            seen.push(keys);
+        }
+    }
+    // The two-pane commands have keys where function keys are at hand.
+    assert_eq!(CommandId::CopyToOtherPane.other_shortcut(), "Shift+F5");
+    assert_eq!(CommandId::MoveToOtherPane.other_shortcut(), "Shift+F6");
+}
+
+/// A tab at `/x` with `entries`, all of them selected and the batch rename
+/// dialog open.
+fn renaming_all(app: &DirFleet, model: &mut Model, entries: &[DirEntry]) -> u32 {
+    let tab = window(app, model);
+    open(app, model, tab, "/x", entries);
+    let _ = app.update(Event::SelectAll { tab }, model);
+    let _ = app.update(Event::StartBatchRename { tab }, model);
+    tab
+}
+
+/// The new names the dialog shows, each with its problem when it has one.
+fn new_names(app: &DirFleet, model: &Model) -> Vec<String> {
+    batch(app, model)
+        .items
+        .into_iter()
+        .map(|item| {
+            if item.problem.is_empty() {
+                item.new
+            } else {
+                format!("{} ({})", item.new, item.problem)
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn names_are_numbered_by_a_counter_that_starts_steps_and_pads_as_told() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let entries = [
+        entry("c.jpg", false),
+        entry("a.jpg", false),
+        entry("b.jpg", false),
+    ];
+    let tab = renaming_all(&app, &mut model, &entries);
+    assert_eq!(batch(&app, &model).fields, BatchFields::default());
+    assert_eq!(
+        new_names(&app, &model),
+        ["c.jpg", "a.jpg", "b.jpg"],
+        "as it opens, nothing changes"
+    );
+    let numbered = |model: &mut Model, start, step, padding| {
+        let fields = BatchFields {
+            template: "{n} {name}{ext}".into(),
+            start,
+            step,
+            padding,
+            ..BatchFields::default()
+        };
+        let _ = app.update(Event::SetBatchRename { tab, fields }, model);
+        new_names(&app, model)
+    };
+    // In the order shown, as many digits as the last number needs.
+    assert_eq!(
+        numbered(&mut model, 1, 1, 0),
+        ["1 c.jpg", "2 a.jpg", "3 b.jpg"]
+    );
+    assert_eq!(
+        numbered(&mut model, 8, 1, 0),
+        ["08 c.jpg", "09 a.jpg", "10 b.jpg"]
+    );
+    assert_eq!(
+        numbered(&mut model, 10, 10, 4),
+        ["0010 c.jpg", "0020 a.jpg", "0030 b.jpg"]
+    );
+    // A step of nothing gives every item the same number.
+    assert_eq!(
+        numbered(&mut model, 5, 0, 0),
+        ["5 c.jpg", "5 a.jpg", "5 b.jpg"]
+    );
+    let view = batch(&app, &model);
+    assert_eq!((view.total, view.changes, view.problems), (3, 3, 0));
+}
+
+#[test]
+fn names_may_be_swapped_or_handed_on_but_not_shared_or_taken_from_others() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let entries = [
+        entry("a.txt", false),
+        entry("b.txt", false),
+        entry("other.txt", false),
+    ];
+    let tab = window(&app, &mut model);
+    open(&app, &mut model, tab, "/x", &entries);
+    click(&app, &mut model, tab, 0, false, false);
+    click(&app, &mut model, tab, 1, true, false);
+    let _ = app.update(Event::StartBatchRename { tab }, &mut model);
+    let set = |model: &mut Model, fields: BatchFields| {
+        let _ = app.update(Event::SetBatchRename { tab, fields }, model);
+        new_names(&app, model)
+    };
+    let regex = |find: &str, replace: &str| BatchFields {
+        find: find.into(),
+        replace: replace.into(),
+        regex: true,
+        ..BatchFields::default()
+    };
+    // a takes b's name while b moves on: the name is free by then.
+    assert_eq!(
+        set(&mut model, regex("^b", "c")),
+        ["a.txt", "c.txt"],
+        "one name changes"
+    );
+    let handed_on = BatchFields {
+        template: "{n}{ext}".into(),
+        ..regex("^1", "b")
+    };
+    let _ = set(&mut model, handed_on);
+    // Counted 1 and 2, then 1 becomes b: "b.txt" and "2.txt".
+    assert_eq!(new_names(&app, &model), ["b.txt", "2.txt"]);
+    assert_eq!(batch(&app, &model).problems, 0);
+    let mut cmd = app.update(Event::ApplyBatchRename { tab }, &mut model);
+    let run = file_ops(&mut cmd).pop().expect("the renames run");
+    let x = Path::new("/x");
+    assert_eq!(
+        run.operation.op,
+        crate::fileops::FileOp::RenameMany(vec![
+            (x.join("a.txt"), x.join("b.txt")),
+            (x.join("b.txt"), x.join("2.txt")),
+        ])
+    );
+
+    // The name of an item that is not being renamed can't be taken, however
+    // it is written; nor can two items share one.
+    let _ = app.update(Event::StartBatchRename { tab }, &mut model);
+    assert_eq!(
+        set(&mut model, regex("^a", "OTHER")),
+        [
+            "OTHER.txt (An item with this name already exists.)",
+            "b.txt"
+        ]
+    );
+    assert_eq!(
+        set(&mut model, regex("^.", "Same")),
+        [
+            "Same.txt (Two items would get this name.)",
+            "Same.txt (Two items would get this name.)"
+        ]
+    );
+    // Its own name written another way is an item's to take.
+    let upper = BatchFields {
+        case: BatchCase::Upper,
+        ..BatchFields::default()
+    };
+    assert_eq!(set(&mut model, upper), ["A.TXT", "B.TXT"]);
+    assert_eq!(batch(&app, &model).problems, 0);
+}
+
+#[test]
+fn an_expression_that_cannot_be_read_stops_the_rename_and_says_why() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = renaming_all(
+        &app,
+        &mut model,
+        &[entry("a.txt", false), entry("b.txt", false)],
+    );
+    let fields = BatchFields {
+        template: "x{n}".into(),
+        find: "(".into(),
+        regex: true,
+        ..BatchFields::default()
+    };
+    let _ = app.update(Event::SetBatchRename { tab, fields }, &mut model);
+    let view = batch(&app, &model);
+    assert_ne!(view.error, "");
+    assert_eq!((view.changes, view.problems), (2, 0));
+    let mut cmd = app.update(Event::ApplyBatchRename { tab }, &mut model);
+    assert!(file_ops(&mut cmd).is_empty(), "not while it can't be read");
+    assert!(shown(&app, &model).batch_rename.is_some());
+}
+
+// `{modified}` is the template's own placeholder.
+#[allow(clippy::literal_string_with_formatting_args)]
+#[test]
+fn dates_in_names_are_local_once_the_system_has_said_how_far_from_utc() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    // 2025-11-08 23:30 and 2025-07-01 12:00, UTC.
+    let mut late = entry("late.jpg", false);
+    late.meta.modified_at = TimestampSeconds::from_unix(1_762_644_600);
+    let mut noon = entry("noon.jpg", false);
+    noon.meta.modified_at = TimestampSeconds::from_unix(1_751_371_200);
+    let tab = renaming_all(&app, &mut model, &[late, noon]);
+    let dated = BatchFields {
+        template: "{modified} {name}{ext}".into(),
+        ..BatchFields::default()
+    };
+    let asked = |cmd: &mut Command<Effect, Event>| {
+        cmd.effects().find_map(|effect| match effect {
+            Effect::LocalOffsets(request) => Some(request),
+            _ => None,
+        })
+    };
+    // Nothing is asked while no name takes a date.
+    let plain = BatchFields {
+        template: "{n}{ext}".into(),
+        ..BatchFields::default()
+    };
+    let mut cmd = app.update(Event::SetBatchRename { tab, fields: plain }, &mut model);
+    assert!(asked(&mut cmd).is_none());
+
+    let set = Event::SetBatchRename { tab, fields: dated };
+    let mut cmd = app.update(set.clone(), &mut model);
+    let mut request = asked(&mut cmd).expect("local time is asked about");
+    assert_eq!(
+        request.operation.times,
+        [1_762_644_600, 0, 1_751_371_200, 0],
+        "each item's time changed and time made"
+    );
+    assert_eq!(
+        new_names(&app, &model),
+        ["2025-11-08 late.jpg", "2025-07-01 noon.jpg"],
+        "UTC until the answer comes"
+    );
+    // One hour east in winter, two in summer.
+    request
+        .resolve(vec![3600, 3600, 7200, 7200])
+        .expect("resolves");
+    let event = cmd.events().next().expect("the answer comes back");
+    let _ = app.update(event, &mut model);
+    assert_eq!(
+        new_names(&app, &model),
+        ["2025-11-09 late.jpg", "2025-07-01 noon.jpg"],
+        "half past midnight, the next day"
+    );
+    // Asked once: the answer holds while the dialog is open.
+    let mut cmd = app.update(set, &mut model);
+    assert!(asked(&mut cmd).is_none());
+    // An answer about other items is not taken.
+    let _ = app.update(
+        Event::BatchOffsets {
+            tab,
+            times: vec![1, 2, 3, 4],
+            offsets: vec![-3600; 4],
+        },
+        &mut model,
+    );
+    assert_eq!(new_names(&app, &model)[0], "2025-11-09 late.jpg");
+}
+
+#[test]
+fn a_long_selection_is_shown_by_its_beginning_after_what_cannot_be_used() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let entries: Vec<DirEntry> = (0..BATCH_PREVIEW + 50)
+        .map(|index| entry(&format!("f{index:03}.txt"), false))
+        .collect();
+    let tab = renaming_all(&app, &mut model, &entries);
+    let view = batch(&app, &model);
+    assert_eq!(view.items.len(), BATCH_PREVIEW);
+    assert_eq!(view.total as usize, BATCH_PREVIEW + 50);
+    assert_eq!(view.items[0].old, "f000.txt");
+
+    // The last two would share a name: they are shown first, though they
+    // are past what the dialog is sent.
+    let fields = BatchFields {
+        find: "f24[89]".into(),
+        replace: "twin".into(),
+        regex: true,
+        ..BatchFields::default()
+    };
+    let _ = app.update(Event::SetBatchRename { tab, fields }, &mut model);
+    let view = batch(&app, &model);
+    assert_eq!((view.changes, view.problems), (2, 2));
+    assert_eq!(view.items.len(), BATCH_PREVIEW);
+    let first: Vec<&str> = view.items[..3]
+        .iter()
+        .map(|item| item.old.as_str())
+        .collect();
+    assert_eq!(first, ["f248.txt", "f249.txt", "f000.txt"]);
+}
+
+#[test]
+fn several_items_are_renamed_only_where_names_can_be_changed() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    let entries = [entry("a.txt", false), entry("b.txt", false)];
+    // On a server items are renamed one at a time.
+    open(&app, &mut model, tab, "sftp://office/files", &entries);
+    let _ = app.update(Event::SelectAll { tab }, &mut model);
+    let _ = app.update(Event::StartBatchRename { tab }, &mut model);
+    assert_eq!(shown(&app, &model).batch_rename, None);
+    // One item is renamed in place, not in the dialog.
+    open(&app, &mut model, tab, "/x", &entries);
+    click(&app, &mut model, tab, 0, false, false);
+    let _ = app.update(Event::StartBatchRename { tab }, &mut model);
+    assert_eq!(shown(&app, &model).batch_rename, None);
+    let _ = app.update(Event::SelectAll { tab }, &mut model);
+    let _ = app.update(Event::StartBatchRename { tab }, &mut model);
+    assert!(shown(&app, &model).batch_rename.is_some());
+}
+
+/// The command as the view has it.
+fn command_view(app: &DirFleet, model: &Model, command: CommandId) -> CommandView {
+    app.view(model)
+        .commands
+        .into_iter()
+        .find(|view| view.id == command)
+        .expect("every command is listed")
+}
+
+/// `text` as this system shows shortcuts.
+fn shown_as(text: &str) -> String {
+    crate::shortcut::parse_command(text)
+        .expect("a shortcut")
+        .display()
+}
+
+fn set_shortcut(app: &DirFleet, model: &mut Model, command: CommandId, text: &str) {
+    let _ = app.update(
+        Event::SetShortcut {
+            command,
+            text: text.to_owned(),
+        },
+        model,
+    );
+}
+
+#[test]
+fn a_command_is_given_another_shortcut_which_is_kept_or_taken_away_or_reset() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let _ = start(&app, &mut model, None, LoadedState::Missing);
+    let command = CommandId::NewTab;
+    let own = command.shortcut().to_owned();
+    let before = command_view(&app, &model, command);
+    assert_eq!(
+        (
+            before.shortcut.as_str(),
+            before.default_shortcut.as_str(),
+            before.customized,
+            before.category.as_str()
+        ),
+        (own.as_str(), own.as_str(), false, "Tabs and Windows")
+    );
+    assert_eq!(before.key.map(|key| key.key), Some("T".to_owned()));
+
+    let _ = app.update(Event::EditShortcut { command }, &mut model);
+    assert_eq!(app.view(&model).keymap.recording, Some(command));
+    set_shortcut(&app, &mut model, command, "Ctrl+Alt+W");
+    let keymap = app.view(&model).keymap;
+    assert_eq!((keymap.recording, keymap.customized), (None, 1));
+    let after = command_view(&app, &model, command);
+    assert_eq!(after.shortcut, shown_as("Ctrl+Alt+W"));
+    assert_eq!(after.default_shortcut, own);
+    assert!(after.customized);
+    assert_eq!(
+        after.key,
+        Some(KeyView {
+            key: "W".to_owned(),
+            command: true,
+            control: false,
+            alt: true,
+            shift: false,
+        })
+    );
+    // The palette shows it too.
+    let _ = app.update(
+        Event::SetPaletteText {
+            text: "new tab".to_owned(),
+        },
+        &mut model,
+    );
+    let palette = app.view(&model).palette.expect("the palette is open");
+    assert_eq!(palette.items[0].detail, shown_as("Ctrl+Alt+W"));
+    let _ = app.update(Event::ClosePalette, &mut model);
+
+    // Kept between launches, by the command's name.
+    let saved = DirFleet::persisted(&model);
+    assert_eq!(
+        saved.keymap,
+        BTreeMap::from([("NewTab".to_owned(), "Ctrl+Alt+W".to_owned())])
+    );
+    let mut again = Model::default();
+    let _ = start(&app, &mut again, None, LoadedState::Found(saved));
+    assert_eq!(
+        command_view(&app, &again, command).shortcut,
+        shown_as("Ctrl+Alt+W")
+    );
+
+    // Taken away: the command has no key, which is kept too.
+    set_shortcut(&app, &mut model, command, "");
+    let none = command_view(&app, &model, command);
+    assert_eq!(
+        (none.shortcut.as_str(), none.key, none.customized),
+        ("", None, true)
+    );
+    assert_eq!(
+        DirFleet::persisted(&model).keymap,
+        BTreeMap::from([("NewTab".to_owned(), String::new())])
+    );
+    // Reset: the app's own again, and nothing to keep.
+    let _ = app.update(Event::ResetShortcut { command }, &mut model);
+    assert_eq!(
+        command_view(&app, &model, command),
+        before_as(&app, command)
+    );
+    assert_eq!(DirFleet::persisted(&model).keymap, BTreeMap::new());
+    // Giving a command the shortcut it has anyway keeps nothing either.
+    let neutral = command
+        .default_shortcut()
+        .expect("a shortcut")
+        .neutral_text();
+    set_shortcut(&app, &mut model, command, &neutral);
+    assert_eq!(DirFleet::persisted(&model).keymap, BTreeMap::new());
+}
+
+/// The command as a model that changed nothing shows it.
+fn before_as(app: &DirFleet, command: CommandId) -> CommandView {
+    command_view(app, &Model::default(), command)
+}
+
+#[test]
+fn a_shortcut_something_else_has_is_taken_only_once_it_is_confirmed() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let (asker, holder) = (CommandId::NewTab, CommandId::Refresh);
+    let wanted = holder.default_shortcut().expect("a shortcut");
+    set_shortcut(&app, &mut model, asker, &wanted.neutral_text());
+    assert_eq!(
+        app.view(&model).keymap.conflict,
+        Some(ShortcutConflictView {
+            command: asker,
+            shortcut: wanted.display(),
+            holder: holder.label().to_owned(),
+        })
+    );
+    // Nothing changes while it is asked, nor when the answer is no.
+    assert_eq!(command_view(&app, &model, asker), before_as(&app, asker));
+    let _ = app.update(Event::CancelShortcut, &mut model);
+    assert_eq!(app.view(&model).keymap, KeymapView::default());
+    assert_eq!(command_view(&app, &model, holder), before_as(&app, holder));
+    let _ = app.update(Event::ConfirmShortcut, &mut model);
+    assert_eq!(
+        command_view(&app, &model, asker),
+        before_as(&app, asker),
+        "no question, no answer"
+    );
+
+    // Confirmed: the shortcut changes hands, and its holder is left with none.
+    set_shortcut(&app, &mut model, asker, &wanted.neutral_text());
+    let _ = app.update(Event::ConfirmShortcut, &mut model);
+    assert_eq!(command_view(&app, &model, asker).shortcut, wanted.display());
+    let left = command_view(&app, &model, holder);
+    assert_eq!((left.shortcut.as_str(), left.customized), ("", true));
+    let keymap = app.view(&model).keymap;
+    assert_eq!((keymap.conflict, keymap.customized), (None, 2));
+    // No two commands ever share a shortcut.
+    let mut shortcuts: Vec<String> = app
+        .view(&model)
+        .commands
+        .into_iter()
+        .map(|view| view.shortcut)
+        .filter(|shortcut| !shortcut.is_empty())
+        .collect();
+    let count = shortcuts.len();
+    shortcuts.sort();
+    shortcuts.dedup();
+    assert_eq!(shortcuts.len(), count);
+
+    // Resetting the holder asks the same question the other way round.
+    let _ = app.update(Event::ResetShortcut { command: holder }, &mut model);
+    assert_eq!(
+        app.view(&model)
+            .keymap
+            .conflict
+            .map(|conflict| conflict.holder),
+        Some(asker.label().to_owned())
+    );
+    let _ = app.update(Event::ConfirmShortcut, &mut model);
+    assert_eq!(command_view(&app, &model, holder), before_as(&app, holder));
+    assert_eq!(command_view(&app, &model, asker).shortcut, "");
+
+    // Every command gets the app's own back at once.
+    let _ = app.update(Event::ResetAllShortcuts, &mut model);
+    assert_eq!(
+        app.view(&model).commands,
+        app.view(&Model::default()).commands
+    );
+    assert_eq!(DirFleet::persisted(&model).keymap, BTreeMap::new());
+}
+
+#[test]
+fn a_shortcut_that_cannot_be_taken_is_refused_with_the_reason() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let command = CommandId::NewTab;
+    let _ = app.update(Event::EditShortcut { command }, &mut model);
+    for (text, reason) in [
+        (
+            "Down",
+            "Down moves through lists and dialogs, and stays that way",
+        ),
+        ("M", "\"M\" needs Ctrl or Alt, so typing a name still works"),
+        ("Ctrl+Nope", "unknown key \"Nope\" in \"Ctrl+Nope\""),
+    ] {
+        set_shortcut(&app, &mut model, command, text);
+        let keymap = app.view(&model).keymap;
+        assert_eq!(keymap.error, reason);
+        assert_eq!(keymap.recording, Some(command), "another key may do");
+        assert_eq!(
+            command_view(&app, &model, command),
+            before_as(&app, command)
+        );
+    }
+    // A key that can be taken ends it.
+    set_shortcut(&app, &mut model, command, "Ctrl+Alt+F9");
+    assert_eq!(
+        app.view(&model).keymap,
+        KeymapView {
+            customized: 1,
+            ..KeymapView::default()
+        }
+    );
+    // What was saved and no longer reads, or names no command, is dropped.
+    let mut saved = DirFleet::persisted(&model);
+    saved.keymap = BTreeMap::from([
+        ("NewTab".to_owned(), "Ctrl+Alt+F9".to_owned()),
+        ("Refresh".to_owned(), "nonsense".to_owned()),
+        ("NoSuchCommand".to_owned(), "Ctrl+Alt+F8".to_owned()),
+    ]);
+    let mut again = Model::default();
+    let _ = start(&app, &mut again, None, LoadedState::Found(saved));
+    assert_eq!(
+        DirFleet::persisted(&again).keymap,
+        BTreeMap::from([("NewTab".to_owned(), "Ctrl+Alt+F9".to_owned())])
+    );
+}
+
+#[test]
+fn commands_and_plugin_actions_take_shortcuts_from_each_other_only_when_told() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let _ = keys_running(&app, &mut model);
+    let tidy = "io.example.keys.tidy";
+    let bound = |model: &Model| -> Vec<String> {
+        app.view(model)
+            .plugin_shortcuts
+            .into_iter()
+            .map(|binding| binding.action)
+            .collect()
+    };
+    assert!(bound(&model).contains(&tidy.to_owned()));
+    // A command asks for the action's shortcut: the action is named.
+    let command = CommandId::NewTab;
+    set_shortcut(&app, &mut model, command, "Ctrl+Alt+M");
+    assert_eq!(
+        app.view(&model)
+            .keymap
+            .conflict
+            .map(|conflict| conflict.holder),
+        Some("Tidy".to_owned())
+    );
+    let _ = app.update(Event::ConfirmShortcut, &mut model);
+    assert_eq!(
+        command_view(&app, &model, command).shortcut,
+        shown_as("Ctrl+Alt+M")
+    );
+    assert!(
+        !bound(&model).contains(&tidy.to_owned()),
+        "the action let go"
+    );
+
+    // An action can't take a shortcut a command was given.
+    set_shortcut(&app, &mut model, CommandId::Refresh, "Ctrl+Alt+K");
+    let _ = app.update(
+        Event::SetPluginShortcut {
+            plugin: "io.example.keys".to_owned(),
+            action: "tidy".to_owned(),
+            text: "Ctrl+Alt+K".to_owned(),
+        },
+        &mut model,
+    );
+    assert!(!bound(&model).contains(&tidy.to_owned()));
+    let note = app.view(&model).plugins.plugins[0].shortcuts[0]
+        .note
+        .clone();
+    assert_eq!(
+        note,
+        format!(
+            "{} is used by \u{201c}Refresh\u{201d}",
+            shown_as("Ctrl+Alt+K")
+        )
+    );
+    // The shortcut a command gave up is free for it.
+    let _ = app.update(
+        Event::SetPluginShortcut {
+            plugin: "io.example.keys".to_owned(),
+            action: "tidy".to_owned(),
+            text: CommandId::Refresh
+                .default_shortcut()
+                .expect("a shortcut")
+                .neutral_text(),
+        },
+        &mut model,
+    );
+    assert!(bound(&model).contains(&tidy.to_owned()));
+}
+
+/// What `cmd` asks of the tags.
+fn tag_ops(cmd: &mut Command<Effect, Event>) -> Vec<Request<TagOp>> {
+    cmd.effects()
+        .filter_map(|effect| match effect {
+            Effect::Tags(request) => Some(request),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Tells the app which item has which tag now.
+fn tagged_now(
+    app: &DirFleet,
+    model: &mut Model,
+    tagged: &[(&str, &[u32])],
+) -> Command<Effect, Event> {
+    let tagged = Tagged(
+        tagged
+            .iter()
+            .map(|(path, tags)| ((*path).to_owned(), tags.to_vec()))
+            .collect(),
+    );
+    app.update(Event::TagsChanged { tagged }, model)
+}
+
+/// The item `name` of `/x`, as rows name their items.
+fn in_x(name: &str) -> String {
+    crate::location::Location::parse("/x")
+        .join(name)
+        .to_string()
+}
+
+#[test]
+fn tags_are_given_to_the_selection_shown_on_its_rows_and_taken_again() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(
+        &app,
+        &mut model,
+        tab,
+        "/x",
+        &[
+            entry("a.txt", false),
+            entry("b.txt", false),
+            entry("docs", true),
+        ],
+    );
+    // Seven tags to start with, one of each colour, on nothing yet.
+    let tags = app.view(&model).tags;
+    let names: Vec<&str> = tags.iter().map(|tag| tag.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Gray"]
+    );
+    assert_eq!(
+        tags[3],
+        TagView {
+            id: 4,
+            name: "Green".to_owned(),
+            color: TagColor::Green,
+            count: 0,
+        }
+    );
+
+    click(&app, &mut model, tab, 0, false, false);
+    click(&app, &mut model, tab, 1, true, false);
+    // The first thing the tags are told is their names, to search by.
+    let mut cmd = app.update(Event::ToggleTag { tab, tag: 4 }, &mut model);
+    let mut names = tag_ops(&mut cmd).pop().expect("the tags are told");
+    assert!(matches!(&names.operation, TagOp::Names(names) if names.len() == 7));
+    names.resolve(Tagged::default()).expect("resolves");
+    let op = tag_ops(&mut cmd).pop().expect("then what to tag").operation;
+    assert_eq!(
+        op,
+        TagOp::Set {
+            paths: vec![in_x("a.txt"), in_x("b.txt")],
+            tag: 4,
+            on: true
+        }
+    );
+    // The effects answer with every item's tags: rows show them as dots
+    // of the tags' colours, in the tags' order.
+    let (a, b) = (in_x("a.txt"), in_x("b.txt"));
+    let _ = tagged_now(&app, &mut model, &[(&a, &[4, 1]), (&b, &[4])]);
+    let view = shown(&app, &model);
+    assert_eq!(view.rows[0].tags, [TagColor::Red, TagColor::Green]);
+    assert_eq!(view.rows[1].tags, [TagColor::Green]);
+    assert_eq!(view.rows[2].tags, Vec::<TagColor>::new());
+    assert_eq!(view.selection_tags, [4], "the tag both selected items have");
+    let counts: Vec<u32> = app.view(&model).tags.iter().map(|tag| tag.count).collect();
+    assert_eq!(counts, [1, 0, 0, 2, 0, 0, 0]);
+
+    // Every selected item has it: toggled, it is taken. One lacks it: given.
+    let mut cmd = app.update(Event::ToggleTag { tab, tag: 4 }, &mut model);
+    assert!(matches!(
+        tag_ops(&mut cmd).pop().expect("told").operation,
+        TagOp::Set {
+            on: false,
+            tag: 4,
+            ..
+        }
+    ));
+    let mut cmd = app.update(Event::ToggleTag { tab, tag: 1 }, &mut model);
+    assert!(matches!(
+        tag_ops(&mut cmd).pop().expect("told").operation,
+        TagOp::Set {
+            on: true,
+            tag: 1,
+            ..
+        }
+    ));
+    let mut cmd = app.update(
+        Event::SetTag {
+            tab,
+            tag: 1,
+            on: false,
+        },
+        &mut model,
+    );
+    assert!(matches!(
+        tag_ops(&mut cmd).pop().expect("told").operation,
+        TagOp::Set {
+            on: false,
+            tag: 1,
+            ..
+        }
+    ));
+    let mut cmd = app.update(Event::ClearTags { tab }, &mut model);
+    assert_eq!(
+        tag_ops(&mut cmd).pop().expect("told").operation,
+        TagOp::Clear { paths: vec![a, b] }
+    );
+    // A tag there is not is given to nothing.
+    let mut cmd = app.update(Event::ToggleTag { tab, tag: 99 }, &mut model);
+    assert!(tag_ops(&mut cmd).is_empty());
+}
+
+#[test]
+fn a_tag_s_items_show_in_a_tab_of_their_own_wherever_they_are() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(&app, &mut model, tab, "/x", &[entry("a.txt", false)]);
+    let listing_asked = |cmd: &mut Command<Effect, Event>| {
+        cmd.effects().find_map(|effect| match effect {
+            Effect::ListTagged(request) => Some(request),
+            _ => None,
+        })
+    };
+    let mut cmd = app.update(Event::OpenTag { tab, tag: 2 }, &mut model);
+    let mut request = listing_asked(&mut cmd).expect("the tag's items are asked for");
+    assert_eq!(request.operation.tag, 2);
+    let (tabs, active) = tabs_of(&app, &model, 0);
+    assert_eq!(
+        (tabs.len(), active),
+        (2, tabs[1]),
+        "a tab beside the folder's"
+    );
+    let view = shown(&app, &model);
+    assert_eq!((view.title.as_str(), view.path.as_str()), ("Orange", ""));
+    assert!(view.loading);
+    assert!(!view.location.caps.writable);
+
+    let entries = [
+        found_file("/p/report.txt", 10, 50),
+        found_file("/q/deep/plan.txt", 20, 90),
+    ];
+    let view_asked = request.operation.view.clone();
+    request
+        .resolve(TaggedListing {
+            output: listing(&entries, view_asked),
+            missing: vec!["/gone/old.txt".to_owned()],
+        })
+        .expect("resolves");
+    let event = cmd.events().next().expect("the items come back");
+    let _ = app.update(event, &mut model);
+    let view = shown(&app, &model);
+    assert!(!view.loading && view.show_folder);
+    assert_eq!(
+        rows_with_folders(&app, &model),
+        ["/p/report.txt", "/q/deep/plan.txt"]
+    );
+    let bar = view.results.expect("a results tab");
+    assert_eq!(bar.summary, "2 items. 1 more is no longer where it was");
+    assert_eq!(
+        bar.tag,
+        Some(TagPlaceView {
+            id: 2,
+            name: "Orange".to_owned(),
+            color: TagColor::Orange,
+            missing: 1,
+        })
+    );
+    assert_eq!((bar.running, bar.sets, bar.compare), (false, 0, None));
+
+    // The sidebar lists the tags, the one shown marked.
+    let section = |model: &Model| {
+        app.view(model).windows[0]
+            .sidebar
+            .iter()
+            .find(|section| section.section == SidebarSection::Tags)
+            .cloned()
+    };
+    let listed = section(&model).expect("the tags are listed");
+    assert_eq!(listed.items.len(), 7);
+    let orange = &listed.items[1];
+    assert_eq!(
+        (
+            orange.title.as_str(),
+            orange.tag,
+            orange.active,
+            orange.icon
+        ),
+        ("Orange", Some(2), true, SidebarIcon::Tag(TagColor::Orange))
+    );
+    assert!(!listed.items[0].active);
+
+    // Asked for again, the tab that shows it is shown; nothing new opens.
+    let _ = app.update(Event::ActivateTab { tab }, &mut model);
+    let _ = app.update(Event::OpenTag { tab, tag: 2 }, &mut model);
+    let (tabs, active) = tabs_of(&app, &model, 0);
+    assert_eq!((tabs.len(), active), (2, tabs[1]));
+    // The items that are gone lose the tag when told to.
+    let shown_tab = active;
+    let mut cmd = app.update(Event::RemoveMissingTagged { tab: shown_tab }, &mut model);
+    assert_eq!(
+        tag_ops(&mut cmd).pop().expect("told").operation,
+        TagOp::Clear {
+            paths: vec!["/gone/old.txt".to_owned()]
+        }
+    );
+    // Whenever tags change, the tab lists its items anew.
+    let mut cmd = tagged_now(&app, &mut model, &[("/p/report.txt", &[2])]);
+    assert!(listing_asked(&mut cmd).is_some());
+    // A tab without a folder is not kept; the setting hides the section.
+    assert_eq!(DirFleet::persisted(&model).windows[0].tabs, ["/x"]);
+    model.settings.show_tags = false;
+    assert_eq!(section(&model), None);
+}
+
+#[test]
+fn tags_are_made_renamed_recoloured_moved_deleted_and_kept() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let draft = |model: &Model| app.view(model).tag_draft;
+    let typed = |model: &mut Model, name: &str, color| {
+        let _ = app.update(
+            Event::SetTagDraft {
+                name: name.to_owned(),
+                color,
+            },
+            model,
+        );
+        draft(model).expect("the editor is open").problem
+    };
+    let _ = app.update(Event::EditTag { tag: None }, &mut model);
+    let new = draft(&model).expect("the editor is open");
+    assert_eq!((new.id, new.name.as_str()), (None, ""));
+    assert_eq!(new.problem, "A tag needs a name.");
+    assert_eq!(
+        typed(&mut model, "red", TagColor::Blue),
+        "Another tag has this name."
+    );
+    assert_eq!(
+        typed(&mut model, "two words", TagColor::Blue),
+        "A tag's name is one word."
+    );
+    // Not kept while something is wrong with it.
+    let mut cmd = app.update(Event::ApplyTagDraft, &mut model);
+    assert!(tag_ops(&mut cmd).is_empty());
+    assert!(draft(&model).is_some());
+    assert_eq!(app.view(&model).tags.len(), 7);
+
+    assert_eq!(typed(&mut model, "Work", TagColor::Blue), "");
+    let mut cmd = app.update(Event::ApplyTagDraft, &mut model);
+    assert_eq!(draft(&model), None);
+    let made = app.view(&model).tags.last().cloned().expect("a tag");
+    assert_eq!(
+        (made.id, made.name.as_str(), made.color),
+        (8, "Work", TagColor::Blue)
+    );
+    // The effects hear the names, to answer searches by them.
+    let TagOp::Names(names) = tag_ops(&mut cmd).pop().expect("told").operation else {
+        panic!("the names are told");
+    };
+    assert_eq!(names.last(), Some(&(8, "Work".to_owned())));
+
+    // Changed: its own name is no clash.
+    let _ = app.update(Event::EditTag { tag: Some(8) }, &mut model);
+    assert_eq!(
+        draft(&model).map(|draft| draft.name),
+        Some("Work".to_owned())
+    );
+    assert_eq!(typed(&mut model, "work", TagColor::Green), "");
+    let _ = app.update(Event::ApplyTagDraft, &mut model);
+    let changed = app.view(&model).tags.last().cloned().expect("a tag");
+    assert_eq!(
+        (changed.name.as_str(), changed.color),
+        ("work", TagColor::Green)
+    );
+    // Cancelled, nothing changes.
+    let _ = app.update(Event::EditTag { tag: Some(1) }, &mut model);
+    let _ = typed(&mut model, "Crimson", TagColor::Red);
+    let _ = app.update(Event::CancelTagDraft, &mut model);
+    assert_eq!(app.view(&model).tags[0].name, "Red");
+
+    // Moved to the front, and kept with the app's state.
+    let _ = app.update(Event::MoveTag { tag: 8, to: 0 }, &mut model);
+    let ids =
+        |model: &Model| -> Vec<u32> { app.view(model).tags.iter().map(|tag| tag.id).collect() };
+    assert_eq!(ids(&model), [8, 1, 2, 3, 4, 5, 6, 7]);
+    let saved = DirFleet::persisted(&model);
+    assert_eq!(saved.tags.as_ref().map(Vec::len), Some(8));
+    let mut again = Model::default();
+    let _ = start(&app, &mut again, None, LoadedState::Found(saved.clone()));
+    assert_eq!(app.view(&again).tags, app.view(&model).tags);
+    // A state from before there were tags has the ones the app starts with.
+    let mut old = Model::default();
+    let before_tags = PersistedState {
+        tags: None,
+        ..saved
+    };
+    let _ = start(&app, &mut old, None, LoadedState::Found(before_tags));
+    assert_eq!(ids(&old), [1, 2, 3, 4, 5, 6, 7]);
+
+    // Deleted: no item has it any more, and its number is not used again.
+    let mut cmd = app.update(Event::DeleteTag { tag: 8 }, &mut model);
+    let ops: Vec<TagOp> = tag_ops(&mut cmd)
+        .into_iter()
+        .map(|request| request.operation)
+        .collect();
+    assert!(ops.contains(&TagOp::Forget { tag: 8 }), "{ops:?}");
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, TagOp::Names(names) if names.len() == 7))
+    );
+    assert_eq!(ids(&model), [1, 2, 3, 4, 5, 6, 7]);
+    let _ = app.update(Event::EditTag { tag: None }, &mut model);
+    let _ = typed(&mut model, "Later", TagColor::Gray);
+    let _ = app.update(Event::ApplyTagDraft, &mut model);
+    assert_eq!(ids(&model).last(), Some(&9));
+}
+
+#[test]
+fn tags_follow_what_is_renamed_and_are_searched_for_by_name() {
+    let app = DirFleet;
+    let mut model = Model::default();
+    let tab = window(&app, &mut model);
+    open(
+        &app,
+        &mut model,
+        tab,
+        "/x",
+        &[
+            entry("a.mp4", false),
+            entry("b.mp4", false),
+            entry("c.txt", false),
+        ],
+    );
+    let (a, b) = (in_x("a.mp4"), in_x("b.mp4"));
+    let _ = tagged_now(&app, &mut model, &[(&a, &[1, 5]), (&b, &[5])]);
+
+    // Written as any filter, alone or with others; names in any case.
+    assert_eq!(
+        crate::search::query::parse("tag:Blue *.mp4").chips[0],
+        crate::search::Chip::Tag("Blue".to_owned())
+    );
+    assert_eq!(
+        crate::search::query::chip_token(&crate::search::Chip::Tag("Blue".to_owned())),
+        "tag:Blue"
+    );
+    let _ = app.update(Event::OpenSelectPattern { tab }, &mut model);
+    let matching = |model: &mut Model, text: &str| {
+        let _ = app.update(
+            Event::SetSelectPattern {
+                tab,
+                text: text.to_owned(),
+            },
+            model,
+        );
+        shown(&app, model)
+            .select_pattern
+            .expect("the dialog is open")
+            .matches
+    };
+    assert_eq!(matching(&mut model, "tag:blue"), 2);
+    assert_eq!(matching(&mut model, "tag:BLUE tag:red"), 1);
+    assert_eq!(matching(&mut model, "tag:blue b"), 1);
+    assert_eq!(matching(&mut model, "tag:green"), 0);
+    assert_eq!(matching(&mut model, "tag:nosuch"), 0);
+    let _ = app.update(Event::CloseSelectPattern { tab }, &mut model);
+
+    // A renamed item keeps its tags: the effects are told its new name.
+    click(&app, &mut model, tab, 0, false, false);
+    let _ = app.update(Event::StartRename { tab }, &mut model);
+    let mut cmd = app.update(
+        Event::Rename {
+            tab,
+            name: "z.mp4".into(),
+        },
+        &mut model,
+    );
+    let mut done = finish(
+        &app,
+        &mut model,
+        &mut cmd,
+        crate::fileops::Outcome {
+            undo: Some(crate::fileops::Undo::Rename {
+                from: PathBuf::from("/x/a.mp4"),
+                to: PathBuf::from("/x/z.mp4"),
+            }),
+            ..outcome(0, crate::fileops::Origin::User)
+        },
+    );
+    let pairs = vec![("/x/a.mp4".to_owned(), "/x/z.mp4".to_owned())];
+    let ops: Vec<TagOp> = tag_ops(&mut done)
+        .into_iter()
+        .map(|request| request.operation)
+        .collect();
+    assert_eq!(ops, [TagOp::Rename(pairs)]);
 }

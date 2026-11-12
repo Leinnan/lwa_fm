@@ -45,12 +45,33 @@ const SPLITTER: f64 = 6.0;
 const TITLE_BAR: f64 = 48.0;
 /// The space left of the title bar's own content.
 const TITLE_INSET: f64 = 16.0;
+/// The space before the app's name in the title bar's content, which itself
+/// begins a little way in: together they line the name up with the
+/// sidebar's headings.
+const NAME_INSET: f64 = 4.0;
 /// The least room the app's name takes in the title bar.
 const NAME_WIDTH: f64 = 80.0;
 /// What the More button and the window's own buttons take on the right.
 const TITLE_BUTTONS: f64 = 220.0;
 /// The height of a pane's strip of tabs.
 const TAB_STRIP: f64 = 40.0;
+/// The widest a tab grows (`WinUI`'s own limit); the strip shares its width
+/// among its tabs, up to this each.
+const TAB_WIDTH: f64 = 240.0;
+/// What the title bar's strip takes besides its tabs: the space before the
+/// first and the + button after the last.
+const STRIP_EXTRA: f64 = 48.0;
+/// The title bar always keeps this much free beside its tabs, to take hold
+/// of the window by.
+const DRAG_ROOM: f64 = 48.0;
+
+/// How wide the title bar's strip is for `tabs` tabs, given `room`: as wide
+/// as its tabs at their widest, or as `room` once they no longer fit (they
+/// then narrow, and scroll). Never too narrow for a tab and the + button.
+const fn strip_width(tabs: usize, room: f64) -> f64 {
+    let wanted = (tabs as f64).mul_add(TAB_WIDTH, STRIP_EXTRA);
+    wanted.min(room).max(TAB_WIDTH)
+}
 /// A pane keeps at least this share of a split, in thousandths.
 const MIN_SHARE: f64 = 100.0;
 /// How long a menu waits for the core to answer the click that asked for it.
@@ -211,6 +232,7 @@ impl WindowRoot {
             in_trash: tab.in_trash,
             no_bin: tab.location.caps.writable && !tab.location.caps.trash,
             selected: tab.selected_count,
+            whole_sets: tab.results.as_ref().map_or(0, |results| results.whole_sets),
             inspector_shown: input.shared.inspector_shown,
             confirm_trash: input.shared.settings.confirm_trash,
             home: input.home.to_string(),
@@ -409,7 +431,8 @@ impl Component for WindowRoot {
                         } else if target.no_bin {
                             // No bin to move it to: removed for good, so asked first.
                             self.asking = Some(Asking::Delete);
-                        } else if target.confirm_trash {
+                        } else if target.confirm_trash || target.whole_sets > 0 {
+                            // Asked for, or no copy would be left of a file.
                             self.asking = Some(Asking::Trash);
                         } else {
                             self.core.send(Event::TrashSelection { tab: target.tab });
@@ -656,39 +679,50 @@ impl Component for WindowRoot {
                     .iter()
                     .map(|tab| keyed(tab.id, TabViewItem::new().header(tab.title.clone())));
                 // The app's name stands over the sidebar, so the tabs begin
-                // over the folder they belong to and run to the window's buttons.
+                // over the folder they belong to. The bar moves the window
+                // wherever no control lies, so the name is not a header (a
+                // header is a control all across) and the strip is only as
+                // wide as its tabs.
                 let name_width = (side - TITLE_INSET).max(NAME_WIDTH);
-                let tabs_width =
-                    (self.size.0 - name_width - TITLE_INSET - TITLE_BUTTONS).max(240.0);
-                title_bar
-                    .left_header(
-                        Border::new()
-                            .width(name_width)
-                            .padding(Thickness::new(TITLE_INSET, 0.0, 0.0, 0.0))
-                            .content(
-                                TextBlock::new()
-                                    .text("DirFleet")
-                                    .font_size(12.0)
-                                    .vertical_alignment(VerticalAlignment::Center),
-                            ),
-                    )
-                    .content(
-                        // The strip stands on the bar's lower edge, so the
-                        // chosen tab meets the folder it names.
-                        TabView::new()
-                            .width(tabs_width)
-                            .height(TAB_STRIP)
-                            .margin(Thickness::new(0.0, TITLE_BAR - TAB_STRIP, 0.0, 0.0))
-                            .vertical_alignment(VerticalAlignment::Bottom)
-                            .can_reorder_tabs(true)
-                            .is_add_tab_button_visible(true)
-                            .selected_index(pane.tabs.iter().position(|tab| tab.id == shown))
-                            .keyed_tab_items(items)
-                            .on_selection_changed(context.callback(WindowMessage::TabSelected))
-                            .on_close_requested(context.callback(WindowMessage::TabClosed))
-                            .on_add_tab_button_click(context.message(WindowMessage::TabAdded))
-                            .on_reordered(context.callback(WindowMessage::TabsReordered)),
-                    )
+                // The bar centres its content: the content takes all the
+                // room up to the More button, and what the tabs leave is free.
+                let across = (self.size.0 - TITLE_INSET - TITLE_BUTTONS).max(1.0);
+                let room = across - name_width - DRAG_ROOM;
+                title_bar.content(
+                    Grid::new()
+                        .width(across)
+                        .columns([
+                            GridLength::Pixel(name_width),
+                            GridLength::Auto,
+                            GridLength::STAR,
+                        ])
+                        .children((
+                            Border::new()
+                                .padding(Thickness::new(NAME_INSET, 0.0, 0.0, 0.0))
+                                .content(
+                                    TextBlock::new()
+                                        .text("DirFleet")
+                                        .font_size(12.0)
+                                        .vertical_alignment(VerticalAlignment::Center),
+                                ),
+                            // The strip stands on the bar's lower edge, so the
+                            // chosen tab meets the folder it names.
+                            TabView::new()
+                                .grid_column(1)
+                                .width(strip_width(pane.tabs.len(), room))
+                                .height(TAB_STRIP)
+                                .margin(Thickness::new(0.0, TITLE_BAR - TAB_STRIP, 0.0, 0.0))
+                                .vertical_alignment(VerticalAlignment::Bottom)
+                                .can_reorder_tabs(true)
+                                .is_add_tab_button_visible(true)
+                                .selected_index(pane.tabs.iter().position(|tab| tab.id == shown))
+                                .keyed_tab_items(items)
+                                .on_selection_changed(context.callback(WindowMessage::TabSelected))
+                                .on_close_requested(context.callback(WindowMessage::TabClosed))
+                                .on_add_tab_button_click(context.message(WindowMessage::TabAdded))
+                                .on_reordered(context.callback(WindowMessage::TabsReordered)),
+                        )),
+                )
             }
             None => title_bar.title("DirFleet").subtitle(tab.title.clone()),
         };
@@ -922,6 +956,18 @@ impl WindowRoot {
                 .then(|| pane.rows.rows.iter().find(|row| row.selected))
                 .flatten()
                 .map(|row| (row.index, row.thumbnail_choice)),
+            folders: {
+                let mut selected = pane.rows.rows.iter().filter(|row| row.selected).peekable();
+                selected.peek().is_some() && selected.all(|row| row.is_dir)
+            },
+            compare: self.input.chrome.compare.as_ref(),
+            // The other pane is the one after the focused pane.
+            other: self
+                .input
+                .chrome
+                .other_pane
+                .as_ref()
+                .filter(|_| pane.tab.id == self.input.chrome.active.id),
         };
         let entries = match on {
             MenuOn::Selection if pane.tab.in_trash => menu.trashed(),
@@ -947,6 +993,9 @@ impl WindowRoot {
             tab: &self.input.chrome.active,
             sidebar: &self.input.chrome.sidebar,
             only: None,
+            folders: false,
+            compare: None,
+            other: None,
         }
         .sidebar(on);
         if entries.is_empty() {
@@ -1094,6 +1143,8 @@ fn more_menu(shared: &ViewModel, on_server: bool, on_click: Callback<Key>) -> Me
             CommandId::ViewList,
             CommandId::ToggleHidden,
             CommandId::ToggleInspector,
+            CommandId::SwapPanes,
+            CommandId::CompareFolders,
         ],
         &[
             CommandId::GoToFolder,
@@ -1146,6 +1197,17 @@ fn more_menu(shared: &ViewModel, on_server: bool, on_click: Callback<Key>) -> Me
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tab_strip_leaves_the_rest_of_the_title_bar_free() {
+        // A few tabs take what they need, at their widest.
+        assert_eq!(strip_width(1, 900.0), TAB_WIDTH + STRIP_EXTRA);
+        assert_eq!(strip_width(3, 900.0), 3.0 * TAB_WIDTH + STRIP_EXTRA);
+        // Many stop at the room there is, and narrow.
+        assert_eq!(strip_width(12, 900.0), 900.0);
+        // A window too small for anything still shows a tab.
+        assert_eq!(strip_width(2, 10.0), TAB_WIDTH);
+    }
 
     #[test]
     fn dragging_a_splitter_moves_its_share_and_keeps_both_sides() {

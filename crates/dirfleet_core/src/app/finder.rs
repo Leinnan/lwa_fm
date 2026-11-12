@@ -28,6 +28,23 @@ pub struct SearchWalk {
     pub roots: Vec<String>,
     pub depth: u32,
     pub view: ListView,
+    /// The committed search, when it reads file contents: only files that
+    /// match it, contents included, are handed over.
+    pub content: Option<Arc<Search>>,
+    /// Leave out what `.gitignore` files ignore, and `.git` folders.
+    pub skip_ignored: bool,
+}
+
+/// The first line of a file that a content search matched.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct MatchLine {
+    /// The line's number, from 1.
+    pub line: u32,
+    /// The line, without the space around it, cut when it is long.
+    pub text: String,
+    /// Bytes `start..end` of `text` are what matched.
+    pub start: u32,
+    pub end: u32,
 }
 
 impl Operation for SearchWalk {
@@ -44,6 +61,11 @@ pub struct WalkUpdate {
     /// The first root as the file system names it (symlinks resolved), which
     /// the entries' folders are below.
     pub root: String,
+    /// The matching line of each entry of the listing, while file contents
+    /// are searched; empty otherwise.
+    pub matched: Arc<Vec<MatchLine>>,
+    /// How many files' contents were read so far.
+    pub scanned: u64,
 }
 
 /// Stop the walk `id`, telling the handler too (crux #622).
@@ -101,6 +123,13 @@ pub struct SearchView {
     pub offer_subfolders: bool,
     /// ... and "Search favorites" (`SetSearchFavorites`), when there are some.
     pub offer_favorites: bool,
+    /// The typed text holds a `content:` term, which searches nothing until
+    /// Enter commits it.
+    pub content_pending: bool,
+    /// What `.gitignore` files ignore is left out (`SetSearchIgnored`).
+    pub skip_ignored: bool,
+    /// How many files' contents were read, while contents are searched.
+    pub scanned: u32,
 }
 
 /// How deep "Search subfolders" looks, as egui's.
@@ -225,12 +254,22 @@ pub(super) struct ReadKey {
     depth: usize,
     /// Only a walk reads hidden folders differently.
     show_hidden: bool,
+    /// The committed search, when it reads file contents: any change to it
+    /// reads them again.
+    content: Option<Arc<Search>>,
+    /// Only a walk leaves out what `.gitignore` files ignore.
+    skip_ignored: bool,
 }
 
 impl ReadKey {
     /// One folder, read by itself.
     const fn is_flat(&self) -> bool {
-        self.roots.len() == 1 && self.depth <= 1 && !self.scoped
+        self.roots.len() == 1 && self.depth <= 1 && !self.scoped && self.content.is_none()
+    }
+
+    /// Whether file contents are searched.
+    pub(super) const fn has_content(&self) -> bool {
+        self.content.is_some()
     }
 }
 
@@ -262,6 +301,8 @@ impl Tab {
                 scoped: false,
                 depth: 1,
                 show_hidden: false,
+                content: None,
+                skip_ignored: false,
             });
         }
         // Subfolders and `in:` folders are read only while there is a query,
@@ -276,19 +317,43 @@ impl Tab {
                 .map(|dir| dir.to_string_lossy().into_owned()),
         );
         let depth = search.map_or(1, |search| search.depth.max(1));
+        // Contents are read for the committed chips alone: text still
+        // being typed only narrows what was found.
+        let content = search
+            .filter(|search| search.has_content())
+            .map(|search| Arc::new(search.committed()));
         let mut key = ReadKey {
             roots,
             scoped,
             depth,
             show_hidden: false,
+            content,
+            skip_ignored: false,
         };
-        key.show_hidden = !key.is_flat() && self.view.show_hidden;
+        let flat = key.is_flat();
+        key.show_hidden = !flat && self.view.show_hidden;
+        key.skip_ignored = !flat && search.is_some_and(|search| search.skip_ignored);
         Some(key)
+    }
+
+    /// File contents are searched, so rows show the line that matched.
+    pub(super) fn shows_matches(&self) -> bool {
+        self.read.as_ref().is_some_and(ReadKey::has_content)
+    }
+
+    /// The matching line of the listing's entry `entry`, while file contents
+    /// are searched.
+    pub(super) fn match_line(&self, entry: usize) -> Option<&MatchLine> {
+        // One for each entry, or they belong to another listing.
+        (self.matched.len() == self.listing.len())
+            .then(|| self.matched.get(entry))
+            .flatten()
+            .filter(|found| found.line > 0)
     }
 
     /// Results come from more than one folder, so rows say which.
     pub(super) fn shows_folders(&self) -> bool {
-        self.read.as_ref().is_some_and(|key| !key.is_flat())
+        self.results.is_some() || self.read.as_ref().is_some_and(|key| !key.is_flat())
     }
 
     /// Where the tab is; `None` for the Trash and an empty tab.
@@ -398,7 +463,9 @@ impl Tab {
                 .map(|chip| ChipView {
                     token: query::chip_token(chip),
                     error: match chip {
-                        Chip::Name { pattern, kind, .. } => pattern_error(pattern, *kind),
+                        Chip::Name { pattern, kind, .. } | Chip::Content { pattern, kind } => {
+                            pattern_error(pattern, *kind)
+                        }
                         _ => None,
                     },
                 })
@@ -419,6 +486,13 @@ impl Tab {
                 SearchScope::Favorites
             } else {
                 SearchScope::Folder
+            },
+            content_pending: search.content_pending(),
+            skip_ignored: search.skip_ignored,
+            scanned: if self.shows_matches() {
+                u32::try_from(self.scanned).unwrap_or(u32::MAX)
+            } else {
+                0
             },
         })
     }
@@ -463,18 +537,26 @@ pub(super) fn relative_dir(dir: &str, root: Option<&str>) -> String {
 }
 
 impl DirFleet {
-    /// Reads what the tab shows: the Trash, its folder, or a walk through
-    /// its search's folders. Results carry the tab's generation.
+    /// Reads what the tab shows: the Trash, a scan's results, its folder,
+    /// or a walk through its search's folders. Results carry the tab's
+    /// generation.
     pub(super) fn load(tab: &mut Tab, number: u32) -> Command<Effect, Event> {
         let stop = tab.stop_walk();
         let generation = tab.generation;
         if tab.trash {
             return stop.and(Self::list_trash(number, tab.list_view(), generation));
         }
+        if tab.results.is_some() {
+            return stop.and(Self::scan(tab, number));
+        }
         let Some(key) = tab.read_key() else {
             return stop;
         };
         tab.read = Some(key.clone());
+        if !key.has_content() {
+            tab.matched = Arc::default();
+            tab.scanned = 0;
+        }
         if key.is_flat() {
             let path = key.roots.into_iter().next().unwrap_or_default();
             tab.reading = true;
@@ -483,8 +565,16 @@ impl DirFleet {
         let walk = Command::stream_from_shell(SearchWalk {
             id: generation,
             roots: key.roots,
-            depth: u32::try_from(key.depth).unwrap_or(u32::MAX),
+            // A walk reads one level more than it is told (as egui's did):
+            // contents searched in the folder alone are its own files'.
+            depth: if key.content.is_some() && key.depth <= 1 {
+                0
+            } else {
+                u32::try_from(key.depth).unwrap_or(u32::MAX)
+            },
             view: tab.list_view(),
+            content: key.content,
+            skip_ignored: key.skip_ignored,
         })
         .then_send(move |update| Event::Walked {
             tab: number,
@@ -535,6 +625,8 @@ impl DirFleet {
     ) -> Command<Effect, Event> {
         if let Some(state) = Self::current(model, tab, generation) {
             state.walk_root = Some(update.root);
+            state.matched = update.matched;
+            state.scanned = update.scanned;
             if update.done {
                 state.walk = None;
             }
@@ -614,6 +706,7 @@ impl DirFleet {
                 }
             }
             Event::SetSearchCase { on, .. } => search.case_sensitive = on,
+            Event::SetSearchIgnored { on, .. } => search.skip_ignored = on,
             Event::SetSearchDepth { depth, .. } => search.depth = depth.max(1) as usize,
             Event::SetSearchAny { any, .. } => {
                 search.match_mode = if any { MatchMode::Any } else { MatchMode::All };
@@ -672,6 +765,7 @@ const fn search_tab(event: &Event) -> Option<u32> {
         | Event::ToggleSearchFilter { tab, .. }
         | Event::RemoveSearchChip { tab, .. }
         | Event::SetSearchCase { tab, .. }
+        | Event::SetSearchIgnored { tab, .. }
         | Event::SetSearchDepth { tab, .. }
         | Event::SetSearchAny { tab, .. }
         | Event::CloseSearch { tab }

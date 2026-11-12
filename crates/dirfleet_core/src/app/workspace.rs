@@ -38,7 +38,7 @@ impl Model {
             .position(|window| window.layout.contains(tab))
     }
 
-    fn window_index(&self, window: u32) -> Option<usize> {
+    pub(super) fn window_index(&self, window: u32) -> Option<usize> {
         let id = window_id(window)?;
         self.windows.iter().position(|w| w.id == id)
     }

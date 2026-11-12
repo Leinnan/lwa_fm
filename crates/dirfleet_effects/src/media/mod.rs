@@ -31,6 +31,7 @@ pub mod cache;
 pub mod decode;
 pub mod failures;
 pub mod ffmpeg_install;
+pub mod info;
 pub mod kinds;
 #[cfg(target_os = "macos")]
 mod macos;

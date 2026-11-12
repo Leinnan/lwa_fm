@@ -2,6 +2,7 @@
 //! by reference, with the rules for what is hidden and how names sort.
 //! Reading folders is done by `dirfleet_effects`.
 mod collation;
+pub mod group;
 pub mod kinds;
 mod time;
 

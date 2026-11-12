@@ -492,6 +492,7 @@ impl DirFleet {
                         .retain(|_, known| known.state != State::Failed);
                     let known = &thumbnails.known;
                     thumbnails.order.retain(|key| known.contains_key(key));
+                    model.media.retry_unread();
                 }
                 Self::toast(model, notice.kind, notice.text)
             }

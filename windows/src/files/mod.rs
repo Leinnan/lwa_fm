@@ -12,8 +12,8 @@ pub use view::{FileView, FileViewInput};
 
 use dirfleet_core::app::TextRange;
 use windows_reactor::{
-    Border, Image, RichText, RichTextBlock, RichTextInline, RichTextRun, Stretch, TextBlock,
-    TextWrapping, VerticalAlignment, View,
+    Border, Grid, HorizontalAlignment, Image, Orientation, RichText, RichTextBlock, RichTextInline,
+    RichTextRun, StackPanel, Stretch, TextBlock, TextWrapping, VerticalAlignment, View,
 };
 
 use crate::icons::{self, IconSize};
@@ -68,6 +68,25 @@ pub fn highlighted(name: &str, highlights: &[TextRange]) -> RichTextBlock {
         .text_wrapping(TextWrapping::NoWrap)
 }
 
+/// A group's heading on one line: its name in bold, then how many it holds.
+pub fn heading_text(label: &str, count: u32) -> RichTextBlock {
+    let run = |text: String, is_bold| {
+        RichTextInline::Run(RichTextRun {
+            text,
+            is_bold,
+            is_italic: false,
+        })
+    };
+    RichTextBlock::new()
+        .paragraphs(RichText::single_paragraph([
+            run(label.to_owned(), true),
+            run(format!("   {count}"), false),
+        ]))
+        // The heading takes the presses, not the text.
+        .is_text_selection_enabled(false)
+        .text_wrapping(TextWrapping::NoWrap)
+}
+
 /// A glyph of the system icon font, `size` pixels tall.
 pub fn glyph(glyph: &str, size: f64) -> TextBlock {
     TextBlock::new()
@@ -75,6 +94,42 @@ pub fn glyph(glyph: &str, size: f64) -> TextBlock {
         .font_family("Segoe Fluent Icons,Segoe MDL2 Assets")
         .font_size(size)
         .vertical_alignment(VerticalAlignment::Center)
+}
+
+/// How many of an entry's tags are drawn as dots.
+pub const DOTS_SHOWN: usize = 3;
+
+/// An entry's tags as dots of their colours, at the foot of its icon: the
+/// first few. Nothing for an entry without tags.
+pub fn tag_dots(tags: &[dirfleet_core::app::TagColor], size: f64) -> View {
+    let dots: Vec<View> = tags
+        .iter()
+        .take(DOTS_SHOWN)
+        .map(|color| {
+            Border::new()
+                .width(size)
+                .height(size)
+                .corner_radius(size / 2.0)
+                .background(crate::theme::tag_color(*color))
+                .into()
+        })
+        .collect();
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(1.0)
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .vertical_alignment(VerticalAlignment::Bottom)
+        .children(dots)
+        .into()
+}
+
+/// A row's icon, `size` points on each side, with the entry's tags at its
+/// foot as dots `dot` points across.
+pub fn tagged_icon(row: &dirfleet_core::app::RowView, size: f64, dot: f64) -> Grid {
+    Grid::new().children((
+        entry_icon(&row.name, row.is_dir, size),
+        tag_dots(&row.tags, dot),
+    ))
 }
 
 /// The shell's icon for an entry, `size` points on each side; a glyph when

@@ -224,6 +224,9 @@ pub(super) struct Plugins {
     activation: HashMap<String, Option<Vec<String>>>,
     /// Their bars, inspector sections and events' bookkeeping.
     pub(super) views: super::plugin_views::PluginViews,
+    /// The shortcuts the app's commands have, which no action may take;
+    /// `None` while they are the ones the app starts with.
+    command_shortcuts: Option<Vec<(crate::shortcut::Shortcut, CommandId)>>,
 }
 
 /// A plugin as Settings ▸ Plugins shows it.
@@ -292,11 +295,23 @@ pub struct PluginShortcutView {
     /// As the app writes shortcuts.
     pub text: String,
     /// egui's name for the key ("M", "F5", "Up"), and its modifiers;
-    /// `command` is Cmd on macOS.
+    /// `command` is Cmd on macOS, `control` the Mac's Control key.
     pub key: String,
     pub command: bool,
     pub alt: bool,
     pub shift: bool,
+    pub control: bool,
+}
+
+impl PluginShortcutView {
+    /// Whether the action's shortcut is `shortcut`.
+    pub(super) fn holds(&self, shortcut: &crate::shortcut::Shortcut) -> bool {
+        self.key == shortcut.key
+            && self.command == shortcut.command
+            && self.control == shortcut.control
+            && self.alt == shortcut.alt
+            && self.shift == shortcut.shift
+    }
 }
 
 /// A plugin action's shortcut in Settings ▸ Plugins.
@@ -324,6 +339,14 @@ fn describe(permission: &str) -> String {
 }
 
 impl Plugins {
+    /// Tells which shortcuts the app's commands have now.
+    pub(super) fn set_command_shortcuts(
+        &mut self,
+        taken: Vec<(crate::shortcut::Shortcut, CommandId)>,
+    ) {
+        self.command_shortcuts = Some(taken);
+    }
+
     pub(super) fn view(&self) -> PluginsView {
         let (_, notes) = self.bindings();
         PluginsView {
@@ -434,6 +457,12 @@ impl Plugins {
     pub(super) fn bindings(&self) -> (Vec<PluginShortcutView>, HashMap<String, String>) {
         let mut bound: Vec<PluginShortcutView> = Vec::new();
         let mut notes = HashMap::new();
+        let commands = self.command_shortcuts.clone().unwrap_or_else(|| {
+            CommandId::ALL
+                .into_iter()
+                .filter_map(|command| Some((command.default_shortcut()?, command)))
+                .collect()
+        });
         for plugin in self
             .list
             .iter()
@@ -452,8 +481,9 @@ impl Plugins {
                     }
                 };
                 let shown = shortcut.display();
-                if let Some(command) = CommandId::ALL.into_iter().find(|id| id.shortcut() == shown)
-                {
+                // Shortcuts are told apart by their keys, however written.
+                let held = commands.iter().find(|(taken, _)| *taken == shortcut);
+                if let Some((_, command)) = held {
                     notes.insert(
                         full,
                         format!("{shown} is used by \u{201c}{}\u{201d}", command.label()),
@@ -473,6 +503,7 @@ impl Plugins {
                     command: shortcut.command,
                     alt: shortcut.alt,
                     shift: shortcut.shift,
+                    control: shortcut.control,
                 });
             }
         }

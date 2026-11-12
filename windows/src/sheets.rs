@@ -3,16 +3,17 @@
 use std::rc::Rc;
 
 use dirfleet_core::app::{
-    Appearance, Event, IconSize, PaletteItem, PaletteTarget, PaletteView, QueueMode, Settings,
-    ViewModel,
+    Appearance, CommandId, CommandView, Event, IconSize, KeymapView, PaletteItem, PaletteTarget,
+    PaletteView, QueueMode, Settings, ViewModel,
 };
 use windows_reactor::{
-    Border, Button, ButtonStyle, Callback, ComboBox, Grid, GridLength, HorizontalAlignment,
-    Orientation, ScrollBarVisibility, ScrollViewer, StackPanel, TextBlock, TextBox, TextTrimming,
-    Thickness, VerticalAlignment, View,
+    Border, Button, ButtonStyle, Callback, Color, ComboBox, Grid, GridLength, HorizontalAlignment,
+    InputModifiers, KeyEventInfo, Orientation, RoutedCallback, ScrollBarVisibility, ScrollViewer,
+    StackPanel, TextBlock, TextBox, TextTrimming, TextWrapping, Thickness, VerticalAlignment, View,
 };
 
 use crate::core_link::CoreLink;
+use crate::shortcuts::{Chord, Recorded, recorded};
 use crate::theme;
 
 /// The palette: what was typed, and what it could mean. Choosing an item
@@ -86,32 +87,230 @@ fn two_columns(name: &str, note: &str) -> Grid {
         ))
 }
 
-/// Every command that has a shortcut, with it.
-pub fn shortcuts(shared: &ViewModel) -> View {
-    let lines: Vec<View> = shared
-        .commands
-        .iter()
-        .filter(|command| !command.shortcut.is_empty())
-        .map(|command| {
-            Border::new()
-                .padding(Thickness::new(4.0, 5.0, 4.0, 5.0))
-                .content(two_columns(&command.label, &command.shortcut))
-                .into()
-        })
-        .chain(shared.plugin_shortcuts.iter().map(|shortcut| {
+/// What a command's line in the keyboard settings is in the middle of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Line {
+    /// Nothing: it shows its shortcut, which can be changed, and reset when
+    /// it is the user's.
+    Idle { customized: bool },
+    /// The next key pressed becomes its shortcut.
+    Recording,
+    /// The shortcut asked for is something else's: taken only on a yes.
+    Asking,
+}
+
+impl Line {
+    pub fn of(keymap: &KeymapView, command: &CommandView) -> Self {
+        if keymap
+            .conflict
+            .as_ref()
+            .is_some_and(|conflict| conflict.command == command.id)
+        {
+            Self::Asking
+        } else if keymap.recording == Some(command.id) {
+            Self::Recording
+        } else {
+            Self::Idle {
+                customized: command.customized,
+            }
+        }
+    }
+
+    /// What the line says where its shortcut stands.
+    pub fn note(&self, keymap: &KeymapView, command: &CommandView) -> String {
+        match (self, &keymap.conflict) {
+            (Self::Asking, Some(conflict)) => format!(
+                "{} is used by \u{201c}{}\u{201d}",
+                conflict.shortcut, conflict.holder
+            ),
+            (Self::Recording, _) => "Press the keys\u{2026}".to_owned(),
+            _ if command.shortcut.is_empty() => "None".to_owned(),
+            _ => command.shortcut.clone(),
+        }
+    }
+
+    /// The line's two buttons: each one's label, what it tells the core,
+    /// and whether it can be pressed. Always two, so the keyboard stays
+    /// where it is while the line changes.
+    pub const fn buttons(&self, command: &CommandView) -> [(&'static str, Event, bool); 2] {
+        let command = command.id;
+        match self {
+            Self::Idle { customized } => [
+                ("Change", Event::EditShortcut { command }, true),
+                ("Reset", Event::ResetShortcut { command }, *customized),
+            ],
+            Self::Recording => [
+                (
+                    "No Shortcut",
+                    Event::SetShortcut {
+                        command,
+                        text: String::new(),
+                    },
+                    true,
+                ),
+                ("Cancel", Event::CancelShortcut, true),
+            ],
+            Self::Asking => [
+                ("Take It", Event::ConfirmShortcut, true),
+                ("Cancel", Event::CancelShortcut, true),
+            ],
+        }
+    }
+}
+
+/// One command's line: its name, where its shortcut stands, and the two
+/// buttons that go with that.
+fn line(core: &CoreLink, keymap: &KeymapView, command: &CommandView) -> View {
+    let send = |event: Event| {
+        let core = core.clone();
+        move || core.send(event.clone())
+    };
+    {
+        let state = Line::of(keymap, command);
+        let note = TextBlock::new()
+            .text(state.note(keymap, command))
+            .font_size(12.0)
+            .vertical_alignment(VerticalAlignment::Center);
+        let note = if state == (Line::Idle { customized: false }) {
+            note.opacity(0.6)
+        } else {
+            note
+        };
+        let [first, second] = state.buttons(command);
+        let button = |(label, event, enabled): (&'static str, Event, bool)| {
+            Button::new()
+                .style(ButtonStyle::Subtle)
+                .content(label)
+                .is_enabled(enabled)
+                .automation_name(format!("{label}: {}", command.label))
+                .on_click(send(event))
+        };
+        Border::new()
+            .padding(Thickness::new(4.0, 2.0, 4.0, 2.0))
+            .content(
+                Grid::new()
+                    .columns([
+                        GridLength::STAR,
+                        GridLength::Auto,
+                        GridLength::Auto,
+                        GridLength::Auto,
+                    ])
+                    .column_spacing(8.0)
+                    .children((
+                        TextBlock::new()
+                            .text(command.label.clone())
+                            .text_trimming(TextTrimming::CharacterEllipsis)
+                            .vertical_alignment(VerticalAlignment::Center),
+                        note.grid_column(1),
+                        button(first).grid_column(2),
+                        button(second).grid_column(3),
+                    )),
+            )
+            .into()
+    }
+}
+
+/// The keys of the sheet: while a shortcut is recorded for a command, the
+/// keys pressed are that shortcut's.
+fn recorder(core: &CoreLink, recording: Option<CommandId>) -> RoutedCallback<KeyEventInfo> {
+    let core = core.clone();
+    RoutedCallback::new(move |info: KeyEventInfo| {
+        let Some(command) = recording else {
+            return false;
+        };
+        let chord = Chord {
+            key: info.key.0,
+            ctrl: info.modifiers.contains(InputModifiers::CONTROL),
+            shift: info.modifiers.contains(InputModifiers::SHIFT),
+            alt: info.modifiers.contains(InputModifiers::ALT),
+        };
+        match recorded(chord) {
+            Recorded::Waiting => return false,
+            Recorded::Cancel => core.send(Event::CancelShortcut),
+            Recorded::Shortcut(text) => core.send(Event::SetShortcut { command, text }),
+            Recorded::Unknown => {}
+        }
+        true
+    })
+}
+
+/// The keyboard settings: every command under its heading with the
+/// shortcut it has, which can be changed by pressing the new keys.
+pub fn shortcuts(core: &CoreLink, shared: &ViewModel) -> View {
+    let keymap = &shared.keymap;
+    let send = |event: Event| {
+        let core = core.clone();
+        move || core.send(event.clone())
+    };
+    let heading = |text: &str| -> View {
+        Border::new()
+            .padding(Thickness::new(4.0, 10.0, 4.0, 2.0))
+            .content(TextBlock::new().text(text).font_size(12.0).opacity(0.7))
+            .into()
+    };
+    let line = |command: &CommandView| line(core, keymap, command);
+    let mut lines: Vec<View> = Vec::new();
+    // Under each heading in turn, in the order the commands come.
+    let mut headings: Vec<&str> = Vec::new();
+    for command in &shared.commands {
+        if !headings.contains(&command.category.as_str()) {
+            headings.push(&command.category);
+        }
+    }
+    for category in headings {
+        lines.push(heading(category));
+        lines.extend(
+            shared
+                .commands
+                .iter()
+                .filter(|command| command.category == category)
+                .map(line),
+        );
+    }
+    if !shared.plugin_shortcuts.is_empty() {
+        lines.push(heading("Plugins (changed in their settings)"));
+        lines.extend(shared.plugin_shortcuts.iter().map(|shortcut| {
             Border::new()
                 .padding(Thickness::new(4.0, 5.0, 4.0, 5.0))
                 .content(two_columns(&shortcut.title, &shortcut.text))
                 .into()
-        }))
-        .collect();
-    ScrollViewer::new()
-        .height(400.0)
-        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+        }));
+    }
+    let on_key = recorder(core, keymap.recording);
+    let said = TextBlock::new()
+        .text(if keymap.error.is_empty() {
+            "Change a shortcut, then press the keys it should have.".to_owned()
+        } else {
+            keymap.error.clone()
+        })
+        .font_size(12.0)
+        .text_wrapping(TextWrapping::Wrap);
+    let said = if keymap.error.is_empty() {
+        said.opacity(0.7)
+    } else {
+        said.foreground(Color::rgb(0xE0, 0x50, 0x50))
+    };
+    Border::new()
+        .on_preview_key_down(on_key)
         .content(
             StackPanel::new()
                 .orientation(Orientation::Vertical)
-                .children(lines),
+                .spacing(8.0)
+                .children((
+                    said,
+                    ScrollViewer::new()
+                        .height(400.0)
+                        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                        .content(
+                            StackPanel::new()
+                                .orientation(Orientation::Vertical)
+                                .children(lines),
+                        ),
+                    Button::new()
+                        .content("Reset All to Defaults")
+                        .is_enabled(keymap.customized > 0)
+                        .on_click(send(Event::ResetAllShortcuts)),
+                )),
         )
         .into()
 }
@@ -247,6 +446,11 @@ pub fn settings(core: &CoreLink, shared: &ViewModel) -> View {
             now.animate_selected_previews,
             |settings, on| settings.animate_selected_previews = on,
         ),
+        toggle(
+            "Add up the folders in the Size column",
+            now.folder_sizes,
+            |settings, on| settings.folder_sizes = on,
+        ),
         heading("Sidebar"),
         toggle("Show recent folders", now.show_recent, |settings, on| {
             settings.show_recent = on;
@@ -335,4 +539,100 @@ pub fn settings(core: &CoreLink, shared: &ViewModel) -> View {
                 .children(lines),
         )
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dirfleet_core::app::{CommandId, ShortcutConflictView};
+
+    fn command(shortcut: &str, customized: bool) -> CommandView {
+        CommandView {
+            id: CommandId::NewTab,
+            label: "New Tab".to_owned(),
+            shortcut: shortcut.to_owned(),
+            customized,
+            ..CommandView::default()
+        }
+    }
+
+    #[test]
+    fn a_shortcut_s_line_shows_it_records_it_or_asks_about_it() {
+        let labels = |line: &Line, command: &CommandView| {
+            line.buttons(command)
+                .map(|(label, _, enabled)| (label, enabled))
+        };
+        // At rest: its shortcut, a way to change it, and a way back when
+        // it is the user's own.
+        let quiet = KeymapView::default();
+        let own = command("Ctrl+T", false);
+        let line = Line::of(&quiet, &own);
+        assert_eq!(line, Line::Idle { customized: false });
+        assert_eq!(line.note(&quiet, &own), "Ctrl+T");
+        assert_eq!(labels(&line, &own), [("Change", true), ("Reset", false)]);
+        assert_eq!(
+            line.buttons(&own)[0].1,
+            Event::EditShortcut {
+                command: CommandId::NewTab
+            }
+        );
+        let changed = command("", true);
+        let line = Line::of(&quiet, &changed);
+        assert_eq!(line.note(&quiet, &changed), "None");
+        assert_eq!(labels(&line, &changed), [("Change", true), ("Reset", true)]);
+
+        // Recording: the keys are waited for; it can be left with none.
+        let recording = KeymapView {
+            recording: Some(CommandId::NewTab),
+            ..KeymapView::default()
+        };
+        let line = Line::of(&recording, &own);
+        assert_eq!(line, Line::Recording);
+        assert_eq!(line.note(&recording, &own), "Press the keys\u{2026}");
+        assert_eq!(
+            line.buttons(&own).map(|(label, event, _)| (label, event)),
+            [
+                (
+                    "No Shortcut",
+                    Event::SetShortcut {
+                        command: CommandId::NewTab,
+                        text: String::new()
+                    }
+                ),
+                ("Cancel", Event::CancelShortcut),
+            ]
+        );
+        // Another command's line stays at rest meanwhile.
+        let other = CommandView {
+            id: CommandId::Refresh,
+            ..command("F5", false)
+        };
+        assert_eq!(
+            Line::of(&recording, &other),
+            Line::Idle { customized: false }
+        );
+
+        // Asked: what has the shortcut is named, and it is taken on a yes.
+        let asking = KeymapView {
+            conflict: Some(ShortcutConflictView {
+                command: CommandId::NewTab,
+                shortcut: "F5".to_owned(),
+                holder: "Refresh".to_owned(),
+            }),
+            ..KeymapView::default()
+        };
+        let line = Line::of(&asking, &own);
+        assert_eq!(line, Line::Asking);
+        assert_eq!(
+            line.note(&asking, &own),
+            "F5 is used by \u{201c}Refresh\u{201d}"
+        );
+        assert_eq!(
+            line.buttons(&own).map(|(label, event, _)| (label, event)),
+            [
+                ("Take It", Event::ConfirmShortcut),
+                ("Cancel", Event::CancelShortcut)
+            ]
+        );
+    }
 }

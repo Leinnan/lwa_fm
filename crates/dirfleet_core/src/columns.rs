@@ -20,6 +20,9 @@ pub enum Column {
     /// Where a result is, relative to the searched folder. Only while
     /// searching or showing several folders.
     Folder,
+    /// The line of the file that a content search matched. Only while file
+    /// contents are searched.
+    Match,
     Modified,
     Created,
     /// When the file was last opened: in the app, or as the filesystem
@@ -29,23 +32,30 @@ pub enum Column {
     OpenCount,
     Kind,
     Size,
+    /// A picture's or video's size in pixels.
+    Dimensions,
+    /// How long a video or a sound plays.
+    Duration,
 }
 
 impl Column {
     /// Columns the user can show or hide, in menu order.
-    pub const OPTIONAL: [Self; 6] = [
+    pub const OPTIONAL: [Self; 8] = [
         Self::Modified,
         Self::Created,
         Self::Accessed,
         Self::OpenCount,
         Self::Kind,
         Self::Size,
+        Self::Dimensions,
+        Self::Duration,
     ];
 
     pub const fn title(self, in_trash: bool) -> &'static str {
         match self {
             Self::Name => "Name",
             Self::Folder => "Folder",
+            Self::Match => "Match",
             // In the Recycle Bin the date column holds the deletion time.
             Self::Modified if in_trash => "Deleted",
             Self::Modified => "Modified",
@@ -54,13 +64,16 @@ impl Column {
             Self::OpenCount => "Opens",
             Self::Kind => "Kind",
             Self::Size => "Size",
+            Self::Dimensions => "Dimensions",
+            Self::Duration => "Duration",
         }
     }
 
     pub const fn sort(self) -> Option<Sort> {
         match self {
             Self::Name => Some(Sort::Name),
-            Self::Folder => None,
+            // Known only for the files in view: nothing to sort by.
+            Self::Folder | Self::Match | Self::Dimensions | Self::Duration => None,
             Self::Modified => Some(Sort::Modified),
             Self::Created => Some(Sort::Created),
             Self::Accessed => Some(Sort::Accessed),
@@ -74,10 +87,11 @@ impl Column {
         match self {
             Self::Name => 0.0,
             Self::Folder => 200.0,
+            Self::Match => 320.0,
             Self::Modified | Self::Created | Self::Accessed => 130.0,
-            Self::Kind => 120.0,
+            Self::Kind | Self::Dimensions => 120.0,
             Self::Size => 90.0,
-            Self::OpenCount => 70.0,
+            Self::OpenCount | Self::Duration => 70.0,
         }
     }
 
@@ -87,25 +101,31 @@ impl Column {
         match self {
             Self::Name => 0.0,
             Self::Folder => 120.0,
-            Self::Modified | Self::Created | Self::Accessed => 96.0,
+            Self::Match => 160.0,
+            Self::Modified | Self::Created | Self::Accessed | Self::Dimensions => 96.0,
             Self::Kind => 80.0,
-            Self::Size | Self::OpenCount => 64.0,
+            Self::Size | Self::OpenCount | Self::Duration => 64.0,
         }
     }
 
     /// Numbers read best right-aligned; everything else starts at the left.
     pub const fn right_aligned(self) -> bool {
-        matches!(self, Self::Size | Self::OpenCount)
+        matches!(self, Self::Size | Self::OpenCount | Self::Duration)
     }
 
     /// Lower values are hidden first when the pane is too narrow.
     const fn keep_priority(self) -> u8 {
         match self {
-            Self::Created | Self::Accessed | Self::OpenCount => 0,
+            Self::Created
+            | Self::Accessed
+            | Self::OpenCount
+            | Self::Dimensions
+            | Self::Duration => 0,
             Self::Kind => 1,
             Self::Size => 2,
             Self::Modified => 3,
             Self::Folder => 4,
+            Self::Match => 5,
             Self::Name => u8::MAX,
         }
     }

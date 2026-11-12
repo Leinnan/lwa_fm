@@ -464,10 +464,20 @@ pub fn read_directory_streaming(
         return WalkResult {
             listing,
             linked_dirs: Vec::new(),
+            matched: Arc::default(),
+            scanned: 0,
         };
     }
 
-    dirfleet_effects::walk::walk(&roots, depth, show_hidden, cancel, on_partial)
+    // This app searches names only: nothing is read inside files.
+    dirfleet_effects::walk::walk(
+        &roots,
+        depth,
+        show_hidden,
+        cancel,
+        dirfleet_effects::walk::WalkOptions::default(),
+        &|found| on_partial(found.listing),
+    )
 }
 
 /// "Date opened" and "Times opened" from the app's open history, falling

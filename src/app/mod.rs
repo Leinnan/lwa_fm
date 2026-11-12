@@ -909,6 +909,7 @@ impl App {
                             let crate::app::dir_handling::WalkResult {
                                 listing,
                                 linked_dirs,
+                                ..
                             } = crate::app::dir_handling::read_directory_streaming(
                                 &directories,
                                 depth,

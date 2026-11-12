@@ -10,9 +10,12 @@ pub mod access;
 pub mod access_time;
 pub mod child_process;
 pub mod clipboard;
+pub mod compare;
 pub mod compressing;
+pub mod content;
 pub mod credentials;
 pub mod drives;
+pub mod duplicates;
 pub mod extracting;
 mod file_jobs;
 pub mod fileops;
@@ -21,6 +24,7 @@ pub mod fs_ops;
 pub mod hashing;
 mod list;
 pub mod listing_io;
+mod local_time;
 pub mod media;
 pub mod open_history;
 pub mod paths;
@@ -29,9 +33,11 @@ pub mod places;
 #[cfg(feature = "plugins")]
 pub mod plugins;
 mod searching;
+mod sizes;
 pub mod sort;
 mod storage;
 pub mod system;
+pub mod tags;
 pub mod thumbnail_choices;
 mod thumbnails;
 pub mod transfer;
@@ -50,13 +56,15 @@ use std::sync::{Arc, Weak};
 
 use crux_core::effects::ResolveSink;
 use dirfleet_core::app::{
-    CheckActivation, ChildDirs, ClipboardChanges, ClipboardOp, Clock, Delay, DiskAccessCheck,
-    Effect, Eject, FindConflicts, FolderSize, HashFile, ListDir, ListTrash, LoadPlugins, LoadState,
-    MediaNotices, OpenHistoryOp, OrderListing, PickerFrame, PickerTiming, PluginMessages,
-    ReadSidecar, RunFileOp, SearchWalk, SystemOp, TerminalCheck, Thumbnail, ThumbnailChoiceOp,
-    TrashOp, UserFolders, Watch, WatchDrives, WatchPlugins,
+    CheckActivation, ChildDirs, ClipboardChanges, ClipboardOp, Clock, CompareFolders, Delay,
+    DiskAccessCheck, Effect, Eject, FindConflicts, FindDuplicates, FolderSize, HashFile, ListDir,
+    ListTrash, LoadPlugins, LoadState, MediaNotices, OpenHistoryOp, OrderListing, PickerFrame,
+    PickerTiming, PluginMessages, ProbeMedia, ReadSidecar, Recompare, RunFileOp, SearchWalk,
+    StillThere, SystemOp, TerminalCheck, Thumbnail, ThumbnailChoiceOp, TrashOp, UserFolders, Watch,
+    WatchDrives, WatchPlugins,
 };
 use dirfleet_core::app::{Connect, ConnectOutput, Connection};
+use dirfleet_core::app::{ListTagged, LocalOffsets, TagOp};
 use dirfleet_core::app::{Materialize, Materialized, Unreadable};
 use dirfleet_core::location::Location;
 
@@ -75,6 +83,12 @@ pub struct Handlers {
     history: Arc<open_history::OpenHistory>,
     files: file_jobs::FileJobs,
     hashes: hashing::HashHandler,
+    sizes: sizes::SizeHandler,
+    duplicates: duplicates::DuplicateHandler,
+    still_there: Threaded<StillThere>,
+    compare: compare::CompareHandler,
+    recompare: Threaded<Recompare>,
+    probe_media: Threaded<ProbeMedia>,
     materialize: Threaded<Materialize>,
     connect: Threaded<Connect>,
     secrets: Arc<dyn credentials::Secrets>,
@@ -87,6 +101,9 @@ pub struct Handlers {
     answer_access: Answer<DiskAccessCheck>,
     answer_terminal: Answer<TerminalCheck>,
     answer_clipboard: Answer<ClipboardChanges>,
+    answer_offsets: Answer<LocalOffsets>,
+    answer_tags: Answer<TagOp>,
+    list_tagged: Threaded<ListTagged>,
     answer_choices: Answer<ThumbnailChoiceOp>,
     picker_timing: Threaded<PickerTiming>,
     picker_frame: Threaded<PickerFrame>,
@@ -121,6 +138,11 @@ impl Handlers {
             + ResolveSink<ClipboardOp>
             + ResolveSink<ChildDirs>
             + ResolveSink<FolderSize>
+            + ResolveSink<ProbeMedia>
+            + ResolveSink<FindDuplicates>
+            + ResolveSink<StillThere>
+            + ResolveSink<CompareFolders>
+            + ResolveSink<Recompare>
             + ResolveSink<HashFile>
             + ResolveSink<Materialize>
             + ResolveSink<Connect>
@@ -132,6 +154,9 @@ impl Handlers {
             + ResolveSink<DiskAccessCheck>
             + ResolveSink<TerminalCheck>
             + ResolveSink<ClipboardChanges>
+            + ResolveSink<LocalOffsets>
+            + ResolveSink<TagOp>
+            + ResolveSink<ListTagged>
             + ResolveSink<ThumbnailChoiceOp>
             + ResolveSink<PickerTiming>
             + ResolveSink<PickerFrame>
@@ -156,6 +181,13 @@ impl Handlers {
                 .map(|file| file.with_file_name("thumbnail_choices.json")),
         ));
         choices.install();
+        let tags = Arc::new(tags::TagStore::load(
+            state_file
+                .as_ref()
+                .map(|file| file.with_file_name("tags.json")),
+        ));
+        history.attach_tags(Arc::clone(&tags));
+        let tagged_history = Arc::clone(&history);
         configure_plugins(state_file.as_deref());
         let vfs = Arc::new(vfs::Vfs::default());
         // Runs that keep no files keep no passwords either.
@@ -168,10 +200,18 @@ impl Handlers {
             list: list::ListHandler::new(sink.clone(), Arc::clone(&history), Arc::clone(&vfs)),
             watch: watch::WatchHandler::new(sink.clone()),
             walk: searching::WalkHandler::new(sink.clone(), Arc::clone(&history)),
+            duplicates: duplicates::DuplicateHandler::new(sink.clone(), Arc::clone(&history)),
+            still_there: on_thread(sink, duplicates::still_there),
+            compare: compare::CompareHandler::new(sink.clone(), Arc::clone(&history)),
+            recompare: on_thread(sink, compare::recompare),
             history,
             files: file_jobs::FileJobs::new(sink.clone(), Arc::clone(&vfs)),
             vfs: Arc::clone(&vfs),
             hashes: hashing::HashHandler::new(sink.clone()),
+            sizes: sizes::SizeHandler::new(sink.clone()),
+            // A picture's header or a short run of FFprobe: each on its own
+            // thread, a few at a time as the core asks.
+            probe_media: on_thread(sink, media::info::read),
             materialize: materializer(sink, &vfs),
             connect: connector(sink, &vfs, &secrets),
             secrets,
@@ -193,6 +233,25 @@ impl Handlers {
                 access::terminal_found(&check.app)
             }),
             answer_clipboard: answer(sink, |_: &ClipboardChanges| clipboard::sequence_number()),
+            answer_offsets: answer(sink, local_time::offsets),
+            answer_tags: {
+                let tags = Arc::clone(&tags);
+                answer(sink, move |op: &TagOp| tags.apply(op))
+            },
+            // Each tagged item is looked at: on a thread of its own.
+            list_tagged: {
+                let (sink, history) = (sink.clone(), tagged_history);
+                Arc::new(move |mut request: crux_core::Request<ListTagged>| {
+                    let (sink, tags, history) =
+                        (sink.clone(), Arc::clone(&tags), Arc::clone(&history));
+                    std::thread::spawn(move || {
+                        let listed = tags.list(&request.operation, &history);
+                        if let Some(sink) = sink.upgrade() {
+                            let _ = sink.resolve_request(&mut request, listed);
+                        }
+                    });
+                })
+            },
             // Answered on the spot, so a thumbnail asked for next uses it.
             answer_choices: answer(sink, move |op: &ThumbnailChoiceOp| choices.apply(op)),
             // Reading a video takes a while: each on its own thread.
@@ -216,23 +275,6 @@ impl Handlers {
                         file_jobs::find_conflicts(request, sink.clone(), Arc::clone(&vfs));
                     }
                     Effect::Clipboard(request) => file_jobs::clipboard(request, sink.clone()),
-                    Effect::FolderSize(mut request) => {
-                        let sink = sink.clone();
-                        std::thread::spawn(move || {
-                            let cancel = std::sync::atomic::AtomicBool::new(false);
-                            let total = usage::measure(
-                                std::path::Path::new(&request.operation.path),
-                                &usage::Options::default(),
-                                &cancel,
-                            )
-                            .ok()
-                            .flatten()
-                            .map(|found| found.bytes);
-                            if let Some(sink) = sink.upgrade() {
-                                let _ = sink.resolve_request(&mut request, total);
-                            }
-                        });
-                    }
                     Effect::ChildDirs(mut request) => {
                         let sink = sink.clone();
                         std::thread::spawn(move || {
@@ -259,6 +301,21 @@ impl Handlers {
     /// How many folders are being watched.
     pub fn watch_count(&self) -> usize {
         self.watch.count()
+    }
+
+    /// How many folders are being added up.
+    pub fn size_count(&self) -> usize {
+        self.sizes.count()
+    }
+
+    /// How many scans for duplicates are running.
+    pub fn duplicate_scan_count(&self) -> usize {
+        self.duplicates.count()
+    }
+
+    /// How many comparisons of folders are running.
+    pub fn compare_count(&self) -> usize {
+        self.compare.count()
     }
 
     /// How many searches are reading subfolders.
@@ -298,6 +355,15 @@ impl Handlers {
                 });
             }
             Effect::HashFile(request) => self.hashes.start(request),
+            Effect::FolderSize(request) => self.sizes.start(request),
+            Effect::StopFolderSize(request) => self.sizes.stop(&request.operation.path),
+            Effect::ProbeMedia(request) => (self.probe_media)(request),
+            Effect::FindDuplicates(request) => self.duplicates.start(request),
+            Effect::StopDuplicates(request) => self.duplicates.stop(request.operation.id),
+            Effect::StillThere(request) => (self.still_there)(request),
+            Effect::CompareFolders(request) => self.compare.start(request),
+            Effect::StopCompare(request) => self.compare.stop(request.operation.id),
+            Effect::Recompare(request) => (self.recompare)(request),
             Effect::Materialize(request) => (self.materialize)(request),
             Effect::Connect(request) => (self.connect)(request),
             Effect::Disconnect(request) => self.vfs.disconnect(&request.operation.id),
@@ -325,8 +391,7 @@ impl Handlers {
             | Effect::System(_)
             | Effect::FindConflicts(_)
             | Effect::Clipboard(_)
-            | Effect::ChildDirs(_)
-            | Effect::FolderSize(_)) => {
+            | Effect::ChildDirs(_)) => {
                 (self.places)(effect);
             }
             Effect::LoadState(request) => self.storage.load(request),
@@ -336,6 +401,9 @@ impl Handlers {
             Effect::DiskAccessCheck(mut request) => (self.answer_access)(&mut request),
             Effect::TerminalCheck(mut request) => (self.answer_terminal)(&mut request),
             Effect::ClipboardChanges(mut request) => (self.answer_clipboard)(&mut request),
+            Effect::LocalOffsets(mut request) => (self.answer_offsets)(&mut request),
+            Effect::Tags(mut request) => (self.answer_tags)(&mut request),
+            Effect::ListTagged(request) => (self.list_tagged)(request),
             Effect::ThumbnailChoice(mut request) => (self.answer_choices)(&mut request),
             Effect::PickerTiming(request) => (self.picker_timing)(request),
             Effect::PickerFrame(request) => (self.picker_frame)(request),

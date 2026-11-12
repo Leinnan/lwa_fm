@@ -9,14 +9,17 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use serde::{Deserialize, Serialize};
 
+use super::keymap::{KeyView, Keymap};
 use super::{Model, title_of};
+use crate::shortcut::{Shortcut, parse_shown};
 
 /// Items the palette shows at most.
 const SHOWN: usize = 40;
 
-#[derive(Facet, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Facet, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[repr(C)]
 pub enum CommandId {
+    #[default]
     Back,
     Forward,
     Up,
@@ -57,10 +60,18 @@ pub enum CommandId {
     EmptyTrash,
     AddToFavorites,
     ShortcutHelp,
+    CopyToOtherPane,
+    MoveToOtherPane,
+    SwapPanes,
+    MirrorPane,
+    SelectByPattern,
+    SelectSameExtension,
+    FindDuplicates,
+    CompareFolders,
 }
 
 impl CommandId {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 48] = [
         Self::Back,
         Self::Forward,
         Self::Up,
@@ -101,6 +112,14 @@ impl CommandId {
         Self::EmptyTrash,
         Self::AddToFavorites,
         Self::ShortcutHelp,
+        Self::CopyToOtherPane,
+        Self::MoveToOtherPane,
+        Self::SwapPanes,
+        Self::MirrorPane,
+        Self::SelectByPattern,
+        Self::SelectSameExtension,
+        Self::FindDuplicates,
+        Self::CompareFolders,
     ];
 
     /// The command's name, in the words of the system it runs on.
@@ -151,6 +170,14 @@ impl CommandId {
             Self::EmptyTrash => "Empty Trash…",
             Self::AddToFavorites => "Add to Favorites",
             Self::ShortcutHelp => "Keyboard Shortcuts",
+            Self::CopyToOtherPane => "Copy to Other Pane",
+            Self::MoveToOtherPane => "Move to Other Pane",
+            Self::SwapPanes => "Swap Panes",
+            Self::MirrorPane => "Show This Folder in Other Pane",
+            Self::SelectByPattern => "Select by Pattern…",
+            Self::SelectSameExtension => "Select Same Extension",
+            Self::FindDuplicates => "Find Duplicates",
+            Self::CompareFolders => "Compare Folders",
         }
     }
 
@@ -209,7 +236,18 @@ impl CommandId {
             Self::AddToFavorites => "⌃⌘T",
             Self::ShortcutHelp => "⌘/",
             Self::Rename => "↩",
-            Self::NewTextFile | Self::OpenInTerminal | Self::OpenTrash => "",
+            // The Mac's keys for these are chosen with its menus.
+            Self::NewTextFile
+            | Self::OpenInTerminal
+            | Self::OpenTrash
+            | Self::CopyToOtherPane
+            | Self::MoveToOtherPane
+            | Self::SwapPanes
+            | Self::MirrorPane
+            | Self::SelectByPattern
+            | Self::SelectSameExtension
+            | Self::FindDuplicates
+            | Self::CompareFolders => "",
         }
     }
 
@@ -247,10 +285,17 @@ impl CommandId {
             Self::SaveSearch => "Ctrl+S",
             Self::Rename => "F2",
             Self::ShortcutHelp => "F1",
+            // F5 and F6 alone are taken (Refresh) or the system's.
+            Self::CopyToOtherPane => "Shift+F5",
+            Self::MoveToOtherPane => "Shift+F6",
+            Self::SwapPanes => "Ctrl+U",
+            Self::SelectByPattern => "Ctrl+Shift+A",
             _ => "",
         }
     }
 
+    /// The shortcut the app gives the command on this system, as it is
+    /// shown; the user may have given it another (`CommandView::shortcut`).
     pub const fn shortcut(self) -> &'static str {
         if cfg!(target_os = "macos") {
             self.mac_shortcut()
@@ -258,24 +303,93 @@ impl CommandId {
             self.other_shortcut()
         }
     }
+
+    /// That shortcut, read.
+    pub fn default_shortcut(self) -> Option<Shortcut> {
+        parse_shown(self.shortcut())
+    }
+
+    /// The heading the keyboard settings list the command under.
+    pub const fn category(self) -> &'static str {
+        match self {
+            Self::Back
+            | Self::Forward
+            | Self::Up
+            | Self::Refresh
+            | Self::GoToFolder
+            | Self::OpenTrash
+            | Self::MirrorPane => "Go",
+            Self::ToggleSidebar
+            | Self::ToggleInspector
+            | Self::ToggleHidden
+            | Self::ViewList
+            | Self::ViewIcons
+            | Self::QuickLook
+            | Self::SwapPanes => "View",
+            Self::NewTab | Self::NewWindow | Self::CloseTab | Self::ReopenClosedTab => {
+                "Tabs and Windows"
+            }
+            Self::NewFolder
+            | Self::NewTextFile
+            | Self::Rename
+            | Self::Duplicate
+            | Self::MoveToTrash
+            | Self::DeleteImmediately
+            | Self::CopyToOtherPane
+            | Self::MoveToOtherPane
+            | Self::ShowInFinder
+            | Self::GetInfo
+            | Self::OpenInTerminal
+            | Self::EmptyTrash
+            | Self::AddToFavorites => "Files",
+            Self::Undo
+            | Self::Redo
+            | Self::Cut
+            | Self::Copy
+            | Self::Paste
+            | Self::CopyAsPath
+            | Self::SelectAll
+            | Self::InvertSelection
+            | Self::SelectByPattern
+            | Self::SelectSameExtension => "Edit",
+            Self::Find | Self::SaveSearch | Self::FindDuplicates | Self::CompareFolders => {
+                "Search and Tools"
+            }
+            Self::Palette | Self::Settings | Self::ShortcutHelp => "App",
+        }
+    }
 }
 
-/// A command with its label and the platform's shortcut, for menus, the
-/// palette and the shortcuts list.
-#[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+/// A command with its label and its shortcut, for menus, the palette and
+/// the keyboard settings.
+#[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct CommandView {
     pub id: CommandId,
     pub label: String,
+    /// The shortcut it has now, as the system writes shortcuts; "" for
+    /// none.
     pub shortcut: String,
+    /// The same, as a key and its modifiers; `None` for none.
+    pub key: Option<KeyView>,
+    /// The shortcut the app gives it; "" for none.
+    pub default_shortcut: String,
+    /// The user gave it another, or took it away.
+    pub customized: bool,
+    /// The heading it is listed under in the keyboard settings.
+    pub category: String,
 }
 
-pub(super) fn command_views() -> Vec<CommandView> {
+pub(super) fn command_views(keymap: &Keymap) -> Vec<CommandView> {
     CommandId::ALL
         .into_iter()
         .map(|id| CommandView {
             id,
             label: id.label().to_owned(),
-            shortcut: id.shortcut().to_owned(),
+            shortcut: keymap.shown(id),
+            key: keymap.shortcut(id).map(KeyView::from),
+            default_shortcut: id.shortcut().to_owned(),
+            customized: keymap.customized(id),
+            category: id.category().to_owned(),
         })
         .collect()
 }
@@ -308,7 +422,7 @@ pub(super) fn palette_items(model: &Model, text: &str) -> Vec<PaletteItem> {
         .filter(|id| *id != CommandId::Palette)
         .map(|id| PaletteItem {
             title: id.label().to_owned(),
-            detail: id.shortcut().to_owned(),
+            detail: model.keymap.shown(id),
             target: PaletteTarget::Command(id),
         })
         .collect();

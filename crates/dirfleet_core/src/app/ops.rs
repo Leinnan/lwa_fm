@@ -13,7 +13,7 @@ use super::layout::FlatLayout;
 use crate::columns::ListColumns;
 use crate::listing::Listing;
 use crate::search::Search;
-use crate::{DisplayType, Sort};
+use crate::{DisplayType, GroupBy, Sort};
 
 /// List one folder, sorted and filtered for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +102,8 @@ pub struct FolderView {
     pub invert: bool,
     pub display: DisplayType,
     pub show_hidden: bool,
+    /// What the entries are put into groups by.
+    pub group: GroupBy,
 }
 
 impl FolderView {
@@ -265,6 +267,14 @@ pub struct PersistedState {
     #[serde(default)]
     #[facet(opaque)]
     pub plugins: crate::plugins::SettingsMap,
+    /// The shortcuts the user gave commands, by the command's name; "" for
+    /// a shortcut taken away.
+    #[serde(default)]
+    pub keymap: BTreeMap<String, String>,
+    /// The tags, in the user's order; `None` in a state from before there
+    /// were tags.
+    #[serde(default)]
+    pub tags: Option<Vec<super::TagDef>>,
 }
 
 #[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]

@@ -1418,7 +1418,7 @@ windows_test = ["one_item_is_renamed_in_place_and_several_together"]
 events = ["StartBatchRename", "SetBatchRename", "ApplyBatchRename", "CancelBatchRename"]
 core_test = ["renaming_several_items_previews_names_and_flags_clashes"]
 swift_test = ["testFileOperationsRenameManyMoveToDeleteAndListActivity"]
-notes = "Rename with several selected opens it; clashes are checked against the listing; one undoable RenameMany. Sheet opened by hand"
+notes = "Rename with several selected opens it; clashes are checked against the listing; one undoable RenameMany. Sheet opened by hand. Since the rows fileops.batch_rename_* the two modes are one line of steps and BatchFields has other fields (template for pattern, no mode): the Mac sheet and its test are to follow"
 
 [[feature]]
 id = "fileops.new_folder"
@@ -2968,3 +2968,398 @@ status = "open"
 windows = "done"
 core_test = ["what_is_copied_on_a_server_is_kept_and_pasted_unless_the_clipboard_took_something_newer"]
 notes = "Not in the egui app. The system's clipboard takes only files of this machine, so other programs can't paste a server's items"
+
+
+# 6. Search (continued): inside files
+
+[[feature]]
+id = "search.content"
+area = 6
+summary = "content:text and content:/expression/ find files by what they contain, once Enter commits the term"
+status = "open"
+windows = "done"
+core_test = ["file_contents_are_searched_once_the_term_is_committed_and_rows_show_the_matching_line", "a_content_term_is_typed_shown_and_typed_again_the_same"]
+notes = "Not in the egui app, which shows the chip but reads nothing. Folders on this machine only. Files over 64 MB and files that are not text are not read; UTF-16 with a byte order mark is. Every read of the folder reads the files again: nothing is kept between searches. Windows: a line under the box says to press Enter, then how many files were read"
+
+[[feature]]
+id = "search.content.match_line"
+area = 6
+summary = "While file contents are searched, lists show a Match column: the first matching line with its number and the match in bold"
+status = "open"
+windows = "done"
+core_test = ["file_contents_are_searched_once_the_term_is_committed_and_rows_show_the_matching_line"]
+windows_test = ["results_from_several_folders_show_the_folder_after_the_name"]
+notes = "Not in the egui app. Lists only: grid tiles show no line. The column has a fixed width on Windows"
+
+[[feature]]
+id = "search.gitignore"
+area = 6
+summary = "A search through subfolders can leave out what .gitignore files ignore, and .git folders"
+status = "open"
+windows = "done"
+events = ["SetSearchIgnored"]
+core_test = ["file_contents_are_searched_once_the_term_is_committed_and_rows_show_the_matching_line"]
+windows_test = ["switches_turn_what_is_on_off_and_back"]
+notes = "Not in the egui app. Holds for searches that read more than the folder itself, by name or by content. The .gitignore files from the folder up to the top of its repository count; .git/info/exclude and the user's global ignore file don't. Windows: Skip What Git Ignores in the search menu"
+
+
+# 1. Listing (continued): folder sizes and what media files say of themselves
+
+[[feature]]
+id = "listing.folder_sizes"
+area = 1
+summary = "With the setting on, the Size column shows each folder's size, added up for the folders in view, two at a time"
+status = "open"
+windows = "done"
+core_test = ["with_the_setting_on_folders_in_view_are_added_up_two_at_a_time_for_the_size_column", "folders_scrolled_out_of_view_are_no_longer_added_up", "a_size_asked_for_in_the_inspector_is_not_stopped_and_file_operations_make_sizes_stale"]
+notes = "Not in the egui app. Off by default (Settings.folder_sizes). Lists only, folders on this machine only; sorting by size still leaves folders as they were. A size is added up again when the folder itself changed, when a file operation touched it, and once it is a quarter of an hour old; the old size shows meanwhile. Folders that leave the view are stopped. Windows: Settings > Appearance. Mac: no control yet, and the size is disk space there while a file's is its length"
+
+[[feature]]
+id = "listing.columns.dimensions"
+area = 1
+summary = "A Dimensions column: a picture's or video's size in pixels, read for the files in view"
+status = "open"
+windows = "done"
+core_test = ["the_dimensions_and_duration_columns_ask_about_the_media_in_view"]
+notes = "Not in the egui app, whose header menu leaves the column out. No sort. Pictures by their headers; videos through FFprobe, as stored (a turned phone video is not turned). Folders on this machine only"
+
+[[feature]]
+id = "listing.columns.duration"
+area = 1
+summary = "A Duration column: how long a video or a sound plays, read for the files in view"
+status = "open"
+windows = "done"
+core_test = ["the_dimensions_and_duration_columns_ask_about_the_media_in_view"]
+notes = "Not in the egui app, whose header menu leaves the column out. No sort. Needs FFmpeg's tools, which the app fetches; what could not be read is asked again once they arrive. GIFs show no duration"
+
+[[feature]]
+id = "inspector.media_info"
+area = 15
+summary = "The inspector shows a picture's or video's dimensions and a video's or sound's duration"
+status = "open"
+windows = "done"
+core_test = ["the_dimensions_and_duration_columns_ask_about_the_media_in_view", "the_inspector_alone_asks_about_its_media_item"]
+windows_test = ["a_media_file_s_pixels_and_playing_time_are_listed_once_known"]
+notes = "Not in the egui app. Read whether or not the columns are shown"
+
+
+# 1. Listing (continued): groups
+
+[[feature]]
+id = "listing.group"
+area = 1
+summary = "A folder's entries are put into groups by kind, age, size or first letter, each under a heading; kept with the folder's view"
+status = "open"
+windows = "done"
+events = ["SetGroupBy"]
+core_test = ["a_folder_s_entries_are_put_into_groups_selected_by_group_and_ungrouped_again", "a_folder_s_grouping_is_kept_with_its_view", "kinds_come_by_name_after_the_folders_and_keep_the_order_inside", "ages_are_counted_from_now_or_else_from_the_newest_entry", "groups_run_the_way_the_same_sort_runs_with_folders_still_first", "names_go_by_their_first_letter_whatever_its_case", "what_would_make_too_many_groups_shares_the_last_one"]
+windows_test = ["in_the_list_each_group_s_heading_takes_a_line_of_its_own", "in_the_grid_a_heading_takes_the_first_cell_of_its_group", "the_folder_s_menu_offers_the_groupings_with_the_one_in_use_marked"]
+notes = "Not in the egui app. The core arranges the sorted order and sends the groups beside the rows (TabViewModel.groups); rows stay positions. Within a group the sort holds; groups run the way the sort runs when both go by the same thing. Ages are counted in whole days from now, not by the calendar: there is no local time in the core. At most 256 groups, the rest share Other. Groups are not folded. Windows: Group By in the folder's menu; a heading is a line of its own in the list and the first cell of its group in the grid, where every line keeps one height"
+
+[[feature]]
+id = "listing.group.select"
+area = 1
+summary = "A press on a group's heading selects the group's rows"
+status = "open"
+windows = "done"
+events = ["SelectGroup"]
+core_test = ["a_folder_s_entries_are_put_into_groups_selected_by_group_and_ungrouped_again"]
+notes = "Not in the egui app. A plain press only: Ctrl and Shift add nothing to it"
+
+[[feature]]
+id = "listing.group.grid_keys"
+area = 1
+summary = "Arrow and page keys pass over headings: up and down keep the column or go as near as the line has, left and right run across groups"
+status = "open"
+windows = "done"
+core_test = ["a_folder_s_entries_are_put_into_groups_selected_by_group_and_ungrouped_again"]
+windows_test = ["arrows_pass_over_headings_in_the_list", "in_the_grid_a_heading_takes_the_first_cell_of_its_group", "a_group_s_first_entry_brings_its_heading_into_sight"]
+notes = "Not in the egui app. The shell's own geometry (windows/src/files/layout.rs); the core only moves the cursor to the row it is told"
+
+
+# 26. Results
+
+[[feature]]
+id = "results.tab"
+area = 26
+summary = "What a scan found shows in a tab of its own: a bar says how far the scan is and what it found, and the scan can be stopped and run again"
+status = "open"
+windows = "done"
+events = ["StopResults"]
+core_test = ["looking_for_duplicates_opens_a_tab_that_shows_the_sets_found", "a_scan_is_stopped_started_over_and_ended_by_leaving", "a_file_found_is_previewed_by_its_own_path_and_its_tab_is_not_kept", "sets_stay_together_however_the_results_are_sorted_and_past_a_point_share_a_heading"]
+windows_test = ["a_folder_has_no_results_bar", "a_running_scan_says_how_far_it_is_and_can_only_be_stopped", "what_a_scan_found_is_opened_and_removed_but_not_renamed_or_copied"]
+notes = "Not in the egui app. A results tab has no folder (TabViewModel.path is empty, TabViewModel.results is set): its rows carry the whole of their folders, so they are selected, previewed, opened, moved and deleted like a search's, but nothing is made, renamed or copied there. Its view (sort, list or icons) is kept under one key for every such tab. Refresh runs the scan again; going to a folder ends it. The tab is not kept between launches. Windows: the bar under the filters (windows/src/results.rs)"
+
+[[feature]]
+id = "duplicates.find"
+area = 26
+summary = "Find the files that hold the same bytes, in a folder or in the folders selected, shown set by set with the set that wastes the most space first"
+status = "open"
+windows = "done"
+events = ["FindDuplicates"]
+core_test = ["the_folders_selected_are_the_ones_searched_for_duplicates", "files_holding_the_same_bytes_are_found_whatever_they_are_called", "hidden_files_count_only_when_they_are_shown", "a_file_with_two_names_is_not_a_copy_of_itself", "a_stopped_scan_finds_nothing_and_says_how_far_a_running_one_is", "duplicates_are_found_set_by_set_and_leave_the_results_when_deleted"]
+windows_test = ["duplicates_are_looked_for_in_a_folder_of_this_machine_or_in_selected_folders"]
+notes = "Not in the egui app. Folders of this machine only. Files are told apart by size, then by their first 64 KB, then by a BLAKE3 of the whole file (crates/dirfleet_effects/src/duplicates.rs); empty files are no duplicates, links are not followed, a file with several names counts once, and files kept online are not fetched. Hidden files count only when the view shows them. Each set is a group under a heading with its size; within a set the tab's sort holds. At most 2000 sets have a heading of their own, the rest share one. Windows: Find Duplicates in the folder's menu, Find Duplicates in Selected Folders in the selection's"
+
+[[feature]]
+id = "duplicates.select_keep"
+area = 26
+summary = "Select every file of each set of duplicates but one: the newest, the oldest, or the one listed first"
+status = "open"
+windows = "done"
+events = ["SelectDuplicates"]
+core_test = ["all_but_one_file_of_each_set_is_selected_and_whole_sets_are_counted"]
+windows_test = ["what_was_found_can_be_selected_all_but_one_and_scanned_again", "what_a_scan_found_is_opened_and_removed_but_not_renamed_or_copied"]
+notes = "Not in the egui app. Only the rows shown are selected, so a search within the results narrows it. Of files changed at the same time the one listed first stays. Windows: buttons on the results bar, and Select All But in the tab's menu"
+
+[[feature]]
+id = "duplicates.trash"
+area = 26
+summary = "Duplicates are deleted like any files; what is gone leaves the results without a new scan, and deleting every copy of a file is warned of"
+status = "open"
+windows = "done"
+core_test = ["files_deleted_leave_the_results_and_a_set_of_one_is_no_set", "paths_are_checked_for_still_being_there", "duplicates_are_found_set_by_set_and_leave_the_results_when_deleted"]
+windows_test = ["deleting_every_copy_of_a_file_is_warned_of"]
+notes = "Not in the egui app. After a file operation the results' files in the folders it touched are asked about (the StillThere effect); a set left with one file is no longer shown, and a file Undo puts back shows again. The core counts the sets whose every file is selected (ResultsView.whole_sets) and the shell asks before deleting them: Windows always asks then, whatever the setting, and says that no copy will be left"
+
+[[feature]]
+id = "compare.run"
+area = 26
+summary = "Compare the two folders a window shows side by side: the files in one of them only, and the ones in both that are not alike, show in a tab of their own, each kind under its heading"
+status = "open"
+windows = "done"
+events = ["CompareFolders"]
+core_test = ["two_folders_side_by_side_and_apart_are_what_a_window_compares", "comparing_two_panes_opens_a_tab_that_shows_what_differs_kind_by_kind", "folders_called_the_same_are_told_apart_by_their_paths", "files_are_told_apart_by_size_time_and_what_reading_them_said", "a_folder_is_not_compared_with_itself_or_one_inside_it", "files_in_one_folder_only_or_not_alike_are_what_differs", "names_written_in_another_case_are_one_file_where_disks_say_so", "a_stopped_comparison_finds_nothing_and_a_running_one_says_how_far_it_is", "two_folders_are_compared_and_brought_to_agree_by_copying"]
+windows_test = ["two_folders_side_by_side_are_compared_and_what_differs_is_copied", "compared_folders_are_copied_either_way_and_compared_again"]
+notes = "Not in the egui app. The folders are the one the focused pane shows and the next pane's, the pane further left being the left folder (WindowView.compare names them, None unless both are folders of this machine and neither is inside the other). A results tab like the duplicates' (results.tab), its view kept under a key of its own. Files are paired by their path below each folder, as written first, then without regard to case on Windows and macOS (crates/dirfleet_effects/src/compare.rs); links are not followed and folders are not rows, so a folder that holds no file does not show. A row is one path, shown by the file of one side: the left folder's where it is the only or the newer one, or as old as the other. Headings: only in the left, only in the right, newer in the left, newer in the right, different though changed at the same time (within two seconds). Folders called the same are named by their whole paths. Windows: Compare \u201ca\u201d with \u201cb\u201d in a folder's menu"
+
+[[feature]]
+id = "compare.options"
+area = 26
+summary = "Tell files of the same size apart by reading them rather than by when they were changed; the folders are compared again"
+status = "open"
+windows = "done"
+events = ["SetCompareOptions"]
+core_test = ["reading_the_files_compares_again_and_a_comparison_is_stopped_and_left", "files_of_one_size_are_read_when_contents_count"]
+windows_test = ["two_folders_side_by_side_are_compared_and_what_differs_is_copied", "compared_folders_are_copied_either_way_and_compared_again"]
+notes = "Not in the egui app. Off for every new comparison and not kept. Read, two files that hold the same bytes are the same whenever they were changed, and two of one size that do not differ even when changed at the same time. Files kept online are not fetched: they are told apart by size and time, and counted as not read. Windows: the Read files switch on the bar, and Read Files to Tell Them Apart in the tab's menu"
+
+[[feature]]
+id = "compare.sync"
+area = 26
+summary = "Copy the selected differences, or all of them, to the left folder or the right one as one operation; asked about first when files would be replaced, and what was copied leaves the results without a new comparison"
+status = "open"
+windows = "done"
+events = ["SyncSelection", "AnswerSync"]
+core_test = ["files_are_copied_to_the_other_folder_and_it_is_asked_before_any_is_replaced", "what_was_copied_is_compared_again_and_leaves_once_the_folders_agree", "a_path_that_differs_again_comes_back_to_the_results", "paths_are_compared_again_as_they_are_now", "files_are_copied_each_to_its_own_place_as_one_step", "two_folders_are_compared_and_brought_to_agree_by_copying"]
+windows_test = ["replacing_files_between_compared_folders_is_asked_about", "folders_named_by_their_paths_are_copied_to_by_side", "compared_folders_are_copied_either_way_and_compared_again"]
+notes = "Not in the egui app. Nothing is deleted: a file only in the folder copied to stays. CompareView.to_left and to_right count what a copy would do (files copied, files replaced, replaced files that are newer) for the selection, or for every row when nothing is selected. A copy that replaces nothing starts at once; otherwise CompareView.asking is set until AnswerSync says to replace, to skip the files that would replace any, or to copy nothing. The copy is one operation (FileOp::CopyPairs: queue, pause, progress, verify), makes the folders it needs, and gives copies the time their originals were changed at. Undo takes back the new files and the folders made, not the files replaced. After any file operation the paths in the folders it touched, on either side, are compared again (the Recompare effect): a path that no longer differs leaves, and one that differs again comes back. Windows: Copy to buttons on the bar and in the menus; the question is a dialog with Replace, Skip Those and Cancel"
+
+
+# Two panes together, and selecting by pattern (areas 2, 4 and 9)
+
+[[feature]]
+id = "fileops.to_other_pane"
+area = 9
+summary = "Copy or move the selection into the folder the window's other pane shows"
+status = "open"
+windows = "done"
+events = ["CopyToOtherPane", "MoveToOtherPane"]
+core_test = ["the_selection_is_copied_or_moved_into_the_folder_the_other_pane_shows", "a_window_of_one_pane_has_no_other_pane_to_act_with", "no_two_commands_share_a_shortcut_and_each_has_a_name"]
+windows_test = ["the_other_pane_is_copied_and_moved_to_by_name_and_swapped_with"]
+notes = "Not in the egui app. The other pane is the one after the focused pane, the first again after the last (WindowView.other_pane: its tab, title, folder, whether files can be put there, and why not when they can't). The copy or move is CopyTo's and MoveTo's, so names that clash are asked about and the operation queues, shows progress and undoes as theirs do; servers are copied to and from as well. With one pane, or a pane that shows an archive, the Recycle Bin or a list of results, nothing is done and a message says why. Commands CopyToOtherPane (Shift+F5) and MoveToOtherPane (Shift+F6), no keys on the Mac yet; FindDuplicates and CompareFolders became commands too. Windows: Copy to and Move to with the folder's name in the selection's menu"
+
+[[feature]]
+id = "workspace.swap_panes"
+area = 4
+summary = "Have the focused pane and the other pane change places, each with all its tabs"
+status = "open"
+windows = "done"
+events = ["SwapPanes"]
+core_test = ["panes_change_places_and_a_folder_is_shown_in_the_other_pane_too", "two_panes_change_places_with_all_their_tabs", "a_window_of_one_pane_has_no_other_pane_to_act_with"]
+windows_test = ["the_other_pane_is_copied_and_moved_to_by_name_and_swapped_with"]
+notes = "Not in the egui app. The split and its share stay; the focus stays with its tab, now on the other side. Nothing is read again. Command SwapPanes (Ctrl+U). Windows: in the folder's menu and the More menu"
+
+[[feature]]
+id = "workspace.mirror_pane"
+area = 4
+summary = "Show the focused pane's folder in the other pane too"
+status = "open"
+windows = "done"
+events = ["MirrorToOtherPane"]
+core_test = ["panes_change_places_and_a_folder_is_shown_in_the_other_pane_too"]
+windows_test = ["the_other_pane_is_copied_and_moved_to_by_name_and_swapped_with"]
+notes = "Not in the egui app. The other pane's shown tab goes there like after any visit, so Back returns; the focus stays. Nothing happens when it shows that folder already, or when the focused tab shows no folder. Command MirrorPane, without a key. Windows: Show This Folder in Other Pane in the folder's menu"
+
+[[feature]]
+id = "selection.by_pattern"
+area = 2
+summary = "Select or deselect the rows a pattern matches, written as a search is"
+status = "open"
+windows = "done"
+events = ["OpenSelectPattern", "SetSelectPattern", "ApplySelectPattern", "CloseSelectPattern"]
+core_test = ["rows_are_selected_and_deselected_by_a_pattern_written_as_a_search_is"]
+windows_test = ["the_pattern_dialog_says_what_matches_or_what_is_wrong", "the_other_pane_is_copied_and_moved_to_by_name_and_swapped_with"]
+notes = "Not in the egui app. A dialog of the tab (TabViewModel.select_pattern: the text, how many rows match, what is wrong with it). The pattern is read as the search field's text is: words of the name, globs, /regex/, ext:, kind:, size:, modified:, opened:, a leading - to leave names out; case does not count. Applying adds what matches to the selection or takes it out, and closes the dialog; the pattern used last is offered again, in any tab, until the app quits. Command SelectByPattern (Ctrl+Shift+A). Windows: a dialog with Select, Deselect and Cancel; Select by Pattern in the folder's menu"
+
+[[feature]]
+id = "selection.same_extension"
+area = 2
+summary = "Select every row that ends as one of the selected rows does"
+status = "open"
+windows = "done"
+events = ["SelectSameExtension"]
+core_test = ["rows_that_end_as_the_selected_ones_do_are_selected", "a_name_ends_with_what_follows_its_last_dot"]
+windows_test = ["the_other_pane_is_copied_and_moved_to_by_name_and_swapped_with"]
+notes = "Not in the egui app. Goes by the selected rows, or the cursor's when none is selected: files by what follows their last dot, whatever its case; files without such an ending with their like; folders with folders. Command SelectSameExtension, without a key. Windows: in the selection's menu"
+
+
+# Batch rename's steps (area 9)
+
+[[feature]]
+id = "fileops.batch_rename_counter_dates"
+area = 9
+summary = "Batch rename builds each name from a template: the old name, its extension, a counter with a start, a step and a width, the folder's name, and the dates changed and made in local time"
+status = "open"
+windows = "done"
+core_test = ["a_name_is_built_from_a_template_of_placeholders", "names_are_numbered_by_a_counter_that_starts_steps_and_pads_as_told", "dates_in_names_are_local_once_the_system_has_said_how_far_from_utc", "every_time_gets_an_offset_a_clock_could_have", "a_long_selection_is_shown_by_its_beginning_after_what_cannot_be_used", "several_items_are_renamed_only_where_names_can_be_changed"]
+windows_test = ["the_rename_dialog_says_what_changes_or_what_stops_it"]
+notes = "Not in the egui app, whose dialog keeps its two modes. Every name goes through the same steps in one order: template, find and replace, removing and tidying, case; a step left as it starts changes nothing (the template starts as {name}{ext}). Placeholders: {name}, {ext} (with its dot; none for a folder), {n}, {parent}, {modified}, {created}; a date reads 2026-11-08 or as a format after a colon says (%Y %y %m %d %H %M %S). The counter's width is the last number's unless BatchFields.padding says more. Dates are UTC until the LocalOffsets effect has said how far local time was from it at each item's dates, asked once when a template first takes a date. The names are worked out when the fields change, not at every render; a selection of more than 200 is sent by its first 200, the names that can't be used first (BatchRenameView.total). Only in folders of this machine. Windows: windows/src/batch.rs"
+
+[[feature]]
+id = "fileops.batch_rename_regex"
+area = 9
+summary = "Batch rename finds and replaces by plain text or regular expression, with or without regard to case, in the whole name, the name alone or the extension alone"
+status = "open"
+windows = "done"
+core_test = ["text_is_found_and_replaced_plainly_or_by_expression", "an_expression_that_cannot_be_read_stops_the_rename_and_says_why"]
+windows_test = ["the_rename_dialog_says_what_changes_or_what_stops_it"]
+notes = "Not in the egui app. BatchFields.regex, match_case, scope. With an expression the replacement may use $1; plain text is taken as written. An expression that can't be read replaces nothing, BatchRenameView.error says why, and Apply waits. An extension replaced by nothing takes its dot with it"
+
+[[feature]]
+id = "fileops.batch_rename_case_trim"
+area = 9
+summary = "Batch rename removes characters from a name's ends, tidies its spaces and changes its letters' case"
+status = "open"
+windows = "done"
+core_test = ["ends_are_removed_spaces_tidied_and_case_changed"]
+windows_test = ["the_rename_dialog_says_what_changes_or_what_stops_it"]
+notes = "Not in the egui app. BatchFields.remove_first, remove_last, trim, case. Removing and tidying act on the name before its extension. Lower and upper case take the extension too; title and sentence case leave it"
+
+[[feature]]
+id = "fileops.batch_rename_chains"
+area = 9
+summary = "A batch rename may swap names or hand them down a line, renames all or nothing, and is undone the same way"
+status = "open"
+windows = "done"
+core_test = ["names_may_be_swapped_or_handed_on_but_not_shared_or_taken_from_others", "names_are_swapped_and_handed_down_a_line_and_undo_puts_them_back", "a_batch_rename_that_cannot_finish_renames_nothing"]
+notes = "Not in the egui app. A name another item of the batch leaves is free to take; names are told apart without regard to case or to how accents are composed, so an item's own name written another way is its to take, and the name of an item outside the batch is not, however written. The worker moves what is in the way of another's new name aside under a temporary name first (crates/dirfleet_effects/src/fileops/worker.rs, step_aside); when a rename fails or the operation is stopped, the renames done are taken back, so nothing is left half renamed. Undo of moves steps aside the same way"
+
+
+# The keymap (areas 19 and 20)
+
+[[feature]]
+id = "commands.rebind"
+area = 19
+summary = "Every command's shortcut can be changed, taken away or reset; what the user chose is kept between launches"
+status = "open"
+windows = "done"
+events = ["EditShortcut", "SetShortcut", "ResetShortcut", "ResetAllShortcuts"]
+core_test = ["a_command_is_given_another_shortcut_which_is_kept_or_taken_away_or_reset", "a_shortcut_that_cannot_be_taken_is_refused_with_the_reason", "every_command_s_shortcut_reads_back_as_it_is_shown", "keys_that_move_and_the_system_s_own_are_refused", "shortcuts_are_read_back_as_the_app_shows_them", "a_command_may_have_a_key_that_types_nothing_but_not_one_that_types"]
+windows_test = ["a_chord_finds_its_command", "every_key_the_recorder_names_is_bound_by_that_name"]
+notes = "Not in the egui app. CommandView.shortcut is the shortcut a command has now, with key (a key and its modifiers, for binding), default_shortcut, customized and category; menus, the palette and plugin checks all use it. The app's own shortcuts are still the two tables of text (CommandId::mac_shortcut, other_shortcut), read by crate::shortcut::parse_shown; the user's are kept as PersistedState.keymap, by the command's name, written as Ctrl+Alt+K where Ctrl is Cmd on a Mac and Control the Mac's Control key, with an empty text for a shortcut taken away. What is kept and no longer reads, or names no command, is dropped on loading. Refused with a reason (KeymapView.error), recording going on: a key that types (letters and digits without Ctrl or Alt), the keys that move through lists and dialogs, the system's own combinations, and off the Mac plain Enter and Backspace. Shortcuts moved from plugins to crate::shortcut. Windows binds Chord::of(CommandView.key)"
+
+[[feature]]
+id = "commands.rebind_conflicts"
+area = 19
+summary = "A shortcut another command or a plugin's action has is given only after a question, and then leaves its holder"
+status = "open"
+windows = "done"
+events = ["ConfirmShortcut", "CancelShortcut"]
+core_test = ["a_shortcut_something_else_has_is_taken_only_once_it_is_confirmed", "commands_and_plugin_actions_take_shortcuts_from_each_other_only_when_told"]
+windows_test = ["a_shortcut_s_line_shows_it_records_it_or_asks_about_it"]
+notes = "Not in the egui app. Shortcuts are told apart as keys with modifiers, not as text. KeymapView.conflict names the command asking, the shortcut and its holder; ConfirmShortcut leaves the holder with no shortcut (a plugin's action through its own setting), CancelShortcut changes nothing and also ends a recording. Resetting a command whose own shortcut another was given asks the same way. A plugin's action can't take a shortcut a command has, the user's included, and may take one a command gave up"
+
+[[feature]]
+id = "settings.keyboard_edit"
+area = 20
+summary = "The keyboard shortcuts are edited where they are listed: a command's shortcut is changed by pressing the new keys"
+status = "open"
+windows = "done"
+core_test = ["a_command_is_given_another_shortcut_which_is_kept_or_taken_away_or_reset"]
+windows_test = ["a_shortcut_s_line_shows_it_records_it_or_asks_about_it", "a_recorded_key_is_written_as_the_core_reads_shortcuts"]
+notes = "Not in the egui app. The core holds what is being recorded (KeymapView.recording, set by EditShortcut): the shell turns the next key pressed into SetShortcut's text. Windows: the Keyboard Shortcuts sheet lists every command under its heading with two buttons that change with the line (Change and Reset; No Shortcut and Cancel while recording; Take It and Cancel when asked), Escape gives up, Reset All to Defaults at the foot; closing the sheet sends CancelShortcut. Plugin actions' shortcuts are listed there and changed in the plugins' settings, as before"
+
+
+# 27. Tags
+
+[[feature]]
+id = "tags.assign"
+area = 27
+summary = "Give the selected items a tag, take it from them, or take all their tags"
+status = "open"
+windows = "done"
+events = ["ToggleTag", "SetTag", "ClearTags"]
+core_test = ["tags_are_given_to_the_selection_shown_on_its_rows_and_taken_again", "tags_are_given_taken_kept_and_follow_what_is_renamed", "files_are_tagged_found_by_their_tag_and_listed_under_it"]
+windows_test = ["tags_are_given_from_the_selection_s_menu_and_kept_from_the_sidebar_s"]
+notes = "Not in the egui app. Which item has which tag is kept by the effects in tags.json beside the app's state, by path as the core names items (crates/dirfleet_effects/src/tags.rs); every change answers with all of it, which the core keeps a copy of to draw from. Toggling gives the tag unless every selected item has it. TabViewModel.selection_tags are the tags every selected item has. Files, folders and items on servers can be tagged (a server's by its location, on this machine only); what is inside an archive cannot. Windows: the Tags submenu of the selection's menu"
+
+[[feature]]
+id = "tags.manage"
+area = 27
+summary = "Tags are made, renamed, recoloured, reordered and deleted; they are kept with the app's state"
+status = "open"
+windows = "done"
+events = ["EditTag", "SetTagDraft", "ApplyTagDraft", "CancelTagDraft", "DeleteTag", "MoveTag"]
+core_test = ["tags_are_made_renamed_recoloured_moved_deleted_and_kept"]
+windows_test = ["tags_are_given_from_the_selection_s_menu_and_kept_from_the_sidebar_s"]
+notes = "Not in the egui app. Seven tags to start with, one of each colour (TagColor); PersistedState.tags, where None (a state from before tags) leaves those seven. A tag's id is never given to another. The editor is the core's (ViewModel.tag_draft, with why the tag can't be kept: no name, a name of more than one word, a name another tag has). Deleting a tag takes it from every item. Windows: a dialog with the name and the colours; Edit, Move Up, Move Down, Delete Tag and New Tag in a tag's sidebar menu, New Tag in the Tags submenu"
+
+[[feature]]
+id = "tags.rows"
+area = 27
+summary = "An item's tags show on its row and its tile as dots of their colours"
+status = "open"
+windows = "done"
+core_test = ["tags_are_given_to_the_selection_shown_on_its_rows_and_taken_again"]
+windows_test = ["tags_are_given_from_the_selection_s_menu_and_kept_from_the_sidebar_s"]
+notes = "Not in the egui app. RowView.tags: the colours, in the tags' order. Windows draws the first three at the foot of the icon (files::tag_dots). There is no Tags column"
+
+[[feature]]
+id = "tags.sidebar"
+area = 27
+summary = "The sidebar lists the tags, each with how many items have it"
+status = "open"
+windows = "done"
+core_test = ["a_tag_s_items_show_in_a_tab_of_their_own_wherever_they_are"]
+windows_test = ["a_tag_shows_its_items_and_has_a_menu_of_its_own"]
+notes = "Not in the egui app. SidebarSection::Tags, last by default, with SidebarItem.tag and SidebarIcon::Tag(colour); the tag whose items the focused tab shows is marked. Settings.show_tags hides the section (no switch for it on Windows yet)"
+
+[[feature]]
+id = "tags.view"
+area = 27
+summary = "A tag's items show in a tab of their own, wherever they are; the ones no longer there are counted and can be forgotten"
+status = "open"
+windows = "done"
+events = ["OpenTag", "RemoveMissingTagged"]
+core_test = ["a_tag_s_items_show_in_a_tab_of_their_own_wherever_they_are", "a_tag_s_items_are_listed_where_they_are_and_the_gone_ones_named", "files_are_tagged_found_by_their_tag_and_listed_under_it"]
+windows_test = ["a_tag_s_items_are_refreshed_and_the_gone_ones_forgotten", "a_tag_shows_its_items_and_has_a_menu_of_its_own"]
+notes = "Not in the egui app. A results tab like the duplicates' (results.tab) with ResultsView.tag set: no folder, rows with the whole of their folders, grouped and sorted as a folder's, nothing made or renamed in it, not kept between launches. Items on this machine are looked at when the tab is listed; items on servers are shown as they were tagged, and no server is asked. The tab lists again when tags change and after file operations. Asked for twice in a window, the tab that shows the tag is shown. Windows: a click on the tag in the sidebar; the bar has Forget Missing and Refresh"
+
+[[feature]]
+id = "tags.search"
+area = 27
+summary = "Items are found by a tag's name: tag:name in a search or a pattern"
+status = "open"
+windows = "done"
+core_test = ["tags_follow_what_is_renamed_and_are_searched_for_by_name", "items_are_found_by_their_tags_names", "files_are_tagged_found_by_their_tag_and_listed_under_it"]
+notes = "Not in the egui app, where the chip shows but filters nothing. Chip::Tag; several must all be had; the name's case does not count. CompiledQuery::matches does not look at tags: whoever knows them asks wanted_tags (the effects when ordering a listing, from the tags kept beside the open history; the core for Select by Pattern). A path written another way than it was tagged under (drive letter's case, the long-path prefix) is still found. No chip editor for it on Windows: it is typed"
+
+[[feature]]
+id = "tags.follow_moves"
+area = 27
+summary = "Tags follow an item renamed or moved in the app, with everything below it"
+status = "open"
+windows = "done"
+core_test = ["tags_follow_what_is_renamed_and_are_searched_for_by_name", "tags_are_given_taken_kept_and_follow_what_is_renamed"]
+notes = "Not in the egui app. As open counts and chosen thumbnails follow (TagOp::Rename after a rename or a move). An item renamed or moved outside the app keeps no tag: its old path shows as missing in the tag's tab. Copies get no tags"

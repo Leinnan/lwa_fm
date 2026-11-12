@@ -20,10 +20,10 @@ use windows_reactor::{
 
 use super::Dropped;
 use super::columns::{self, Cell, ColumnSet, HEADER_HEIGHT, HeaderCallbacks, Resize};
-use super::layout::{Metrics, Motion, Span};
+use super::layout::{Group, Layout, Metrics, Motion, Span};
 use super::press::{EntryHooks, PressClaim};
-use super::row::{Row, RowInput};
-use super::tiles::{TileLine, TileLineInput};
+use super::row::{Row, RowInput, group_heading};
+use super::tiles::{Heading, TileLine, TileLineInput};
 use crate::core_link::CoreLink;
 use crate::menus::MenuOn;
 use crate::shortcuts::{Chord, Shortcuts};
@@ -52,6 +52,8 @@ pub struct FileViewInput {
     pub icon_size: IconSize,
     /// Results come from several folders: the list shows each entry's folder.
     pub show_folder: bool,
+    /// File contents are searched: the list shows each entry's matching line.
+    pub show_match: bool,
     pub shortcuts: Rc<Shortcuts>,
     /// Runs a command the view's keys are bound to.
     pub on_command: Callback<CommandId>,
@@ -72,7 +74,8 @@ pub struct FileView {
     input: FileViewInput,
     /// Kept between renders: an unchanged source leaves the lines alone.
     source: VirtualSource,
-    metrics: Metrics,
+    /// Where the entries and their groups' headings are.
+    layout: Rc<Layout>,
     cells: Rc<Vec<Cell>>,
     viewer: ElementRef<ScrollViewer>,
     /// Takes the keyboard for the view.
@@ -150,28 +153,71 @@ pub enum ViewMessage {
 }
 
 impl FileView {
+    /// The lines of `input`'s entries in a view `width` wide.
+    fn layout(input: &FileViewInput, width: f64) -> Rc<Layout> {
+        let groups: Vec<Group> = input
+            .rows
+            .groups
+            .iter()
+            .map(|group| Group {
+                first: group.first_row,
+                count: group.count,
+            })
+            .collect();
+        Rc::new(Layout::new(
+            Metrics::of(input.view.display, input.icon_size, width),
+            input.rows.total_rows,
+            &groups,
+        ))
+    }
+
     fn source(
         input: &FileViewInput,
-        metrics: Metrics,
+        layout: &Rc<Layout>,
         cells: &Rc<Vec<Cell>>,
         width: f64,
         (claim, hooks): (&PressClaim, &EntryHooks),
     ) -> VirtualSource {
         let input = input.clone();
+        let layout = Rc::clone(layout);
         let cells = Rc::clone(cells);
         let claim = claim.clone();
         let hooks = hooks.clone();
-        let total = input.rows.total_rows;
-        // Keys are line positions; they mean other entries when the tab or
-        // the number of entries on a line changes.
-        let revision = (u64::from(input.rows.tab) << 32) | u64::from(metrics.per_line);
+        let tile = layout.metrics.tile;
+        // Keys are line positions; they mean other entries when the tab, the
+        // number of entries on a line or the groups change.
+        let revision = (u64::from(input.rows.tab) << 32) ^ layout.revision();
         VirtualSource::new(
             revision,
-            metrics.lines(total) as usize,
+            layout.lines() as usize,
             |line| line,
             move |line| {
-                let first = line as u32 * metrics.per_line;
-                match metrics.tile {
+                let Some(found) = layout.line(line as u32) else {
+                    return Border::new().into();
+                };
+                let first = found.first;
+                let heading = found.heading.and_then(|group| {
+                    let shown = input.rows.groups.get(group as usize)?;
+                    Some(Heading {
+                        group,
+                        label: shown.label.clone(),
+                        count: shown.count,
+                    })
+                });
+                match tile {
+                    None if heading.is_some() => heading.map_or_else(
+                        || Border::new().into(),
+                        |heading| {
+                            group_heading(
+                                &input.core,
+                                input.rows.tab,
+                                heading.group,
+                                (&heading.label, heading.count),
+                                width,
+                                &claim,
+                            )
+                        },
+                    ),
                     None => View::component::<Row>(RowInput {
                         core: input.core.clone(),
                         tab: input.rows.tab,
@@ -191,8 +237,9 @@ impl FileView {
                     Some(tile) => View::component::<TileLine>(TileLineInput {
                         core: input.core.clone(),
                         tab: input.rows.tab,
+                        heading,
                         first,
-                        entries: (first..(first + metrics.per_line).min(total))
+                        entries: (first..first + found.count)
                             .map(|entry| input.rows.row(entry).cloned())
                             .collect(),
                         tile,
@@ -207,11 +254,15 @@ impl FileView {
     /// Lays the entries out again for the current input and width.
     fn rebuild(&mut self) {
         let input = &self.input;
-        self.metrics = Metrics::of(input.view.display, input.icon_size, self.width);
-        self.cells = Rc::new(columns::cells(&input.columns, input.show_folder));
+        self.layout = Self::layout(input, self.width);
+        self.cells = Rc::new(columns::cells(
+            &input.columns,
+            input.show_folder,
+            input.show_match,
+        ));
         self.source = Self::source(
             input,
-            self.metrics,
+            &self.layout,
             &self.cells,
             self.width,
             (&self.claim, &self.hooks),
@@ -225,11 +276,10 @@ impl FileView {
             return;
         }
         let rows = &self.input.rows;
-        let Some(span) = self.metrics.in_sight(
-            self.position.vertical_offset,
-            self.position.viewport_height,
-            rows.total_rows,
-        ) else {
+        let Some(span) = self
+            .layout
+            .in_sight(self.position.vertical_offset, self.position.viewport_height)
+        else {
             return;
         };
         if self.reported != Some((rows.tab, span)) {
@@ -283,8 +333,7 @@ impl FileView {
     fn holds(&self, offset: f64) -> bool {
         let position = &self.position;
         // The top is the top at any length.
-        let laid_out = offset <= 0.0
-            || position.extent_height + 1.0 >= self.metrics.extent(self.input.rows.total_rows);
+        let laid_out = offset <= 0.0 || position.extent_height + 1.0 >= self.layout.extent();
         let furthest = (position.extent_height - position.viewport_height).max(0.0);
         laid_out && (position.vertical_offset - offset.min(furthest)).abs() < 1.0
     }
@@ -370,8 +419,12 @@ impl Component for FileView {
             _ = scrolled.send(ViewMessage::Scrolled(position));
         });
         let width = (input.width - SCROLL_BAR).max(120.0);
-        let metrics = Metrics::of(input.view.display, input.icon_size, width);
-        let cells = Rc::new(columns::cells(&input.columns, input.show_folder));
+        let layout = Self::layout(input, width);
+        let cells = Rc::new(columns::cells(
+            &input.columns,
+            input.show_folder,
+            input.show_match,
+        ));
         let claim = PressClaim::default();
         let renaming = Rc::new(std::cell::Cell::new(input.rows.renaming.is_some()));
         let typing_name = Rc::clone(&renaming);
@@ -390,8 +443,8 @@ impl Component for FileView {
         };
         Self {
             input: input.clone(),
-            source: Self::source(input, metrics, &cells, width, (&claim, &hooks)),
-            metrics,
+            source: Self::source(input, &layout, &cells, width, (&claim, &hooks)),
+            layout,
             cells,
             viewer,
             focus: ElementRef::new(),
@@ -486,12 +539,12 @@ impl Component for FileView {
         } else if let Some(entry) = asked {
             // Back and Forward return to where the folder was left: its first
             // entry goes back to the top, unless it is in sight anyway.
-            self.metrics
+            self.layout
                 .offset_showing(entry, offset, height)
-                .map(|_| self.metrics.offset_of(entry))
+                .map(|_| self.layout.offset_of(entry))
         } else {
             // The cursor moved: it stays in sight, moving as little as it takes.
-            cursor.and_then(|entry| self.metrics.offset_showing(entry, offset, height))
+            cursor.and_then(|entry| self.layout.offset_showing(entry, offset, height))
         };
         if let Some(target) = target {
             self.scroll_to(target, 0, context);
@@ -543,7 +596,7 @@ impl Component for FileView {
                 let rows = &self.input.rows;
                 let from = self.cursor.or(rows.cursor);
                 let height = self.position.viewport_height;
-                if let Some(row) = self.metrics.moved(motion, from, rows.total_rows, height) {
+                if let Some(row) = self.layout.moved(motion, from, height) {
                     self.cursor = Some(row);
                     core.send(Event::MoveCursor {
                         tab,
@@ -658,7 +711,7 @@ impl Component for FileView {
             .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
             .horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled)
             .content(ItemsRepeater::new().virtual_source(self.source.clone()));
-        let body: View = if self.metrics.tile.is_some() {
+        let body: View = if self.layout.metrics.tile.is_some() {
             entries.into()
         } else {
             Grid::new()

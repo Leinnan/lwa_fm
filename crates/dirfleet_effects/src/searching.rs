@@ -11,9 +11,27 @@ use crux_core::effects::ResolveSink;
 use dirfleet_core::app::{Clock, Delay, ListDirOutput, SearchWalk, WalkUpdate};
 use dirfleet_core::listing::Listing;
 
+use crate::content::ContentScan;
 use crate::list::display_order_with;
 use crate::open_history::OpenHistory;
-use crate::walk::walk;
+use crate::walk::{Found, WalkOptions, walk};
+
+/// The threads that look inside files, apart from the ones that read and
+/// sort folders, so a long content search holds no listing up.
+pub fn scan_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism()
+            .map_or(2, |count| count.get().saturating_sub(1).clamp(2, 8));
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|index| format!("dirfleet_scan_{index}"))
+            .build()
+            .map_err(|error| log::warn!("no threads for searching file contents: {error}"))
+            .ok()
+    })
+    .as_ref()
+}
 
 type Start = dyn Fn(Request<SearchWalk>, Arc<AtomicBool>) + Send + Sync;
 
@@ -87,15 +105,32 @@ fn spawn_walk<R>(
                 .first()
                 .map(|root| crate::paths::normalize_path_string(root))
                 .unwrap_or_default();
-            let update = |listing: Arc<Listing>, done: bool| WalkUpdate {
-                output: ListDirOutput::Listed {
-                    order: display_order_with(&listing, &operation.view, history.as_ref()),
-                    opened: Arc::new(history.keys_if_any(&listing)),
-                    listing,
-                    view: operation.view.clone(),
-                },
-                done,
-                root: root.clone(),
+            let update = |found: Found, done: bool| {
+                let listing: Arc<Listing> = found.listing;
+                WalkUpdate {
+                    output: ListDirOutput::Listed {
+                        order: display_order_with(&listing, &operation.view, history.as_ref()),
+                        opened: Arc::new(history.keys_if_any(&listing)),
+                        listing,
+                        view: operation.view.clone(),
+                    },
+                    done,
+                    root: root.clone(),
+                    matched: found.matched,
+                    scanned: found.scanned,
+                }
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            let scan = operation
+                .content
+                .as_deref()
+                .and_then(|search| ContentScan::new(search, now));
+            let options = WalkOptions {
+                content: scan.as_ref(),
+                skip_ignored: operation.skip_ignored,
+                ..WalkOptions::default()
             };
             // Partial results go out from the walk's threads, one at a time.
             let request = Mutex::new(&mut request);
@@ -103,19 +138,32 @@ fn spawn_walk<R>(
                 sink.upgrade()
                     .is_some_and(|sink| sink.resolve_request(&mut **lock(&request), update).is_ok())
             };
-            let found = walk(
-                &roots,
-                depth,
-                operation.view.show_hidden,
-                &cancel,
-                &|partial| {
-                    if !cancel.load(Ordering::Relaxed) && !resolve(update(partial, false)) {
-                        cancel.store(true, Ordering::Relaxed);
-                    }
-                },
-            );
+            let on_partial = |partial: Found| {
+                if !cancel.load(Ordering::Relaxed) && !resolve(update(partial, false)) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            };
+            let run = || {
+                walk(
+                    &roots,
+                    depth,
+                    operation.view.show_hidden,
+                    &cancel,
+                    options,
+                    &on_partial,
+                )
+            };
+            // Looking inside files takes its own threads.
+            let found = scan_pool()
+                .filter(|_| scan.is_some())
+                .map_or_else(run, |pool| pool.install(run));
             if !cancel.load(Ordering::Relaxed) {
-                resolve(update(found.listing, true));
+                let found = Found {
+                    listing: found.listing,
+                    matched: found.matched,
+                    scanned: found.scanned,
+                };
+                resolve(update(found, true));
             }
             if let Some(running) = running.upgrade() {
                 lock(&running).remove(&id);

@@ -1,33 +1,19 @@
 //! The inspector, as egui's: one selected item's name, path, type, size and
 //! dates; for several, the counts, the files' total size and a breakdown by
-//! kind. A folder's size is added up on request, since walking a tree is
-//! slow, with hardlinked files counted once.
+//! kind. A folder's size is added up on request (`sizes`), since walking a
+//! tree is slow, with hardlinked files counted once.
 use std::collections::BTreeMap;
 
-use crux_core::Command;
-use crux_core::capability::Operation;
-use crux_core::render::render;
 use facet::Facet;
 use serde::{Deserialize, Serialize};
 
-use super::checksums::{Checksums, ChecksumsView};
+use super::checksums::ChecksumsView;
 use super::format;
-use super::thumbnails::{PREVIEW_EDGE, PreviewState, Thumbnails, plays};
-use super::{DirFleet, Effect, Event, Model, Tab};
+use super::thumbnails::{PREVIEW_EDGE, PreviewState, plays};
+use super::{Model, Tab};
 use crate::listing::{EntryType, TimestampSeconds, kind_label};
 use crate::search::FileKind;
 use crate::search::filter::kind_of;
-
-/// Add up the disk space under `path`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FolderSize {
-    pub path: String,
-}
-
-impl Operation for FolderSize {
-    /// Bytes, or `None` when the folder can't be read.
-    type Output = Option<u64>;
-}
 
 #[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct InspectorView {
@@ -54,6 +40,10 @@ pub struct ItemInfo {
     pub animation: String,
     /// A file's checksums, worked out or not; folders have none.
     pub checksums: Option<ChecksumsView>,
+    /// A picture's or video's size in pixels ("1920 × 1080"), or "".
+    pub dimensions: String,
+    /// How long a video or a sound plays ("3:07"), or "".
+    pub duration: String,
 }
 
 #[derive(Facet, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -80,16 +70,6 @@ pub struct SelectionSummary {
 pub struct KindCount {
     pub kind: String,
     pub count: u32,
-}
-
-/// Folder sizes asked for.
-#[derive(Default)]
-pub(super) struct Sizes(BTreeMap<String, SizeState>);
-
-enum SizeState {
-    Calculating,
-    /// Bytes, or `None` when the folder couldn't be read.
-    Done(Option<u64>),
 }
 
 fn date(time: crate::listing::TimestampSeconds) -> String {
@@ -132,12 +112,7 @@ impl Tab {
         .join("\n")
     }
 
-    pub(super) fn inspector_view(
-        &self,
-        sizes: &Sizes,
-        thumbnails: &Thumbnails,
-        checksums: &Checksums,
-    ) -> InspectorView {
+    pub(super) fn inspector_view(&self, model: &Model) -> InspectorView {
         // One item (or the cursor's), nothing, or a summary of several.
         let Some(row) = self.single_item() else {
             return InspectorView {
@@ -146,7 +121,7 @@ impl Tab {
             };
         };
         InspectorView {
-            item: self.item_info(row, sizes, thumbnails, checksums),
+            item: self.item_info(row, model),
             summary: None,
         }
     }
@@ -189,25 +164,15 @@ impl Tab {
         summary
     }
 
-    fn item_info(
-        &self,
-        row: usize,
-        sizes: &Sizes,
-        thumbnails: &Thumbnails,
-        checksums: &Checksums,
-    ) -> Option<ItemInfo> {
+    fn item_info(&self, row: usize, model: &Model) -> Option<ItemInfo> {
+        let (thumbnails, checksums) = (&model.thumbnails, &model.checksums);
         let entry = *self.order.get(row)? as usize;
         let meta = self.listing.meta(entry);
         let name = self.listing.name(entry);
         let path = self.row_path(row)?.to_string_lossy().into_owned();
         let is_dir = meta.entry_type == EntryType::Directory;
         let size = if is_dir {
-            match sizes.0.get(&path) {
-                None => SizeInfo::NotCalculated,
-                Some(SizeState::Calculating) => SizeInfo::Calculating,
-                Some(SizeState::Done(Some(total))) => SizeInfo::Known(bytes(*total)),
-                Some(SizeState::Done(None)) => SizeInfo::Unavailable,
-            }
+            model.sizes.info(&path)
         } else {
             SizeInfo::Known(bytes(meta.size))
         };
@@ -222,6 +187,8 @@ impl Tab {
             // The Trash's rows are not files to read where they are shown.
             checksums: (meta.entry_type.is_leaf() && !self.trash)
                 .then(|| self.checksums_view(checksums, entry, &path)),
+            dimensions: model.media.dimensions(&path, meta),
+            duration: model.media.duration(&path, meta),
             path,
             kind: kind_label(name, meta.entry_type),
             is_dir,
@@ -231,32 +198,5 @@ impl Tab {
             opened: date(self.last_opened(entry)),
             opens: self.opened.get(entry).map_or(0, |&(count, _)| count),
         })
-    }
-}
-
-impl DirFleet {
-    /// The events of the inspector.
-    pub(super) fn inspector_event(model: &mut Model, event: Event) -> Command<Effect, Event> {
-        match event {
-            Event::SetInspector { shown } => {
-                model.inspector_shown = shown;
-                render()
-            }
-            Event::CalculateSize { path } => {
-                if matches!(model.sizes.0.get(&path), Some(SizeState::Calculating)) {
-                    return Command::done();
-                }
-                model.sizes.0.insert(path.clone(), SizeState::Calculating);
-                render().and(
-                    Command::request_from_shell(FolderSize { path: path.clone() })
-                        .then_send(move |total| Event::SizeCalculated { path, total }),
-                )
-            }
-            Event::SizeCalculated { path, total } => {
-                model.sizes.0.insert(path, SizeState::Done(total));
-                render()
-            }
-            _ => Command::done(),
-        }
     }
 }

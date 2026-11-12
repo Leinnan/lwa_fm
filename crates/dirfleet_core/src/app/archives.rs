@@ -235,9 +235,16 @@ impl Tab {
         let location = self
             .location()
             .unwrap_or_else(|| Location::Local(String::new()));
+        let mut caps = location.default_caps();
+        // What a scan found is no folder: nothing is made in it, and a file
+        // renamed would no longer be the one found.
+        if self.results.is_some() {
+            caps.writable = false;
+            caps.rename = false;
+        }
         LocationView {
             kind: location.kind(),
-            caps: location.default_caps(),
+            caps,
         }
     }
 

@@ -81,6 +81,18 @@ fn action(label: &str, command: CommandId, on_command: &Callback<CommandId>) -> 
         .into()
 }
 
+/// What a picture, a video or a sound says of itself, as labelled lines;
+/// none for other files and until it has been read.
+fn media_facts(item: &ItemInfo) -> Vec<(&'static str, &str)> {
+    [
+        ("Dimensions", item.dimensions.as_str()),
+        ("Duration", item.duration.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .collect()
+}
+
 /// One selected item: its preview, name, and what is known of it.
 fn one(core: &CoreLink, tab: u32, item: &ItemInfo, on_command: &Callback<CommandId>) -> View {
     let size: View = match &item.size {
@@ -123,9 +135,16 @@ fn one(core: &CoreLink, tab: u32, item: &ItemInfo, on_command: &Callback<Command
             .into(),
         fact("Type", small(&item.kind)),
         fact("Size", size),
+    ];
+    lines.extend(
+        media_facts(item)
+            .into_iter()
+            .map(|(label, value)| fact(label, small(value))),
+    );
+    lines.extend([
         fact("Created", small(&item.created)),
         fact("Modified", small(&item.modified)),
-    ];
+    ]);
     if !item.opened.is_empty() {
         lines.push(fact("Opened", small(&item.opened)));
     }
@@ -355,6 +374,36 @@ fn several(summary: &SelectionSummary, on_command: &Callback<CommandId>) -> View
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_media_file_s_pixels_and_playing_time_are_listed_once_known() {
+        let mut item = ItemInfo {
+            name: "clip.mp4".into(),
+            path: "C:\\clip.mp4".into(),
+            kind: "MP4 video".into(),
+            is_dir: false,
+            size: SizeInfo::Known("1 MB".into()),
+            created: String::new(),
+            modified: String::new(),
+            opened: String::new(),
+            opens: 0,
+            preview: PreviewState::None,
+            animation: String::new(),
+            checksums: None,
+            dimensions: String::new(),
+            duration: String::new(),
+        };
+        assert!(media_facts(&item).is_empty(), "nothing read yet");
+        item.dimensions = "1920 \u{d7} 1080".into();
+        item.duration = "3:07".into();
+        assert_eq!(
+            media_facts(&item),
+            [("Dimensions", "1920 \u{d7} 1080"), ("Duration", "3:07")]
+        );
+        // A sound has no picture.
+        item.dimensions.clear();
+        assert_eq!(media_facts(&item), [("Duration", "3:07")]);
+    }
 
     #[test]
     fn a_checksum_s_verdict_is_marked_as_a_match_or_not() {

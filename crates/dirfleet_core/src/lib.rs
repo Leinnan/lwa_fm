@@ -19,10 +19,11 @@ pub mod listing;
 pub mod location;
 pub mod plugins;
 pub mod search;
+pub mod shortcut;
 pub mod thumbnail_timeline;
 pub mod view_settings;
 
 pub use current_path::CurrentPath;
 pub use ids::{IdAllocator, TabId, WindowId};
 pub use location::Location;
-pub use view_settings::{Data, DataSource, DisplayType, Sort};
+pub use view_settings::{Data, DataSource, DisplayType, GroupBy, Sort};

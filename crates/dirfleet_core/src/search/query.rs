@@ -31,6 +31,14 @@ pub const HELP: &[(&str, &str)] = &[
     ("modified:week", "today, week, month, year"),
     ("opened:week", "Opened today, week, month, year"),
     ("in:\"D:\\Work\"", "Also search this folder"),
+    (
+        "content:TODO",
+        "Files that contain \"TODO\"; press Enter to search",
+    ),
+    (
+        "content:/TODO|FIXME/",
+        "Files whose text matches the expression",
+    ),
 ];
 
 /// Splits on whitespace, keeping "quoted text" together.
@@ -145,6 +153,19 @@ pub fn parse_filter(token: &str) -> Option<Chip> {
             .find(|age| age.keyword().eq_ignore_ascii_case(value))
             .map(Chip::Opened),
         "in" => Some(Chip::In(PathBuf::from(value))),
+        "tag" => Some(Chip::Tag(value.to_owned())),
+        "content" | "text" => {
+            let (pattern, kind) =
+                if value.len() > 2 && value.starts_with('/') && value.ends_with('/') {
+                    (&value[1..value.len() - 1], SearchTermType::Regex)
+                } else {
+                    (value, SearchTermType::Plain)
+                };
+            Some(Chip::Content {
+                pattern: pattern.to_owned(),
+                kind,
+            })
+        }
         _ => None,
     }
 }
@@ -222,6 +243,14 @@ pub fn chip_token(chip: &Chip) -> String {
         Chip::Modified(age) => format!("modified:{}", age.keyword()),
         Chip::Opened(age) => format!("opened:{}", age.keyword()),
         Chip::In(path) => format!("in:{}", quote_if_needed(&path.display().to_string())),
+        Chip::Tag(name) => format!("tag:{}", quote_if_needed(name)),
+        Chip::Content { pattern, kind } => {
+            let body = match kind {
+                SearchTermType::Regex => format!("/{pattern}/"),
+                _ => pattern.clone(),
+            };
+            format!("content:{}", quote_if_needed(&body))
+        }
     }
 }
 
@@ -291,6 +320,14 @@ pub fn chip_parts(chip: &Chip) -> (Option<&'static str>, String) {
                 || path.display().to_string(),
                 |name| name.to_string_lossy().into_owned(),
             ),
+        ),
+        Chip::Tag(name) => (Some("Tag"), name.clone()),
+        Chip::Content { pattern, kind } => (
+            Some("Contains"),
+            match kind {
+                SearchTermType::Regex => format!("/{pattern}/"),
+                _ => pattern.clone(),
+            },
         ),
     }
 }

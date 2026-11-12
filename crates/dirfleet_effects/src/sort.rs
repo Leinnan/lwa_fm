@@ -10,6 +10,12 @@ use rayon::slice::ParallelSliceMut;
 pub trait OpeningHistory: Sync {
     /// `(times opened, last opened)` for each entry of `listing`, in order.
     fn keys(&self, listing: &Listing) -> Vec<(u32, u32)>;
+
+    /// Which item has which tag, where that is kept with the history:
+    /// searches for `tag:name` are answered from it.
+    fn tags(&self) -> Option<std::sync::Arc<crate::tags::TagStore>> {
+        None
+    }
 }
 
 /// No open history: an entry was last opened when the file system last

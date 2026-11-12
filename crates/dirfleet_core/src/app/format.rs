@@ -37,7 +37,28 @@ pub fn cell(column: Column, name: &str, meta: &DirEntryMetaData) -> String {
         Column::Accessed => date(meta.accessed_at),
         Column::Kind => kind_label(name, meta.entry_type),
         Column::Size => size(meta),
-        Column::Folder | Column::OpenCount => String::new(),
+        // What a file's bytes say comes from the app's own reading of it.
+        Column::Folder
+        | Column::Match
+        | Column::OpenCount
+        | Column::Dimensions
+        | Column::Duration => String::new(),
+    }
+}
+
+/// A picture's size in pixels: "1920 × 1080".
+pub fn dimensions(width: u32, height: u32) -> String {
+    format!("{width} \u{d7} {height}")
+}
+
+/// How long something plays, to the second: "0:07", "3:07", "1:02:03".
+pub fn duration(millis: u64) -> String {
+    let seconds = millis.saturating_add(500) / 1000;
+    let (hours, minutes, seconds) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
     }
 }
 
@@ -78,7 +99,7 @@ pub fn date(time: TimestampSeconds) -> String {
 }
 
 /// Days since 1970-01-01 to a calendar date (Howard Hinnant's algorithm).
-const fn civil_from_days(days: i64) -> (i64, i64, i64) {
+pub(super) const fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -109,6 +130,15 @@ mod tests {
         assert_eq!(size(&file(999, 0)), "999 B");
         assert_eq!(size(&file(1_500_000, 0)), "1.5 MB");
         assert_eq!(size(&DirEntryMetaData::from(EntryType::Directory)), "");
+    }
+
+    #[test]
+    fn pixels_and_playing_times_read_as_people_write_them() {
+        assert_eq!(dimensions(1920, 1080), "1920 \u{d7} 1080");
+        assert_eq!(duration(400), "0:00");
+        assert_eq!(duration(7_400), "0:07");
+        assert_eq!(duration(187_600), "3:08");
+        assert_eq!(duration(3_723_000), "1:02:03");
     }
 
     #[test]

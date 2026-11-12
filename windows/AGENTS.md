@@ -78,6 +78,11 @@ needs network, `curl.exe` and `tar.exe`) and stages its DLLs beside the exe.
 - **Rows by position.** The list is as long as the folder (`total_rows`), keyed
   by row position. The core sends only rows near the viewport; a position it
   has not sent draws an empty row of the same height.
+- **Every line is as tall as the next.** A line's place is its number times
+  that height (`files/layout.rs`); the repeater only guesses where lines of
+  mixed heights are, and the rows asked of the core would then not be the
+  rows drawn. So a group's heading is a line of its own in the list and the
+  first cell of its group's first line in the grid, never a shorter line.
 - **Keep the `VirtualSource`.** A new source rebuilds every realized row, so
   `FileList` builds it in `create`/`input_changed`, never in `view`.
 - **Callbacks for window observers are made once** (`WindowRoot::on_size`).
@@ -96,6 +101,11 @@ needs network, `curl.exe` and `tar.exe`) and stages its DLLs beside the exe.
   blank (closing the shown tab left an empty view), so the strip has no
   content and the folder is drawn once, below it. With one pane the strip is
   in the title bar; `Pane` then draws none.
+- **The title bar moves the window wherever no control lies.** Its left and
+  right headers count as controls all across, and in its content every
+  enabled control does, at its full size. So the app's name sits in the
+  content, the tab strip is only as wide as its tabs (`strip_width`), and the
+  content is given its width outright, since the bar centres it.
 - **A switch says nothing beside itself.** `theme::switch` hides the control's
   own "On"/"Off", which come in the system's language; give it an
   `automation_name`, since its label is a separate text.

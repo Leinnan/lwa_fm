@@ -23,6 +23,20 @@ pub fn field() -> Brush {
     Color::argb(0x1A, 0x80, 0x80, 0x80).into()
 }
 
+/// A tag's colour, bright enough on a light window and a dark one.
+pub const fn tag_color(color: dirfleet_core::app::TagColor) -> Color {
+    use dirfleet_core::app::TagColor;
+    match color {
+        TagColor::Red => Color::rgb(0xE5, 0x48, 0x4D),
+        TagColor::Orange => Color::rgb(0xF2, 0x8C, 0x28),
+        TagColor::Yellow => Color::rgb(0xE5, 0xB8, 0x00),
+        TagColor::Green => Color::rgb(0x3F, 0xA9, 0x57),
+        TagColor::Blue => Color::rgb(0x3B, 0x82, 0xF6),
+        TagColor::Purple => Color::rgb(0x9B, 0x5D, 0xE5),
+        TagColor::Gray => Color::rgb(0x8A, 0x8F, 0x98),
+    }
+}
+
 /// The edge of a surface that has the focus among several.
 pub fn focused_stroke() -> Brush {
     ThemeBrush::Accent.into()

@@ -25,6 +25,9 @@ pub struct Target {
     pub no_bin: bool,
     /// How many of the tab's entries are selected.
     pub selected: u32,
+    /// Among duplicates: how many files have every copy of them selected,
+    /// so that removing the selection would leave none.
+    pub whole_sets: u32,
     pub inspector_shown: bool,
     /// The settings ask before anything goes to the Recycle Bin.
     pub confirm_trash: bool,
@@ -101,6 +104,17 @@ pub fn run(core: &CoreLink, command: CommandId, target: &Target) -> Option<Local
         CommandId::GetInfo => Event::GetInfo { tab },
         CommandId::OpenInTerminal => Event::OpenInTerminal { tab },
         CommandId::OpenTrash => Event::OpenTrash { tab },
+        CommandId::CopyToOtherPane => Event::CopyToOtherPane { window },
+        CommandId::MoveToOtherPane => Event::MoveToOtherPane { window },
+        CommandId::SwapPanes => Event::SwapPanes { window },
+        CommandId::MirrorPane => Event::MirrorToOtherPane { window },
+        CommandId::SelectByPattern => Event::OpenSelectPattern { tab },
+        CommandId::SelectSameExtension => Event::SelectSameExtension { tab },
+        CommandId::FindDuplicates => Event::FindDuplicates {
+            tab,
+            selected: false,
+        },
+        CommandId::CompareFolders => Event::CompareFolders { window },
         CommandId::AddToFavorites => {
             if target.path.is_empty() {
                 return None;

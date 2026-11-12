@@ -4,7 +4,7 @@ use super::{
     ConflictPolicy, FileOp, FileOpEvent, Origin, Outcome, Undo, copy_name, display_name,
     unique_name,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -286,6 +286,57 @@ fn tree_size(path: &Path) -> u64 {
         .sum()
 }
 
+/// A path as disks that take one spelling of a name for another tell
+/// paths apart: its folder, and its name without regard to case.
+fn place(path: &Path) -> (Option<&Path>, String) {
+    use unicode_normalization::UnicodeNormalization;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    (
+        path.parent(),
+        name.nfc().flat_map(char::to_lowercase).collect(),
+    )
+}
+
+/// A name beside `path` that nothing has, for it to wait under while its
+/// own new name is still taken.
+fn aside_name(path: &Path, index: usize) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    (0..1000)
+        .map(|attempt| path.with_file_name(format!(".{name}.renaming-{index}-{attempt}")))
+        .find(|aside| !exists(aside))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Moves aside, under a temporary name, each of `pairs`' first paths that
+/// is where another pair's second path is to be: so names can be swapped,
+/// or handed down a line. Returns where each first path is now, and tells
+/// `moved` of every one that stepped aside (where it is, where it was).
+fn step_aside(
+    pairs: &[(PathBuf, PathBuf)],
+    mut moved: impl FnMut(&Path, &Path),
+) -> io::Result<Vec<PathBuf>> {
+    let wanted: HashSet<(Option<&Path>, String)> = pairs.iter().map(|(_, to)| place(to)).collect();
+    let mut at = Vec::with_capacity(pairs.len());
+    for (index, (from, to)) in pairs.iter().enumerate() {
+        // A name written another way is in nobody's way but its own.
+        if wanted.contains(&place(from)) && place(from) != place(to) {
+            let aside = aside_name(from, index);
+            fs::rename(from, &aside)?;
+            moved(&aside, from);
+            at.push(aside);
+        } else {
+            at.push(from.clone());
+        }
+    }
+    Ok(at)
+}
+
 /// Whether `inner` is `outer` or inside it.
 fn is_within(inner: &Path, outer: &Path) -> bool {
     match (fs::canonicalize(inner), fs::canonicalize(outer)) {
@@ -365,6 +416,7 @@ impl Run<'_> {
             FileOp::Copy { srcs, dst, policy } => self.copy_or_move(&srcs, &dst, policy, false),
             FileOp::Move { srcs, dst, policy } => self.copy_or_move(&srcs, &dst, policy, true),
             FileOp::Duplicate(srcs) => self.duplicate(&srcs),
+            FileOp::CopyPairs { pairs, .. } => self.copy_pairs(&pairs),
             // Run by `extracting::run` and `compressing::run`.
             FileOp::Extract { .. } | FileOp::Compress { .. } => {
                 self.errors
@@ -468,6 +520,58 @@ impl Run<'_> {
         } else {
             (!self.created.is_empty()).then(|| Undo::Created(self.created.clone()))
         }
+    }
+
+    /// Copies each file to the place named for it, replacing a file already
+    /// there and making the folders it needs on the way. What replaced
+    /// nothing is undone with the rest; a folder made here is undone whole.
+    fn copy_pairs(&mut self, pairs: &[(PathBuf, PathBuf)]) -> Option<Undo> {
+        self.total = pairs
+            .iter()
+            .map(|(src, _)| src.symlink_metadata().map_or(0, |meta| meta.len()))
+            .sum();
+        self.in_bytes = true;
+        // Folders made here: what is copied into them goes when they do.
+        let mut made: HashSet<PathBuf> = HashSet::new();
+        for (src, target) in pairs {
+            if self.cancelled() {
+                break;
+            }
+            let Some(parent) = target.parent() else {
+                continue;
+            };
+            // The topmost folder that has to be made for this copy.
+            let top = parent
+                .ancestors()
+                .take_while(|dir| !exists(dir))
+                .last()
+                .map(Path::to_path_buf);
+            if let Some(top) = top {
+                if let Err(error) = fs::create_dir_all(parent) {
+                    self.fail(src, &error);
+                    continue;
+                }
+                self.touch_parent(&top);
+                // A folder made inside one made here goes with that one.
+                let in_new_folder = top.ancestors().skip(1).any(|dir| made.contains(dir));
+                if !in_new_folder && made.insert(top.clone()) {
+                    self.created.push(top);
+                }
+            }
+            let replacing = exists(target);
+            match self.copy_item(src, target) {
+                Ok(()) => {
+                    let in_new_folder = target.ancestors().skip(1).any(|dir| made.contains(dir));
+                    if !replacing && !in_new_folder {
+                        self.created.push(target.clone());
+                    }
+                }
+                Err(error) => self.fail(src, &error),
+            }
+            self.touch_parent(target);
+            self.progress(target, true);
+        }
+        (!self.created.is_empty()).then(|| Undo::Created(self.created.clone()))
     }
 
     fn move_item(&mut self, src: &Path, target: &Path, replacing: bool) -> io::Result<()> {
@@ -679,24 +783,67 @@ impl Run<'_> {
         }
     }
 
+    /// Renames every pair, as one step: all of them, or none. Names may be
+    /// swapped or handed down a line (a to b, b to c): what is in the way of
+    /// another's new name waits under a temporary one. When a rename fails,
+    /// or the operation is stopped, the renames done are taken back.
     fn rename_many(&mut self, pairs: &[(PathBuf, PathBuf)]) -> Option<Undo> {
+        let pairs: Vec<(PathBuf, PathBuf)> = pairs
+            .iter()
+            .filter(|(from, to)| from != to)
+            .cloned()
+            .collect();
         self.total = pairs.len() as u64;
-        let mut done = Vec::new();
-        for (from, to) in pairs {
-            if self.cancelled() {
-                break;
+        // Every rename done: where the item is, and where it was.
+        let mut steps: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let renamed = (|| -> io::Result<()> {
+            let at = step_aside(&pairs, |now, was| {
+                steps.push((now.to_path_buf(), was.to_path_buf()));
+            })?;
+            for ((from, to), now) in pairs.iter().zip(&at) {
+                if self.cancelled() {
+                    return Err(interrupted());
+                }
+                self.touch_parent(from);
+                self.touch_parent(to);
+                // A change of letter case only is allowed on
+                // case-insensitive disks.
+                let respelled = now == from && super::is_respelling(from, to);
+                if exists(to) && !respelled {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("{} already exists", display_name(to)),
+                    ));
+                }
+                fs::rename(now, to).map_err(|error| {
+                    io::Error::new(error.kind(), format!("{}: {error}", display_name(from)))
+                })?;
+                steps.push((to.clone(), now.clone()));
+                self.done += 1;
+                self.progress(to, false);
             }
-            if from == to {
-                continue;
+            Ok(())
+        })();
+        if let Err(error) = renamed {
+            if error.kind() != io::ErrorKind::Interrupted {
+                self.errors.push(error.to_string());
             }
-            if self.rename(from, to).is_some() {
-                // Undo moves each item from its new name back to the old one.
-                done.push((to.clone(), from.clone()));
+            // Everything back where it was, the last rename first.
+            for (now, was) in steps.into_iter().rev() {
+                if let Err(error) = fs::rename(&now, &was) {
+                    self.errors.push(format!(
+                        "{} could not be given its name back: {error}",
+                        display_name(&was)
+                    ));
+                }
             }
-            self.done += 1;
-            self.progress(to, false);
+            return None;
         }
-        (!done.is_empty()).then_some(Undo::Moves(done))
+        self.created = pairs.iter().map(|(_, to)| to.clone()).collect();
+        // Undo moves each item from its new name back to the old one.
+        let back: Vec<(PathBuf, PathBuf)> =
+            pairs.into_iter().map(|(from, to)| (to, from)).collect();
+        (!back.is_empty()).then_some(Undo::Moves(back))
     }
 
     fn create(&mut self, parent: &Path, folder: bool) -> Option<Undo> {
@@ -728,17 +875,32 @@ impl Run<'_> {
             Undo::Moves(pairs) => {
                 self.total = pairs.len() as u64;
                 let mut moved = Vec::new();
-                for (now, original) in pairs {
+                // What is where another is to go back to waits aside, so
+                // swapped names swap back.
+                let at = step_aside(&pairs, |_, _| {})
+                    .unwrap_or_else(|_| pairs.iter().map(|(now, _)| now.clone()).collect());
+                for ((now, original), at) in pairs.into_iter().zip(at) {
                     self.touch_parent(&now);
                     self.touch_parent(&original);
-                    if exists(&original) {
-                        self.errors
-                            .push(format!("{} already exists", original.display()));
-                        continue;
-                    }
-                    match self.move_item(&now, &original, false) {
+                    let respelled = at == now && super::is_respelling(&now, &original);
+                    let result = if exists(&original) && !respelled {
+                        Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "its old name is taken",
+                        ))
+                    } else {
+                        self.move_item(&at, &original, false)
+                    };
+                    match result {
                         Ok(()) => moved.push((original, now)),
-                        Err(error) => self.fail(&now, &error),
+                        Err(error) => {
+                            self.errors
+                                .push(format!("{}: {error}", display_name(&original)));
+                            // What waited aside takes its name back.
+                            if at != now {
+                                let _ = fs::rename(&at, &now);
+                            }
+                        }
                     }
                     self.done += 1;
                 }

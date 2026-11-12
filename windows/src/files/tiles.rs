@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use dirfleet_core::app::{Event, RowView};
 use windows_reactor::{
-    Border, Callback, Component, ComponentContext, HorizontalAlignment, Image, Orientation,
+    Border, Callback, Component, ComponentContext, Grid, HorizontalAlignment, Image, Orientation,
     PointerEventInfo, StackPanel, Stretch, TextAlignment, TextBlock, TextTrimming, TextWrapping,
     Thickness, TooltipExt as _, VerticalAlignment, View, ViewContext,
 };
@@ -14,10 +14,21 @@ use super::press::{DragWatch, EntryHooks, PressClaim, Presses};
 use super::row::entry_fill;
 use crate::core_link::CoreLink;
 
+/// The heading of the group that starts on a line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Heading {
+    /// The group's place among the tab's groups.
+    pub group: u32,
+    pub label: String,
+    pub count: u32,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct TileLineInput {
     pub core: CoreLink,
     pub tab: u32,
+    /// The heading that takes the line's first cell, when a group starts here.
+    pub heading: Option<Heading>,
     /// The folder position of the line's first tile.
     pub first: u32,
     /// The line's entries; `None` for one the core has not sent yet.
@@ -128,120 +139,175 @@ impl Component for TileLine {
     #[expect(clippy::too_many_lines, reason = "a tile, top to bottom")]
     fn view(&self, input: &TileLineInput, context: &mut ViewContext<Self>) -> View {
         let tile = input.tile;
-        let tiles: Vec<View> = input
-            .entries
-            .iter()
-            .zip(0..)
-            .map(|(entry, slot)| {
-                let frame = Border::new().width(tile.width).height(tile.height);
-                // The tile stands in the middle of its share of the line; the
-                // space around it belongs to the folder, not to the entry.
-                let placed = |tile_view: View| -> View {
-                    Border::new()
-                        .width(tile.cell)
-                        .height(tile.height)
-                        .content(
-                            Border::new()
-                                .horizontal_alignment(HorizontalAlignment::Center)
-                                .content(tile_view),
-                        )
-                        .into()
-                };
-                let Some(row) = entry else {
-                    return placed(frame.into());
-                };
-                let sender = context.sender();
-                let claim = self.claim.clone();
-                let watch = self.watch.clone();
-                let pressed = Callback::new(move |info: PointerEventInfo| {
-                    claim.claim(&info);
-                    watch.pressed(slot, &info);
-                    _ = sender.send(TileMessage::Pressed(slot, info));
-                });
-                let (watch, dragged) = (self.watch.clone(), context.sender());
-                let moved = move |info: PointerEventInfo| {
-                    if let Some(slot) = watch.moved(&info) {
-                        _ = dragged.send(TileMessage::Dragged(slot));
-                    }
-                };
-                let (watch, let_go) = (self.watch.clone(), context.sender());
-                let released = move |_: PointerEventInfo| {
-                    watch.released();
-                    _ = let_go.send(TileMessage::Released);
-                };
-                // Files can be dropped on a folder.
-                let frame = input
-                    .hooks
-                    .taking_drops(frame, row.is_dir, input.first + slot);
-                let mut lines = vec![
-                    Border::new()
-                        .width(tile.icon)
-                        .height(tile.icon)
-                        .horizontal_alignment(HorizontalAlignment::Center)
-                        .content(picture(row, tile.icon))
-                        .into(),
-                    TextBlock::new()
-                        .text(row.name.clone())
-                        .font_size(12.0)
-                        .text_alignment(TextAlignment::Center)
-                        .text_wrapping(TextWrapping::Wrap)
-                        .text_trimming(TextTrimming::CharacterEllipsis)
-                        .max_lines(2)
-                        .into(),
-                ];
-                if tile.detail {
-                    let detail = if row.folder.is_empty() {
-                        &row.detail
-                    } else {
-                        &row.folder
+        let heading = input
+            .heading
+            .as_ref()
+            .map(|heading| heading_cell(&self.core, self.tab, heading, tile, &self.claim));
+        let tiles: Vec<View> =
+            input
+                .entries
+                .iter()
+                .zip(0..)
+                .map(|(entry, slot)| {
+                    let frame = Border::new().width(tile.width).height(tile.height);
+                    // The tile stands in the middle of its share of the line; the
+                    // space around it belongs to the folder, not to the entry.
+                    let placed = |tile_view: View| -> View {
+                        Border::new()
+                            .width(tile.cell)
+                            .height(tile.height)
+                            .content(
+                                Border::new()
+                                    .horizontal_alignment(HorizontalAlignment::Center)
+                                    .content(tile_view),
+                            )
+                            .into()
                     };
-                    lines.push(
-                        TextBlock::new()
-                            .text(detail.clone())
-                            .font_size(11.0)
-                            .opacity(0.6)
-                            .text_alignment(TextAlignment::Center)
-                            .text_trimming(TextTrimming::CharacterEllipsis)
+                    let Some(row) = entry else {
+                        return placed(frame.into());
+                    };
+                    let sender = context.sender();
+                    let claim = self.claim.clone();
+                    let watch = self.watch.clone();
+                    let pressed = Callback::new(move |info: PointerEventInfo| {
+                        claim.claim(&info);
+                        watch.pressed(slot, &info);
+                        _ = sender.send(TileMessage::Pressed(slot, info));
+                    });
+                    let (watch, dragged) = (self.watch.clone(), context.sender());
+                    let moved = move |info: PointerEventInfo| {
+                        if let Some(slot) = watch.moved(&info) {
+                            _ = dragged.send(TileMessage::Dragged(slot));
+                        }
+                    };
+                    let (watch, let_go) = (self.watch.clone(), context.sender());
+                    let released = move |_: PointerEventInfo| {
+                        watch.released();
+                        _ = let_go.send(TileMessage::Released);
+                    };
+                    // Files can be dropped on a folder.
+                    let frame = input
+                        .hooks
+                        .taking_drops(frame, row.is_dir, input.first + slot);
+                    let mut lines = vec![
+                        Border::new()
+                            .width(tile.icon)
+                            .height(tile.icon)
+                            .horizontal_alignment(HorizontalAlignment::Center)
+                            // The picture, with the entry's tags at its foot.
+                            .content(Grid::new().children((
+                                picture(row, tile.icon),
+                                super::tag_dots(&row.tags, 9.0),
+                            )))
                             .into(),
-                    );
-                }
-                let tile_view = frame
-                    .padding(Thickness::new(4.0, 6.0, 4.0, 2.0))
-                    .corner_radius(6.0)
-                    .background(entry_fill(row.selected, self.hovered == Some(slot)))
-                    .opacity(if row.cut { 0.5 } else { 1.0 })
-                    .automation_name(row.name.clone())
-                    .on_pointer_pressed(pressed)
-                    .on_pointer_moved(moved)
-                    .on_pointer_released(released)
-                    .on_pointer_entered(
-                        context
-                            .callback(move |_: PointerEventInfo| TileMessage::Hovered(slot, true)),
-                    )
-                    .on_pointer_exited(
-                        context
-                            .callback(move |_: PointerEventInfo| TileMessage::Hovered(slot, false)),
-                    )
-                    .content(
-                        StackPanel::new()
-                            .orientation(Orientation::Vertical)
-                            .spacing(4.0)
-                            .vertical_alignment(VerticalAlignment::Top)
-                            .children(lines),
-                    );
-                placed(if row.tooltip.is_empty() {
-                    tile_view.into()
-                } else {
-                    tile_view.tooltip(&row.tooltip)
+                        TextBlock::new()
+                            .text(row.name.clone())
+                            .font_size(12.0)
+                            .text_alignment(TextAlignment::Center)
+                            .text_wrapping(TextWrapping::Wrap)
+                            .text_trimming(TextTrimming::CharacterEllipsis)
+                            .max_lines(2)
+                            .into(),
+                    ];
+                    if tile.detail {
+                        let detail = if row.folder.is_empty() {
+                            &row.detail
+                        } else {
+                            &row.folder
+                        };
+                        lines.push(
+                            TextBlock::new()
+                                .text(detail.clone())
+                                .font_size(11.0)
+                                .opacity(0.6)
+                                .text_alignment(TextAlignment::Center)
+                                .text_trimming(TextTrimming::CharacterEllipsis)
+                                .into(),
+                        );
+                    }
+                    let tile_view =
+                        frame
+                            .padding(Thickness::new(4.0, 6.0, 4.0, 2.0))
+                            .corner_radius(6.0)
+                            .background(entry_fill(row.selected, self.hovered == Some(slot)))
+                            .opacity(if row.cut { 0.5 } else { 1.0 })
+                            .automation_name(row.name.clone())
+                            .on_pointer_pressed(pressed)
+                            .on_pointer_moved(moved)
+                            .on_pointer_released(released)
+                            .on_pointer_entered(context.callback(move |_: PointerEventInfo| {
+                                TileMessage::Hovered(slot, true)
+                            }))
+                            .on_pointer_exited(context.callback(move |_: PointerEventInfo| {
+                                TileMessage::Hovered(slot, false)
+                            }))
+                            .content(
+                                StackPanel::new()
+                                    .orientation(Orientation::Vertical)
+                                    .spacing(4.0)
+                                    .vertical_alignment(VerticalAlignment::Top)
+                                    .children(lines),
+                            );
+                    placed(if row.tooltip.is_empty() {
+                        tile_view.into()
+                    } else {
+                        tile_view.tooltip(&row.tooltip)
+                    })
                 })
-            })
-            .collect();
+                .collect();
         StackPanel::new()
             .orientation(Orientation::Horizontal)
             .height(tile.height)
-            .children(tiles)
+            .children(heading.into_iter().chain(tiles).collect::<Vec<View>>())
             .into()
     }
+}
+
+/// The cell a group's heading takes at the start of the group's first line:
+/// its name and how many it holds, beside a rule. A press selects the group.
+fn heading_cell(
+    core: &CoreLink,
+    tab: u32,
+    heading: &Heading,
+    tile: Tile,
+    claim: &PressClaim,
+) -> View {
+    let (core, claim, group) = (core.clone(), claim.clone(), heading.group);
+    Border::new()
+        .width(tile.cell)
+        .height(tile.height)
+        .padding(Thickness::new(10.0, 6.0, 10.0, 6.0))
+        // Transparent, not absent, so the whole cell takes the pointer.
+        .background(windows_reactor::Color::transparent())
+        .border_brush(crate::theme::stroke())
+        .border_thickness(Thickness::new(0.0, 0.0, 1.0, 0.0))
+        .automation_name(format!("{}, {}", heading.label, heading.count))
+        .on_pointer_pressed(move |info: PointerEventInfo| {
+            // Not a press on empty space, which would clear the selection.
+            claim.claim(&info);
+            if info.is_left_button_pressed {
+                core.send(Event::SelectGroup { tab, group });
+            }
+        })
+        .content(
+            StackPanel::new()
+                .orientation(Orientation::Vertical)
+                .spacing(2.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .children((
+                    TextBlock::new()
+                        .text(heading.label.clone())
+                        .font_size(13.0)
+                        .text_wrapping(TextWrapping::Wrap)
+                        .text_trimming(TextTrimming::CharacterEllipsis)
+                        .max_lines(3),
+                    TextBlock::new()
+                        .text(heading.count.to_string())
+                        .font_size(11.0)
+                        .opacity(0.6),
+                )),
+        )
+        .into()
 }
 
 /// What a tile shows of its entry: the playing preview, the thumbnail, or the icon.

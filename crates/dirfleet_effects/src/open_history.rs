@@ -30,6 +30,9 @@ pub struct OpenRecord {
 pub struct OpenHistory {
     by_dir: RwLock<HashMap<PathBuf, HashMap<String, OpenRecord>>>,
     file: Option<PathBuf>,
+    /// The tags kept beside the history: whoever orders a listing has
+    /// both at hand.
+    tags: std::sync::OnceLock<std::sync::Arc<crate::tags::TagStore>>,
 }
 
 /// The folder (as listings name it, symlinks resolved) and the name.
@@ -64,7 +67,13 @@ impl OpenHistory {
         Self {
             by_dir: RwLock::new(by_dir),
             file,
+            tags: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Keeps the tags beside the history, once.
+    pub fn attach_tags(&self, tags: std::sync::Arc<crate::tags::TagStore>) {
+        let _ = self.tags.set(tags);
     }
 
     pub fn get(&self, path: &Path) -> Option<OpenRecord> {
@@ -197,6 +206,10 @@ fn trim(by_dir: &mut HashMap<PathBuf, HashMap<String, OpenRecord>>) {
 }
 
 impl OpeningHistory for OpenHistory {
+    fn tags(&self) -> Option<std::sync::Arc<crate::tags::TagStore>> {
+        self.tags.get().cloned()
+    }
+
     /// `(times opened, last opened)` for each entry; last opened is the later
     /// of the recorded open and the file system's access time.
     fn keys(&self, listing: &Listing) -> Vec<(u32, u32)> {

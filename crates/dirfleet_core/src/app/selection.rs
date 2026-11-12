@@ -38,7 +38,7 @@ struct Memo {
 
 /// The selection's revision and the listing it selects from: rows keep
 /// their positions only while both stay.
-type Stamp = (u64, usize, usize);
+pub(super) type Stamp = (u64, usize, usize);
 
 impl Deref for Tracked {
     type Target = Selection;
@@ -198,7 +198,7 @@ impl Tab {
     }
 
     /// What the selection's derivations depend on.
-    fn selection_stamp(&self) -> Stamp {
+    pub(super) fn selection_stamp(&self) -> Stamp {
         (
             self.selection.revision,
             Arc::as_ptr(&self.listing) as usize,
@@ -299,7 +299,7 @@ impl Tab {
     /// place among them. With one or no item selected, the rows around the
     /// cursor, so Quick Look's arrows step through the folder.
     pub(super) fn selected_paths(&self) -> (Vec<String>, usize) {
-        if self.path.is_none() && !self.trash {
+        if self.path.is_none() && !self.trash && self.results.is_none() {
             return (Vec::new(), 0);
         }
         let path = |row: usize| {

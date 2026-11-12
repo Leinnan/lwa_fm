@@ -7,7 +7,8 @@
 
 pub mod manifest;
 pub mod permissions;
-pub mod shortcut;
+/// Where shortcuts are read: the app's commands use them too.
+pub use crate::shortcut;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

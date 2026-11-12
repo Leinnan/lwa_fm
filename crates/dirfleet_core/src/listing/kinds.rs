@@ -20,6 +20,11 @@ pub const VIDEO_EXTS: &[&str] = &[
     "mp4", "mov", "mkv", "avi", "webm", "wmv", "flv", "m4v", "3gp", "ogv",
 ];
 
+/// Sounds: no picture, but they play for some time.
+pub const AUDIO_EXTS: &[&str] = &[
+    "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", "aiff",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
     Image,
@@ -53,6 +58,13 @@ pub fn media_kind(path: &Path) -> Option<MediaKind> {
     } else {
         None
     }
+}
+
+/// Whether a file name or path is a sound's, by its extension.
+pub fn is_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| is_one_of(ext, AUDIO_EXTS))
 }
 
 /// What a file is, for the Kind column: "Folder", "Application", "PNG
@@ -101,5 +113,7 @@ mod tests {
         assert_eq!(media_kind(Path::new("photo.avif")), system);
         assert_eq!(media_kind(Path::new("IMG_0162.HEIC")), system);
         assert_eq!(media_kind(Path::new("notes")), None);
+        assert!(super::is_audio(Path::new("a/Song.FLAC")));
+        assert!(!super::is_audio(Path::new("clip.mkv")));
     }
 }

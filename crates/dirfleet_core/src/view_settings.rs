@@ -42,6 +42,41 @@ impl Sort {
     }
 }
 
+/// What the entries of a folder are put into groups by, each group under a
+/// heading of its own.
+#[derive(Facet, Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
+#[repr(C)]
+pub enum GroupBy {
+    #[default]
+    None,
+    Kind,
+    /// How long ago the entry last changed.
+    Modified,
+    Size,
+    /// The first letter of the name.
+    Name,
+}
+
+impl GroupBy {
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Kind,
+        Self::Modified,
+        Self::Size,
+        Self::Name,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Kind => "Kind",
+            Self::Modified => "Date modified",
+            Self::Size => "Size",
+            Self::Name => "Name",
+        }
+    }
+}
+
 #[derive(Facet, Deserialize, Serialize, Default, PartialEq, Eq, Debug, Clone, Copy)]
 #[repr(C)]
 pub enum DisplayType {

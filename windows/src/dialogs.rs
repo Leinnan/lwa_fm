@@ -4,8 +4,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use dirfleet_core::app::{
-    BatchFields, BatchMode, BatchRenameView, CompressView, ConflictChoice, ConflictView,
-    ConnectFields, ConnectView, Event, GoToView, PaletteTarget, Secret, TabViewModel, ViewModel,
+    CompressView, ConflictChoice, ConflictView, ConnectFields, ConnectView, Event, GoToView,
+    PaletteTarget, Secret, SelectPatternView, SyncAsk, TabViewModel, TagColor, TagDraftView,
+    ViewModel,
 };
 use dirfleet_core::location::Scheme;
 use windows_reactor::{
@@ -44,6 +45,65 @@ pub enum Asking {
     SaveSearch,
     /// The editor of a saved search; the window holds the draft.
     EditSearch,
+}
+
+/// Among duplicates: what removing the selection would cost, when every
+/// copy of some file is selected.
+pub fn no_copy_left(tab: &TabViewModel) -> Option<String> {
+    match tab.results.as_ref().map_or(0, |results| results.whole_sets) {
+        0 => None,
+        1 => Some("Every copy of one file is selected: no copy of it will be left.".to_owned()),
+        files => Some(format!(
+            "Every copy of {files} files is selected: no copy of those will be left."
+        )),
+    }
+}
+
+/// The question a tab of compared folders waits on before it replaces
+/// files.
+fn sync_asked(tab: &TabViewModel) -> Option<&SyncAsk> {
+    tab.results.as_ref()?.compare.as_ref()?.asking.as_ref()
+}
+
+fn files(count: u32) -> String {
+    if count == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{count} files")
+    }
+}
+
+/// "Replace 3 files in “b”?"
+pub fn sync_title(ask: &SyncAsk) -> String {
+    format!(
+        "Replace {} in \u{201c}{}\u{201d}?",
+        files(ask.count.replaces),
+        ask.into
+    )
+}
+
+/// What the copy would do, and that a replaced file does not come back.
+pub fn sync_text(ask: &SyncAsk) -> String {
+    let count = ask.count;
+    let newer = match (count.newer, count.replaces) {
+        (0, _) => String::new(),
+        (1, 1) => ", though it is newer than its replacement".to_owned(),
+        (1, _) => ", 1 of them newer than its replacement".to_owned(),
+        (newer, _) => format!(", {newer} of them newer than their replacements"),
+    };
+    format!(
+        "{} will be copied from \u{201c}{}\u{201d}. {} already in \u{201c}{}\u{201d} will be \
+         replaced{newer}.\n\nA replaced file cannot be brought back with Undo.",
+        files(count.copies),
+        ask.from,
+        files(count.replaces),
+        ask.into
+    )
+}
+
+/// `text` after `warning`, when there is one.
+fn with_warning(warning: Option<String>, text: &str) -> String {
+    warning.map_or_else(|| text.to_owned(), |warning| format!("{warning}\n\n{text}"))
 }
 
 /// What decides which of the app's dialogs a window shows.
@@ -360,6 +420,8 @@ pub enum Dialog {
     HostKey,
     /// Connecting to a server.
     Connect,
+    /// Making a tag, or changing one.
+    TagEdit,
     Ask(Asking),
     /// The command palette.
     Palette,
@@ -375,8 +437,13 @@ pub enum Dialog {
     Batch,
     /// Naming the archive to make of the selection, in the focused tab.
     Compress,
+    /// Copying between compared folders would replace files, in the
+    /// focused tab.
+    Sync,
     /// Go to Folder, in the focused tab.
     GoTo,
+    /// Select by Pattern, in the focused tab.
+    SelectPattern,
 }
 
 impl Dialog {
@@ -401,6 +468,8 @@ impl Dialog {
             Self::HostKey
         } else if here.leads && shared.connect.is_some() {
             Self::Connect
+        } else if here.leads && shared.tag_draft.is_some() {
+            Self::TagEdit
         } else if here.palette && shared.palette.is_some() {
             Self::Palette
         } else if shared
@@ -425,8 +494,12 @@ impl Dialog {
             Self::Batch
         } else if tab.compress.is_some() {
             Self::Compress
+        } else if sync_asked(tab).is_some() {
+            Self::Sync
         } else if tab.goto.is_some() {
             Self::GoTo
+        } else if tab.select_pattern.is_some() {
+            Self::SelectPattern
         } else {
             Self::None
         };
@@ -437,12 +510,24 @@ impl Dialog {
     /// what the whole app asks comes first, a tab's dialog last.
     pub const fn with(self, asking: Option<Asking>) -> Self {
         match (self, asking) {
-            (Self::None | Self::GoTo | Self::Batch | Self::Compress, Some(Asking::Plugin)) => {
-                Self::PluginConfirm
-            }
-            (Self::None | Self::GoTo | Self::Batch | Self::Compress, Some(asking)) => {
-                Self::Ask(asking)
-            }
+            (
+                Self::None
+                | Self::GoTo
+                | Self::Batch
+                | Self::Compress
+                | Self::Sync
+                | Self::SelectPattern,
+                Some(Asking::Plugin),
+            ) => Self::PluginConfirm,
+            (
+                Self::None
+                | Self::GoTo
+                | Self::Batch
+                | Self::Compress
+                | Self::Sync
+                | Self::SelectPattern,
+                Some(asking),
+            ) => Self::Ask(asking),
             (dialog, _) => dialog,
         }
     }
@@ -471,10 +556,11 @@ impl Dialog {
         let confirmed = result == ContentDialogResult::Primary;
         let event = match self {
             // The window acts on a drop's answer: it holds what was dropped.
+            // Closing the shortcuts ends whatever was being recorded or asked.
+            Self::Ask(Asking::Shortcuts) => Event::CancelShortcut,
             Self::None
             | Self::Ask(
                 Asking::Drop(_)
-                | Asking::Shortcuts
                 | Asking::Settings
                 | Asking::Plugin
                 | Asking::SaveSearch
@@ -503,6 +589,8 @@ impl Dialog {
                     _ => ConflictChoice::Cancel,
                 },
             },
+            Self::TagEdit if confirmed => Event::ApplyTagDraft,
+            Self::TagEdit => Event::CancelTagDraft,
             Self::Eject if confirmed => Event::ConfirmEject,
             Self::Eject => Event::CancelEject,
             Self::HostKey => Event::AcceptHostKey { accept: confirmed },
@@ -527,8 +615,22 @@ impl Dialog {
             Self::Batch => Event::CancelBatchRename { tab },
             Self::Compress if confirmed => Event::ApplyCompress { tab },
             Self::Compress => Event::CancelCompress { tab },
+            Self::Sync => Event::AnswerSync {
+                tab,
+                choice: match result {
+                    ContentDialogResult::Primary => ConflictChoice::Replace,
+                    ContentDialogResult::Secondary => ConflictChoice::Skip,
+                    // Closed without an answer: nothing is copied.
+                    _ => ConflictChoice::Cancel,
+                },
+            },
             Self::GoTo if confirmed => Event::GoToSubmit { tab, path: None },
             Self::GoTo => Event::CloseGoTo { tab },
+            Self::SelectPattern => match result {
+                ContentDialogResult::Primary => Event::ApplySelectPattern { tab, select: true },
+                ContentDialogResult::Secondary => Event::ApplySelectPattern { tab, select: false },
+                _ => Event::CloseSelectPattern { tab },
+            },
         };
         core.send(event);
     }
@@ -646,13 +748,50 @@ impl Dialog {
                     archive_password(ask.is_some_and(|ask| ask.wrong)),
                 )
             }
+            Self::TagEdit => {
+                let draft = shared.tag_draft.as_ref();
+                (
+                    dialog
+                        .title(if draft.is_some_and(|draft| draft.id.is_some()) {
+                            "Edit Tag"
+                        } else {
+                            "New Tag"
+                        })
+                        .primary_button_text("Save")
+                        .close_button_text("Cancel")
+                        .default_button(ContentDialogButton::Primary),
+                    draft.map_or_else(|| Border::new().into(), |draft| tag_editor(core, draft)),
+                )
+            }
+            Self::Sync => {
+                let ask = sync_asked(tab);
+                let dialog = dialog
+                    .title(ask.map_or_else(String::new, sync_title))
+                    .primary_button_text("Replace")
+                    .close_button_text("Cancel")
+                    .default_button(ContentDialogButton::Close);
+                // Skipping is a choice only where some files replace none.
+                let dialog = if ask.is_some_and(|ask| ask.count.copies > ask.count.replaces) {
+                    dialog.secondary_button_text("Skip Those")
+                } else {
+                    dialog
+                };
+                (dialog, text(&ask.map_or_else(String::new, sync_text)))
+            }
             Self::Ask(Asking::Trash) => (
                 dialog
                     .title(format!("Move {items} to the {bin}?"))
                     .primary_button_text(format!("Move to {bin}"))
                     .close_button_text("Cancel")
-                    .default_button(ContentDialogButton::Primary),
-                text(&format!("You can take them back out of the {bin}.")),
+                    .default_button(if no_copy_left(tab).is_some() {
+                        ContentDialogButton::Close
+                    } else {
+                        ContentDialogButton::Primary
+                    }),
+                text(&with_warning(
+                    no_copy_left(tab),
+                    &format!("You can take them back out of the {bin}."),
+                )),
             ),
             Self::Ask(Asking::Delete) => (
                 dialog
@@ -660,7 +799,7 @@ impl Dialog {
                     .primary_button_text("Delete")
                     .close_button_text("Cancel")
                     .default_button(ContentDialogButton::Close),
-                text("This cannot be undone."),
+                text(&with_warning(no_copy_left(tab), "This cannot be undone.")),
             ),
             Self::Ask(Asking::EmptyTrash) => (
                 dialog
@@ -687,7 +826,7 @@ impl Dialog {
                 dialog
                     .title("Keyboard Shortcuts")
                     .close_button_text("Close"),
-                sheets::shortcuts(shared),
+                sheets::shortcuts(core, shared),
             ),
             Self::Ask(Asking::Settings) => (
                 dialog.title("Settings").close_button_text("Done"),
@@ -818,7 +957,7 @@ impl Dialog {
                         .default_button(ContentDialogButton::Primary),
                     batch.map_or_else(
                         || Border::new().into(),
-                        |batch| batch_rename(core, tab.id, batch),
+                        |batch| crate::batch::dialog(core, tab.id, batch),
                     ),
                 )
             }
@@ -831,6 +970,18 @@ impl Dialog {
                 tab.goto
                     .as_ref()
                     .map_or_else(|| Border::new().into(), |goto| go_to(core, tab.id, goto)),
+            ),
+            Self::SelectPattern => (
+                dialog
+                    .title("Select by Pattern")
+                    .primary_button_text("Select")
+                    .secondary_button_text("Deselect")
+                    .close_button_text("Cancel")
+                    .default_button(ContentDialogButton::Primary),
+                tab.select_pattern.as_ref().map_or_else(
+                    || Border::new().into(),
+                    |pattern| select_pattern(core, tab.id, pattern),
+                ),
             ),
         };
         // What is asked changes; the border it sits in does not.
@@ -878,148 +1029,117 @@ fn keep_both(core: &CoreLink, conflict: &ConflictView) -> View {
         .into()
 }
 
-/// Renaming several items: how the new names are made, and what they come to.
-#[expect(clippy::too_many_lines, reason = "the dialog's lines, top to bottom")]
-fn batch_rename(core: &CoreLink, tab: u32, batch: &BatchRenameView) -> View {
-    let fields = &batch.fields;
-    // Every edit sends all the fields, changed in one place.
-    let edit = |change: fn(&mut BatchFields, String)| {
-        let core = core.clone();
-        let fields = fields.clone();
+/// The tag editor: the tag's name, its colour, and why it can't be kept
+/// as it is.
+fn tag_editor(core: &CoreLink, draft: &TagDraftView) -> View {
+    let typed = {
+        let (core, color) = (core.clone(), draft.color);
         Callback::new(move |text: Rc<str>| {
-            let mut fields = fields.clone();
-            change(&mut fields, text.to_string());
-            core.send(Event::SetBatchRename { tab, fields });
+            core.send(Event::SetTagDraft {
+                name: text.to_string(),
+                color,
+            });
         })
     };
-    let mode = |label: &str, mode: BatchMode| {
-        let core = core.clone();
-        let fields = BatchFields {
-            mode,
-            ..fields.clone()
-        };
-        Button::new()
-            .content(label)
-            .style(if batch.fields.mode == mode {
-                ButtonStyle::Accent
-            } else {
-                ButtonStyle::Default
-            })
-            .on_click(move || {
-                core.send(Event::SetBatchRename {
-                    tab,
-                    fields: fields.clone(),
-                });
-            })
-    };
-    let mut lines: Vec<View> = vec![
-        StackPanel::new()
-            .orientation(Orientation::Horizontal)
-            .spacing(8.0)
-            .children((
-                mode("Replace text", BatchMode::Replace),
-                mode("Name by pattern", BatchMode::Pattern),
-            ))
-            .into(),
-    ];
-    match fields.mode {
-        BatchMode::Replace => {
-            lines.push(
-                TextBox::new()
-                    .text(fields.find.clone())
-                    .placeholder_text("Find")
-                    .on_text_changed(edit(|fields, text| fields.find = text))
-                    .into(),
-            );
-            lines.push(
-                TextBox::new()
-                    .text(fields.replace.clone())
-                    .placeholder_text("Replace with")
-                    .on_text_changed(edit(|fields, text| fields.replace = text))
-                    .into(),
-            );
-        }
-        BatchMode::Pattern => {
-            lines.push(
-                TextBox::new()
-                    .automation_name("Pattern")
-                    .text(fields.pattern.clone())
-                    .placeholder_text("{name} {n}{ext}")
-                    .on_text_changed(edit(|fields, text| fields.pattern = text))
-                    .into(),
-            );
-            lines.push(
-                TextBox::new()
-                    .text(fields.start.to_string())
-                    .placeholder_text("First number")
-                    .on_text_changed(edit(|fields, text| {
-                        if let Ok(start) = text.trim().parse() {
-                            fields.start = start;
-                        }
-                    }))
-                    .into(),
-            );
-        }
-    }
-    lines.push(
-        TextBlock::new()
-            .text(if batch.problems > 0 {
-                format!("{} names can't be used", batch.problems)
-            } else {
-                format!("{} of {} names change", batch.changes, batch.items.len())
-            })
-            .font_size(12.0)
-            .opacity(0.7)
-            .into(),
-    );
-    // A long selection is shown by its beginning; all of it is renamed.
-    let preview: Vec<View> = batch
-        .items
-        .iter()
-        .take(200)
-        .map(|item| {
-            let refused = !item.problem.is_empty();
-            let new = TextBlock::new()
-                .text(if refused {
-                    format!("{} ({})", item.new, item.problem)
+    let colors: Vec<View> = TagColor::ALL
+        .into_iter()
+        .map(|color| {
+            let (core, name) = (core.clone(), draft.name.clone());
+            Button::new()
+                .style(if color == draft.color {
+                    ButtonStyle::Accent
                 } else {
-                    item.new.clone()
+                    ButtonStyle::Subtle
                 })
-                .font_size(12.0);
-            StackPanel::new()
-                .orientation(Orientation::Horizontal)
-                .spacing(8.0)
-                .children((
-                    TextBlock::new()
-                        .text(item.old.clone())
-                        .font_size(12.0)
-                        .opacity(0.6),
-                    TextBlock::new().text("→").font_size(12.0).opacity(0.6),
-                    if refused {
-                        new.foreground(Color::rgb(0xE0, 0x50, 0x50))
-                    } else {
-                        new
-                    },
-                ))
+                .automation_name(color.label())
+                .content(
+                    Border::new()
+                        .width(16.0)
+                        .height(16.0)
+                        .corner_radius(8.0)
+                        .background(theme::tag_color(color)),
+                )
+                .on_click(move || {
+                    core.send(Event::SetTagDraft {
+                        name: name.clone(),
+                        color,
+                    });
+                })
                 .into()
         })
         .collect();
-    lines.push(
-        ScrollViewer::new()
-            .max_height(260.0)
-            .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
-            .content(
-                StackPanel::new()
-                    .orientation(Orientation::Vertical)
-                    .spacing(2.0)
-                    .children(preview),
-            )
+    let mut lines: Vec<View> = vec![
+        TextBox::new()
+            .automation_name("Name")
+            .text(draft.name.clone())
+            .placeholder_text("Name")
+            .on_text_changed(typed)
             .into(),
-    );
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(4.0)
+            .children(colors)
+            .into(),
+    ];
+    // Nothing is said of an empty name until one is typed.
+    if !draft.problem.is_empty() && !draft.name.trim().is_empty() {
+        lines.push(
+            TextBlock::new()
+                .text(draft.problem.clone())
+                .foreground(Color::rgb(0xE0, 0x50, 0x50))
+                .text_wrapping(TextWrapping::Wrap)
+                .into(),
+        );
+    }
+    StackPanel::new()
+        .orientation(Orientation::Vertical)
+        .spacing(10.0)
+        .children(lines)
+        .into()
+}
+
+/// What the Select by Pattern dialog says under its field: what is wrong
+/// with the pattern, or how many items it matches.
+pub fn pattern_note(pattern: &SelectPatternView) -> String {
+    if !pattern.error.is_empty() {
+        return pattern.error.clone();
+    }
+    match (pattern.text.trim().is_empty(), pattern.matches) {
+        (true, _) => "Written as a search is: *.jpg, ext:png, kind:image, size:>1mb".to_owned(),
+        (false, 0) => "Nothing here matches".to_owned(),
+        (false, 1) => "1 item matches".to_owned(),
+        (false, matches) => format!("{matches} items match"),
+    }
+}
+
+fn select_pattern(core: &CoreLink, tab: u32, pattern: &SelectPatternView) -> View {
+    let typed = {
+        let core = core.clone();
+        Callback::new(move |text: Rc<str>| {
+            core.send(Event::SetSelectPattern {
+                tab,
+                text: text.to_string(),
+            });
+        })
+    };
+    let note = TextBlock::new()
+        .text(pattern_note(pattern))
+        .text_wrapping(TextWrapping::Wrap);
+    let note = if pattern.error.is_empty() {
+        note.opacity(0.7)
+    } else {
+        note.foreground(Color::rgb(0xE0, 0x50, 0x50))
+    };
     StackPanel::new()
         .orientation(Orientation::Vertical)
         .spacing(8.0)
-        .children(lines)
+        .children((
+            TextBox::new()
+                .text(pattern.text.clone())
+                .placeholder_text("*.jpg")
+                .on_text_changed(typed),
+            note,
+        ))
         .into()
 }
 
@@ -1108,6 +1228,117 @@ mod tests {
         palette: true,
         tabs: &[],
     };
+
+    #[test]
+    fn deleting_every_copy_of_a_file_is_warned_of() {
+        let mut tab = TabViewModel::default();
+        assert_eq!(no_copy_left(&tab), None);
+        let mut results = dirfleet_core::app::ResultsView::default();
+        tab.results = Some(results.clone());
+        assert_eq!(no_copy_left(&tab), None, "a copy of each is kept");
+        results.whole_sets = 1;
+        tab.results = Some(results.clone());
+        assert_eq!(
+            with_warning(no_copy_left(&tab), "This cannot be undone."),
+            "Every copy of one file is selected: no copy of it will be left.\n\nThis cannot \
+             be undone."
+        );
+        results.whole_sets = 3;
+        tab.results = Some(results);
+        assert_eq!(
+            no_copy_left(&tab).as_deref(),
+            Some("Every copy of 3 files is selected: no copy of those will be left.")
+        );
+        assert_eq!(with_warning(None, "As it was."), "As it was.");
+    }
+
+    #[test]
+    fn replacing_files_between_compared_folders_is_asked_about() {
+        use dirfleet_core::app::{CompareView, ResultsView, SyncCount};
+        let asking = |copies, replaces, newer| SyncAsk {
+            to_left: false,
+            from: "a".to_owned(),
+            into: "b".to_owned(),
+            count: SyncCount {
+                copies,
+                replaces,
+                newer,
+            },
+        };
+        assert_eq!(
+            sync_title(&asking(5, 3, 0)),
+            "Replace 3 files in \u{201c}b\u{201d}?"
+        );
+        assert_eq!(
+            sync_text(&asking(5, 3, 0)),
+            "5 files will be copied from \u{201c}a\u{201d}. 3 files already in \
+             \u{201c}b\u{201d} will be replaced.\n\nA replaced file cannot be brought back \
+             with Undo."
+        );
+        assert!(sync_text(&asking(5, 3, 2)).contains("replaced, 2 of them newer than their"));
+        assert!(sync_text(&asking(5, 3, 1)).contains("replaced, 1 of them newer than its"));
+        assert_eq!(
+            sync_title(&asking(1, 1, 1)),
+            "Replace 1 file in \u{201c}b\u{201d}?"
+        );
+        assert!(sync_text(&asking(1, 1, 1)).contains("replaced, though it is newer than its"));
+
+        // The question shows in the window whose tab asks it.
+        let shared = ViewModel::default();
+        let tab = TabViewModel {
+            results: Some(ResultsView {
+                compare: Some(CompareView {
+                    asking: Some(asking(5, 3, 0)),
+                    ..CompareView::default()
+                }),
+                ..ResultsView::default()
+            }),
+            ..TabViewModel::default()
+        };
+        let here = Here {
+            leads: true,
+            palette: false,
+            tabs: &[],
+        };
+        assert_eq!(Dialog::of(&shared, &tab, &here, None), Dialog::Sync);
+        assert_eq!(
+            Dialog::of(&shared, &TabViewModel::default(), &here, None),
+            Dialog::None
+        );
+    }
+
+    #[test]
+    fn the_pattern_dialog_says_what_matches_or_what_is_wrong() {
+        let pattern = |text: &str, matches, error: &str| SelectPatternView {
+            text: text.to_owned(),
+            matches,
+            error: error.to_owned(),
+        };
+        assert!(pattern_note(&pattern("", 0, "")).starts_with("Written as a search is"));
+        assert_eq!(
+            pattern_note(&pattern("*.jpg", 0, "")),
+            "Nothing here matches"
+        );
+        assert_eq!(pattern_note(&pattern("*.jpg", 1, "")), "1 item matches");
+        assert_eq!(pattern_note(&pattern("*.jpg", 12, "")), "12 items match");
+        assert_eq!(pattern_note(&pattern("/[/", 0, "unclosed")), "unclosed");
+
+        // The dialog shows in the window whose tab asks for it.
+        let shared = ViewModel::default();
+        let tab = TabViewModel {
+            select_pattern: Some(pattern("*.jpg", 2, "")),
+            ..TabViewModel::default()
+        };
+        let here = Here {
+            leads: true,
+            palette: false,
+            tabs: &[],
+        };
+        assert_eq!(
+            Dialog::of(&shared, &tab, &here, None),
+            Dialog::SelectPattern
+        );
+    }
 
     #[test]
     fn the_whole_apps_question_comes_before_a_tabs() {

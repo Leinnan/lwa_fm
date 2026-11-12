@@ -7,6 +7,8 @@
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod batch;
+#[cfg(windows)]
 mod commands;
 #[cfg(windows)]
 mod core_link;
@@ -40,6 +42,8 @@ mod plugins;
 mod popup;
 #[cfg(windows)]
 mod preview;
+#[cfg(windows)]
+mod results;
 #[cfg(windows)]
 mod saved;
 #[cfg(windows)]

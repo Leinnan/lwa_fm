@@ -277,6 +277,8 @@ pub fn moved(before: &[u32], after: &[u32]) -> Option<(u32, usize, u32)> {
 fn content(input: &PaneInput, find: View, left_search: u32) -> View {
     let tab = &input.pane.tab;
     let chips = search::chips(&input.core, tab).unwrap_or_else(|| Border::new().into());
+    // What a scan found has its bar under the filters.
+    let found = crate::results::bar(&input.core, tab).unwrap_or_else(|| Border::new().into());
     Grid::new()
         .rows([
             GridLength::Auto,
@@ -287,7 +289,10 @@ fn content(input: &PaneInput, find: View, left_search: u32) -> View {
         ])
         .children((
             header(input, find),
-            Border::new().grid_row(1).content(chips),
+            StackPanel::new()
+                .grid_row(1)
+                .orientation(Orientation::Vertical)
+                .children((chips, found)),
             Border::new().grid_row(2).content(body(input, left_search)),
             Border::new()
                 .grid_row(3)
@@ -313,7 +318,8 @@ fn header(input: &PaneInput, find: View) -> Border {
             .tooltip(name)
     };
     let mut busy: Vec<View> = Vec::new();
-    if !tab.progress.is_empty() {
+    // A scan's progress is on its own bar, under the header.
+    if !tab.progress.is_empty() && tab.results.is_none() {
         busy.push(
             TextBlock::new()
                 .text(tab.progress.clone())
@@ -457,6 +463,7 @@ fn body(input: &PaneInput, left_search: u32) -> View {
         view: tab.view,
         icon_size: input.icon_size,
         show_folder: tab.show_folder,
+        show_match: tab.show_match,
         shortcuts: Rc::clone(&input.shortcuts),
         on_command: input.on_command.clone(),
         on_menu: input.on_menu.clone(),
@@ -470,6 +477,12 @@ fn body(input: &PaneInput, left_search: u32) -> View {
 const fn empty_title(tab: &TabViewModel) -> &'static str {
     if tab.search.is_some() {
         "No results"
+    } else if let Some(results) = &tab.results {
+        if results.compare.is_some() {
+            "No differences to show"
+        } else {
+            "No duplicates to show"
+        }
     } else if tab.in_trash {
         "The Recycle Bin is empty"
     } else {

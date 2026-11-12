@@ -24,10 +24,11 @@ pub struct Hooks<'a> {
 
 /// The menu a right click on `item` asks for.
 fn menu_of(item: &SidebarItem) -> SidebarMenu {
-    match item.saved_search {
-        Some(id) => SidebarMenu::Saved(id),
-        None if item.trash => SidebarMenu::Bin,
-        None => SidebarMenu::Place(item.path.clone()),
+    match (item.saved_search, item.tag) {
+        (Some(id), _) => SidebarMenu::Saved(id),
+        (None, Some(tag)) => SidebarMenu::Tag(tag),
+        (None, None) if item.trash => SidebarMenu::Bin,
+        (None, None) => SidebarMenu::Place(item.path.clone()),
     }
 }
 
@@ -50,11 +51,16 @@ const fn icon_glyph(icon: SidebarIcon) -> &'static str {
         SidebarIcon::Drive(DriveKind::Network) => "\u{E968}",
         SidebarIcon::Drive(DriveKind::Optical) => "\u{E958}",
         SidebarIcon::Drive(DriveKind::Fixed | DriveKind::Virtual) => "\u{EDA2}",
+        // A filled circle, drawn in the tag's colour.
+        SidebarIcon::Tag(_) => "\u{E91F}",
     }
 }
 
 /// What choosing `item` tells the core, in tab `tab`.
 fn chosen(item: &SidebarItem, tab: u32) -> Event {
+    if let Some(tag) = item.tag {
+        return Event::OpenTag { tab, tag };
+    }
     item.saved_search.map_or_else(
         || {
             if item.trash {
@@ -154,7 +160,7 @@ fn frame(tab: u32, item: &SidebarItem, fill: Brush, hooks: Hooks<'_>) -> Border 
         .background(fill)
         .on_pointer_pressed(asked);
     // Files can be dropped on a folder, a drive or the Recycle Bin.
-    if item.saved_search.is_some() {
+    if item.saved_search.is_some() || item.tag.is_some() {
         frame
     } else {
         let on_drop = hooks.on_drop.clone();
@@ -210,7 +216,11 @@ fn row(core: &CoreLink, tab: u32, item: &SidebarItem, hooks: Hooks<'_>) -> View 
                 .columns([GridLength::Pixel(20.0), GridLength::STAR])
                 .column_spacing(8.0)
                 .children((
-                    glyph(icon_glyph(item.icon), 14.0),
+                    match item.icon {
+                        SidebarIcon::Tag(color) => glyph(icon_glyph(item.icon), 11.0)
+                            .foreground(crate::theme::tag_color(color)),
+                        icon => glyph(icon_glyph(icon), 14.0),
+                    },
                     StackPanel::new()
                         .grid_column(1)
                         .orientation(Orientation::Vertical)
@@ -285,7 +295,20 @@ mod tests {
             used_permille: None,
             eject: None,
             saved_search: None,
+            tag: None,
         }
+    }
+
+    #[test]
+    fn a_tag_shows_its_items_and_has_a_menu_of_its_own() {
+        let tag = SidebarItem {
+            path: String::new(),
+            icon: SidebarIcon::Tag(dirfleet_core::app::TagColor::Green),
+            tag: Some(4),
+            ..item()
+        };
+        assert_eq!(chosen(&tag, 7), Event::OpenTag { tab: 7, tag: 4 });
+        assert_eq!(menu_of(&tag), SidebarMenu::Tag(4));
     }
 
     #[test]
